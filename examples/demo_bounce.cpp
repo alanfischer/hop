@@ -31,6 +31,8 @@ std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T>& sim, const hop::aa_b
 	return wall;
 }
 
+static const char* capture_dir = nullptr;
+
 template<typename T>
 void run() {
 	using tr = hop::scalar_traits<T>;
@@ -127,14 +129,18 @@ void run() {
 	sim.add_solid(capsule_solid);
 
 	// Raylib window
-	InitWindow(800, 600, "hop physics — bounce room");
+	int win_w = capture_dir ? 400 : 800;
+	int win_h = capture_dir ? 300 : 600;
+	float duration = capture_dir ? 6.0f : 10.0f;
+	InitWindow(win_w, win_h, "hop physics — bounce room");
 	SetTargetFPS(60);
 
 	float cam_angle = 0.0f;
 	const char* mode_label = std::is_same_v<T, hop::fixed16> ? "fixed16" : "float";
+	int frame_num = 0;
 
 	float elapsed = 0.0f;
-	while (!WindowShouldClose() && elapsed < 10.0f) {
+	while (!WindowShouldClose() && elapsed < duration) {
 		elapsed += GetFrameTime();
 		sim.update(16);
 
@@ -204,6 +210,15 @@ void run() {
 		DrawText(txt.c_str(), 10, 110, 16, GREEN);
 
 		EndDrawing();
+
+		if (capture_dir) {
+			char path[512];
+			snprintf(path, sizeof(path), "%s/frame_%04d.png", capture_dir, frame_num);
+			Image img = LoadImageFromScreen();
+			ExportImage(img, path);
+			UnloadImage(img);
+		}
+		frame_num++;
 	}
 
 	CloseWindow();
@@ -214,6 +229,8 @@ int main(int argc, char* argv[]) {
 	for (int i = 1; i < argc; ++i) {
 		if (std::strcmp(argv[i], "--fixed") == 0) {
 			use_fixed = true;
+		} else if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
+			capture_dir = argv[++i];
 		}
 	}
 
