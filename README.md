@@ -26,6 +26,7 @@ This is intentional. Hop was designed for the [Toadlet](https://github.com/alanf
 - **Deactivation/sleeping** for inactive solids
 - **Collision scopes** — bitmask filtering for selective collision groups
 - **Fixed-point arithmetic** — `fixed16` type with polynomial sin/cos/atan2, Newton-Raphson sqrt, and branchless min/max/abs
+- **JavaScript bindings** — WebAssembly build via Emscripten/embind for browser-based physics
 - **Zero external dependencies** — only the C++ standard library
 - **Zero-allocation hot paths** — all temporaries are pre-allocated as cache members on the simulator
 
