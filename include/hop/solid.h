@@ -248,16 +248,7 @@ private:
 template<typename T>
 inline void solid<T>::set_position(const vec3<T>& pos) {
 	set_position_direct(pos);
-	if (simulator_) {
-		vec3<T> vel = velocity_;
-		vec3<T> f = force_;
-		simulator_->update_solid(this->shared_from_this().get(), last_dt_,
-			scalar_traits<T>::from_milli(last_dt_));
-		set_position_direct(pos);
-		velocity_ = vel;
-		force_ = f;
-		activate();
-	}
+	activate();
 }
 
 } // namespace hop

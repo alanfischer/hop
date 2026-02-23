@@ -102,14 +102,22 @@ inline void cross(vec3<T>& r, const vec3<T>& a, const vec3<T>& b) {
 
 template<typename T>
 inline void normalize(vec3<T>& v) {
-	T l = scalar_traits<T>::one() / length(v);
-	v.x *= l; v.y *= l; v.z *= l;
+	T l = length(v);
+	if (l > T{}) {
+		l = scalar_traits<T>::one() / l;
+		v.x *= l; v.y *= l; v.z *= l;
+	}
 }
 
 template<typename T>
 inline void normalize(vec3<T>& r, const vec3<T>& v) {
-	T l = scalar_traits<T>::one() / length(v);
-	r.x = v.x * l; r.y = v.y * l; r.z = v.z * l;
+	T l = length(v);
+	if (l > T{}) {
+		l = scalar_traits<T>::one() / l;
+		r.x = v.x * l; r.y = v.y * l; r.z = v.z * l;
+	} else {
+		r.reset();
+	}
 }
 
 template<typename T>

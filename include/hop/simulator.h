@@ -144,6 +144,7 @@ public:
 	// Main update
 	void update(int dt, int scope = 0, solid<T>* target = nullptr) {
 		T fdt = tr::from_milli(dt);
+		num_collisions_ = 0;
 		if (manager_) manager_->pre_update(dt, fdt);
 
 		int num = (target != nullptr) ? 1 : static_cast<int>(solids_.size());
@@ -188,6 +189,7 @@ public:
 				}
 			}
 		}
+		if (amount > max_solids) amount = max_solids;
 		return amount;
 	}
 
@@ -562,7 +564,7 @@ void simulator<T>::update_solid(solid<T>* solid_ptr, int dt, T fdt) {
 						}
 					}
 				}
-				else if (hit_solid || (hit_solid && hit_solid->mass_ == zero_val)) {
+				else if (hit_solid) {
 					mul(temp, c.normal, numerator);
 				}
 				else if (solid_ptr->mass_ == zero_val) {
@@ -665,8 +667,10 @@ void simulator<T>::report_collisions() {
 		if (col.collider) {
 			auto* listener = col.collider->collision_listener_;
 			if (listener && col.collidee && (col.collider->collide_with_scope_ & col.collidee->collision_scope_) != 0) {
-				col.invert();
-				listener->on_collision(col);
+				collision<T> inverted;
+				inverted.set(col);
+				inverted.invert();
+				listener->on_collision(inverted);
 			}
 		}
 	}
@@ -826,7 +830,11 @@ void simulator<T>::test_solid(collision<T>& result, solid<T>* s1, const segment<
 				segment<T> tmp;
 				tmp.set(seg);
 				sub(tmp.origin, s2->get_position());
+				sub(tmp.origin, sh1->sphere_.origin);
 				trace_convex_solid(col, tmp, cs);
+				if (col.time < one) {
+					add(col.point, s2->get_position());
+				}
 			}
 			// Capsule vs *
 			else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::aa_box) {
@@ -851,7 +859,7 @@ void simulator<T>::test_solid(collision<T>& result, solid<T>* s1, const segment<
 				auto& origin = cache_test_solid_origin_.set(s2->position_);
 				sub(origin, sh1->capsule_.origin);
 				add(origin, sh2->capsule_.origin);
-				auto& cap = cache_test_solid_capsule_.set(origin, sh1->capsule_.direction, sh1->capsule_.radius + sh2->capsule_.radius);
+				auto& cap = cache_test_solid_capsule_.set(origin, sh2->capsule_.direction, sh1->capsule_.radius + sh2->capsule_.radius);
 				trace_capsule(col, seg, cap);
 			}
 			// Traceable
@@ -1057,8 +1065,26 @@ void simulator<T>::trace_convex_solid(collision<T>& c, const segment<T>& seg, co
 	T zero_val{};
 	c.time = one;
 
+	// Check if segment origin is inside the convex solid (all planes)
+	bool inside = true;
+	T closest_dist = -tr::default_max_position_component();
+	int closest_plane = -1;
 	for (int i = 0; i < static_cast<int>(cs.planes.size()); ++i) {
-		T t = (cs.planes[i].distance - dot(cs.planes[i].normal, seg.origin)) / dot(cs.planes[i].normal, seg.direction);
+		T d = dot(cs.planes[i].normal, seg.origin) - cs.planes[i].distance;
+		if (d > zero_val) { inside = false; break; }
+		if (d > closest_dist) { closest_dist = d; closest_plane = i; }
+	}
+	if (inside && closest_plane >= 0) {
+		c.time = zero_val;
+		c.point.set(seg.origin);
+		c.normal.set(cs.planes[closest_plane].normal);
+		return;
+	}
+
+	for (int i = 0; i < static_cast<int>(cs.planes.size()); ++i) {
+		T denom = dot(cs.planes[i].normal, seg.direction);
+		if (denom == zero_val) continue; // Segment parallel to plane
+		T t = (cs.planes[i].distance - dot(cs.planes[i].normal, seg.origin)) / denom;
 		if (t >= zero_val && t <= one) {
 			vec3<T> u;
 			mul(u, seg.direction, t);
@@ -1067,23 +1093,13 @@ void simulator<T>::trace_convex_solid(collision<T>& c, const segment<T>& seg, co
 			bool b = true;
 			for (int j = 0; j < static_cast<int>(cs.planes.size()); ++j) {
 				if (i == j) continue;
-				vec3<T> v;
-				mul(v, cs.planes[j].normal, cs.planes[j].distance);
-				sub(v, u, v);
-				if (dot(v, cs.planes[j].normal) > zero_val) { b = false; break; }
+				if (dot(cs.planes[j].normal, u) - cs.planes[j].distance > zero_val) { b = false; break; }
 			}
 			if (b) {
-				if (c.time == one) {
+				if (t < c.time) {
 					c.time = t;
 					c.point.set(u);
 					c.normal.set(cs.planes[i].normal);
-				} else {
-					if (t < c.time) {
-						c.time = t;
-						c.point.set(u);
-						c.normal.set(cs.planes[i].normal);
-					}
-					break; // Found two points, done
 				}
 			}
 		}
@@ -1108,7 +1124,7 @@ void simulator<T>::friction_link(vec3<T>& result, solid<T>* s, const vec3<T>& so
 		cap_vec3(vr, max_velocity_component_);
 		T len_vr = length(vr);
 
-		if (fn != zero_val && len_vr > zero_val) {
+		if (fn != zero_val && len_vr > zero_val && fdt > zero_val) {
 			div(norm_vr, vr, len_vr);
 			mul(ff, norm_vr, fn);
 			mul(result, ff, s->coefficient_of_static_friction_);

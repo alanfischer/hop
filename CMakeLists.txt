@@ -33,6 +33,7 @@ if(HOP_BUILD_WEB)
         SUFFIX ".js"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/web"
     )
+    target_compile_options(hop_web PRIVATE -O2)
     target_link_options(hop_web PRIVATE
         --bind
         -sWASM=1

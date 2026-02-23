@@ -10,6 +10,10 @@ class HopSimulator {
 	hop::simulator<float> sim_;
 	std::vector<std::shared_ptr<hop::solid<float>>> solids_;
 
+	bool valid(int id) const {
+		return id >= 0 && id < static_cast<int>(solids_.size());
+	}
+
 public:
 	HopSimulator() = default;
 
@@ -62,34 +66,41 @@ public:
 	}
 
 	void set_position(int id, float x, float y, float z) {
+		if (!valid(id)) return;
 		solids_[id]->set_position(hop::vec3<float>(x, y, z));
 	}
 
 	void set_velocity(int id, float x, float y, float z) {
+		if (!valid(id)) return;
 		solids_[id]->set_velocity(hop::vec3<float>(x, y, z));
 	}
 
-	float get_x(int id) { return solids_[id]->get_position().x; }
-	float get_y(int id) { return solids_[id]->get_position().y; }
-	float get_z(int id) { return solids_[id]->get_position().z; }
+	float get_x(int id) { return valid(id) ? solids_[id]->get_position().x : 0.f; }
+	float get_y(int id) { return valid(id) ? solids_[id]->get_position().y : 0.f; }
+	float get_z(int id) { return valid(id) ? solids_[id]->get_position().z : 0.f; }
 
 	void set_coefficient_of_restitution(int id, float cor) {
+		if (!valid(id)) return;
 		solids_[id]->set_coefficient_of_restitution(cor);
 	}
 
 	void set_coefficient_of_restitution_override(int id, bool override) {
+		if (!valid(id)) return;
 		solids_[id]->set_coefficient_of_restitution_override(override);
 	}
 
 	void set_coefficient_of_gravity(int id, float cog) {
+		if (!valid(id)) return;
 		solids_[id]->set_coefficient_of_gravity(cog);
 	}
 
 	void set_infinite_mass(int id) {
+		if (!valid(id)) return;
 		solids_[id]->set_infinite_mass();
 	}
 
 	void set_friction(int id, float static_f, float dynamic_f) {
+		if (!valid(id)) return;
 		solids_[id]->set_coefficient_of_static_friction(static_f);
 		solids_[id]->set_coefficient_of_dynamic_friction(dynamic_f);
 	}

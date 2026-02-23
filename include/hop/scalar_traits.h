@@ -177,7 +177,7 @@ struct scalar_traits<fixed16> {
 		if (f.raw > half_pi_raw && f.raw <= pi_raw) {
 			f.raw = pi_raw - f.raw;
 			sign = -1;
-		} else if (f.raw > half_pi_raw && f.raw <= pi_raw + half_pi_raw) {
+		} else if (f.raw > pi_raw && f.raw <= pi_raw + half_pi_raw) {
 			f.raw = f.raw - pi_raw;
 			sign = -1;
 		} else if (f.raw > pi_raw + half_pi_raw) {

@@ -35,6 +35,7 @@ struct fixed16 {
 	}
 
 	constexpr fixed16 operator/(fixed16 b) const {
+		if (b.raw == 0) return from_raw(0);
 		return from_raw(static_cast<int32_t>((((static_cast<int64_t>(raw)) << 32) / b.raw) >> bits));
 	}
 
@@ -57,7 +58,7 @@ struct fixed16 {
 	constexpr fixed16 operator+(int b) const { return *this + from_int(b); }
 	constexpr fixed16 operator-(int b) const { return *this - from_int(b); }
 	constexpr fixed16 operator*(int b) const { return from_raw(raw * b); }
-	constexpr fixed16 operator/(int b) const { return from_raw(raw / b); }
+	constexpr fixed16 operator/(int b) const { if (b == 0) return from_raw(0); return from_raw(raw / b); }
 
 	constexpr bool operator==(int b) const { return raw == (b << bits); }
 	constexpr bool operator!=(int b) const { return raw != (b << bits); }

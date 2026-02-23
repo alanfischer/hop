@@ -55,8 +55,6 @@ inline void project(vec3<T>& point1, vec3<T>& point2, const segment<T>& seg1, co
 	T u1N{}, u2N{};
 	T u1D = denom, u2D = denom;
 
-	T small_eps = tr::from_milli(0); // effectively 0 — using denom threshold
-	// Use a small literal comparison
 	if (denom < tr::from_milli(1)) {
 		u1N = zero_val;
 		u1D = one_val;

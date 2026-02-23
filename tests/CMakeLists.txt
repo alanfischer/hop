@@ -13,3 +13,7 @@ add_test(NAME test_intersect COMMAND test_intersect)
 add_executable(test_simulator test_simulator.cpp)
 target_link_libraries(test_simulator PRIVATE hop)
 add_test(NAME test_simulator COMMAND test_simulator)
+
+add_executable(test_collision test_collision.cpp)
+target_link_libraries(test_collision PRIVATE hop)
+add_test(NAME test_collision COMMAND test_collision)

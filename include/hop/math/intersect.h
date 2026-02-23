@@ -78,7 +78,9 @@ inline T find_intersection(const segment<T>& seg, const sphere<T>& sph, vec3<T>&
 			mul(point, sd, time1);
 			add(point, so);
 		} else {
-			mul(point, sd, time2);
+			// Segment starts inside sphere — use exit point
+			time1 = time2;
+			mul(point, sd, time1);
 			add(point, so);
 		}
 	} else {
