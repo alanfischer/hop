@@ -14,3 +14,11 @@ if(HOP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# Examples
+option(HOP_BUILD_EXAMPLES "Build example programs" OFF)
+if(HOP_BUILD_EXAMPLES)
+    find_package(raylib REQUIRED)
+    add_executable(demo_bounce examples/demo_bounce.cpp)
+    target_link_libraries(demo_bounce PRIVATE hop raylib)
+endif()
