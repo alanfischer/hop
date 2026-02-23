@@ -65,27 +65,20 @@ sim->set_gravity({fixed16{}, fixed16{}, scalar_traits<fixed16>::from_milli(-9810
 
 ## Web Demo
 
-A browser-based demo using WebAssembly + Three.js is in the `web/` directory. To build:
+A browser-based [demo](web/) using WebAssembly + Three.js is included — precompiled, no build step needed. Just serve the `web/` directory:
 
 ```sh
-# Install emscripten (one-time)
-git clone https://github.com/emscripten-core/emsdk.git
-cd emsdk && ./emsdk install latest && ./emsdk activate latest && cd ..
+cd web && python3 -m http.server 8080
+# Open http://localhost:8080
+```
 
-# Build WASM
+To rebuild the WASM bindings from source (requires [Emscripten](https://emscripten.org)):
+
+```sh
 source emsdk/emsdk_env.sh
 mkdir -p build-web && cd build-web
 emcmake cmake .. -DHOP_BUILD_WEB=ON -DHOP_BUILD_TESTS=OFF -DHOP_BUILD_EXAMPLES=OFF
 emmake make
-cd ..
-```
-
-Then serve and open:
-
-```sh
-cd web
-python3 -m http.server 8080
-# Open http://localhost:8080
 ```
 
 ## Building
