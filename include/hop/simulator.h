@@ -154,7 +154,7 @@ public:
 			if (!s->active_ || (scope != 0 && (s->scope_ & scope) == 0)) continue;
 
 			s->last_dt_ = dt;
-			if (s->do_update_callback_) {
+			if (s->do_update_callback_ && (s->manager_ || manager_)) {
 				(s->manager_ ? s->manager_ : manager_)->pre_update(s, dt, fdt);
 			}
 
@@ -441,7 +441,7 @@ void simulator<T>::update_solid(solid<T>* solid_ptr, int dt, T fdt) {
 	bool first = true;
 	bool skip = false;
 
-	if (solid_ptr->do_update_callback_) {
+	if (solid_ptr->do_update_callback_ && (solid_ptr->manager_ || manager_)) {
 		(solid_ptr->manager_ ? solid_ptr->manager_ : manager_)->intra_update(solid_ptr, dt, fdt);
 	}
 
@@ -555,13 +555,8 @@ void simulator<T>::update_solid(solid<T>* solid_ptr, int dt, T fdt) {
 						add(solid_ptr->velocity_, t);
 					}
 					if (hit_solid && hit_solid->mass_ != solid<T>::infinite_mass()) {
-						if (solid_ptr->mass_ == solid<T>::infinite_mass()) {
-							sub(temp, hit_solid->velocity_, solid_ptr->velocity_);
-							mul(temp, c.normal, dot(temp, c.normal) / two);
-						} else {
-							mul(temp, c.normal, impulse);
-							mul(temp, one_over_hit_mass);
-						}
+						mul(temp, c.normal, impulse);
+						mul(temp, one_over_hit_mass);
 					}
 				}
 				else if (hit_solid) {
@@ -830,7 +825,7 @@ void simulator<T>::test_solid(collision<T>& result, solid<T>* s1, const segment<
 				segment<T> tmp;
 				tmp.set(seg);
 				sub(tmp.origin, s2->get_position());
-				sub(tmp.origin, sh1->sphere_.origin);
+				add(tmp.origin, sh1->sphere_.origin);
 				trace_convex_solid(col, tmp, cs);
 				if (col.time < one) {
 					add(col.point, s2->get_position());
@@ -1034,11 +1029,15 @@ void simulator<T>::trace_sphere(collision<T>& c, const segment<T>& seg, const ho
 	if (test_inside(sph, seg.origin)) {
 		auto& n = cache_trace_sphere_n_.set(seg.origin);
 		sub(n, sph.origin);
-		normalize_carefully(n, epsilon_);
+		if (!normalize_carefully(n, epsilon_)) {
+			// Origin exactly at sphere center — use negative direction as normal
+			normalize(n, seg.direction);
+			neg(n);
+		}
 		if (dot(n, seg.direction) <= epsilon_) {
 			c.time = T{};
 			c.point.set(seg.origin);
-			normalize_carefully(c.normal, n, epsilon_);
+			c.normal.set(n);
 		} else {
 			c.time = one;
 		}
@@ -1083,7 +1082,7 @@ void simulator<T>::trace_convex_solid(collision<T>& c, const segment<T>& seg, co
 
 	for (int i = 0; i < static_cast<int>(cs.planes.size()); ++i) {
 		T denom = dot(cs.planes[i].normal, seg.direction);
-		if (denom == zero_val) continue; // Segment parallel to plane
+		if (denom >= zero_val) continue; // Only accept entry planes (segment moving into plane)
 		T t = (cs.planes[i].distance - dot(cs.planes[i].normal, seg.origin)) / denom;
 		if (t >= zero_val && t <= one) {
 			vec3<T> u;
@@ -1167,6 +1166,13 @@ void simulator<T>::constraint_link(vec3<T>& result, solid<T>* s, const vec3<T>& 
 			sub(tv, c->start_solid_->velocity_, solid_vel);
 		} else {
 			continue;
+		}
+		T dist = length(tx);
+		if (dist > c->distance_threshold_) {
+			T scale = (dist - c->distance_threshold_) / dist;
+			mul(tx, scale);
+		} else {
+			tx.reset();
 		}
 		mul(tx, c->spring_constant_);
 		mul(tv, c->damping_constant_);

@@ -90,7 +90,7 @@ struct scalar_traits<float> {
 
 	// Snap to grid (float version)
 	static void snap_to_grid(float& v, const epsilon_state<float>& s) {
-		v = static_cast<int>((v + (s.half_epsilon * -(v < 0))) * s.one_over_epsilon) * s.epsilon;
+		v = static_cast<int64_t>((v + (s.half_epsilon * -(v < 0))) * s.one_over_epsilon) * s.epsilon;
 	}
 };
 

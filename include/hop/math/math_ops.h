@@ -181,6 +181,7 @@ inline void sub(aa_box<T>& b, const vec3<T>& p) {
 template<typename T>
 inline void add(sphere<T>& r, const sphere<T>& s, const vec3<T>& p) {
 	r.origin.x = s.origin.x + p.x; r.origin.y = s.origin.y + p.y; r.origin.z = s.origin.z + p.z;
+	r.radius = s.radius;
 }
 
 template<typename T>
@@ -191,6 +192,7 @@ inline void add(sphere<T>& s, const vec3<T>& p) {
 template<typename T>
 inline void sub(sphere<T>& r, const sphere<T>& s, const vec3<T>& p) {
 	r.origin.x = s.origin.x - p.x; r.origin.y = s.origin.y - p.y; r.origin.z = s.origin.z - p.z;
+	r.radius = s.radius;
 }
 
 template<typename T>
@@ -202,6 +204,7 @@ inline void sub(sphere<T>& s, const vec3<T>& p) {
 template<typename T>
 inline void add(capsule<T>& r, const capsule<T>& c, const vec3<T>& p) {
 	r.origin.x = c.origin.x + p.x; r.origin.y = c.origin.y + p.y; r.origin.z = c.origin.z + p.z;
+	r.direction = c.direction; r.radius = c.radius;
 }
 
 template<typename T>
@@ -212,6 +215,7 @@ inline void add(capsule<T>& c, const vec3<T>& p) {
 template<typename T>
 inline void sub(capsule<T>& r, const capsule<T>& c, const vec3<T>& p) {
 	r.origin.x = c.origin.x - p.x; r.origin.y = c.origin.y - p.y; r.origin.z = c.origin.z - p.z;
+	r.direction = c.direction; r.radius = c.radius;
 }
 
 template<typename T>
