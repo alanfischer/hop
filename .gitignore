@@ -1,1 +1,4 @@
 build/
+build-web/
+web/hop.js
+web/hop.wasm
