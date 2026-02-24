@@ -243,4 +243,36 @@ inline bool get_intersection_of_three_planes(vec3<T>& result, const plane<T>& p1
 	return true;
 }
 
+// Support functions: furthest point on a shape in a given direction
+template<typename T>
+inline void support(vec3<T>& result, const aa_box<T>& box, const vec3<T>& d) {
+	using tr = scalar_traits<T>;
+	result.x = d.x > T{} ? box.maxs.x : (d.x < T{} ? box.mins.x : (box.mins.x + box.maxs.x) * tr::half());
+	result.y = d.y > T{} ? box.maxs.y : (d.y < T{} ? box.mins.y : (box.mins.y + box.maxs.y) * tr::half());
+	result.z = d.z > T{} ? box.maxs.z : (d.z < T{} ? box.mins.z : (box.mins.z + box.maxs.z) * tr::half());
+}
+
+template<typename T>
+inline void support(vec3<T>& result, const sphere<T>& sph, const vec3<T>& d) {
+	result = d;
+	normalize_carefully(result, T{});
+	mul(result, sph.radius);
+	add(result, sph.origin);
+}
+
+template<typename T>
+inline void support(vec3<T>& result, const capsule<T>& cap, const vec3<T>& d) {
+	vec3<T> end;
+	add(end, cap.origin, cap.direction);
+	if (dot(end, d) > dot(cap.origin, d)) {
+		result = end;
+	} else {
+		result = cap.origin;
+	}
+	vec3<T> nd = d;
+	normalize_carefully(nd, T{});
+	mul(nd, cap.radius);
+	add(result, nd);
+}
+
 } // namespace hop

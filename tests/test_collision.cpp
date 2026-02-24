@@ -354,6 +354,106 @@ static void test_fixed16_collision() {
 	printf("OK\n");
 }
 
+// Test: impact point for sphere dropping onto floor
+static void test_impact_sphere_on_floor() {
+	printf("  impact_sphere_on_floor: ");
+	simulator<float> sim;
+
+	make_floor(sim);
+
+	struct listener : collision_listener<float> {
+		collision<float> last;
+		bool got = false;
+		void on_collision(const collision<float>& c) override {
+			last.set(c);
+			got = true;
+		}
+	} listen;
+
+	auto sph = std::make_shared<solid<float>>();
+	sph->set_mass(1.0f);
+	sph->set_coefficient_of_restitution(1.0f);
+	sph->set_coefficient_of_restitution_override(true);
+	sph->set_coefficient_of_static_friction(0.0f);
+	sph->set_coefficient_of_dynamic_friction(0.0f);
+	sph->add_shape(std::make_shared<shape<float>>(hop::sphere<float>(0.5f)));
+	sph->set_position({0.0f, 0.0f, 2.0f});
+	sph->set_collision_listener(&listen);
+	sim.add_solid(sph);
+
+	// Run with collision reporting until we get a collision
+	for (int i = 0; i < 200 && !listen.got; ++i)
+		sim.update(10, simulator<float>::scope_report_collisions);
+
+	assert(listen.got);
+	// point = sphere center at collision time, should be ~0.5 (radius above floor)
+	printf("point.z=%.2f impact.z=%.2f ", listen.last.point.z, listen.last.impact.z);
+	assert(approx(listen.last.point.z, 0.5f, 0.15f));
+	// impact = actual surface contact, should be ~0.0 (floor surface)
+	assert(approx(listen.last.impact.z, 0.0f, 0.15f));
+	printf("OK\n");
+}
+
+// Test: impact point for segment trace (should equal point)
+static void test_impact_segment_trace() {
+	printf("  impact_segment_trace: ");
+	simulator<float> sim;
+
+	make_floor(sim);
+
+	collision<float> result;
+	segment<float> seg;
+	seg.origin = {0.0f, 0.0f, 5.0f};
+	seg.direction = {0.0f, 0.0f, -10.0f};
+	sim.trace_segment(result, seg);
+
+	printf("point.z=%.2f impact.z=%.2f ", result.point.z, result.impact.z);
+	assert(approx(result.point.z, 0.0f, 0.01f));
+	assert(approx(result.impact.z, result.point.z, 0.001f));
+	printf("OK\n");
+}
+
+// Test: impact point for box-on-floor collision
+static void test_impact_box_on_floor() {
+	printf("  impact_box_on_floor: ");
+	simulator<float> sim;
+
+	make_floor(sim);
+
+	struct listener : collision_listener<float> {
+		collision<float> last;
+		bool got = false;
+		void on_collision(const collision<float>& c) override {
+			last.set(c);
+			got = true;
+		}
+	} listen;
+
+	auto box = std::make_shared<solid<float>>();
+	box->set_mass(1.0f);
+	box->set_coefficient_of_restitution(1.0f);
+	box->set_coefficient_of_restitution_override(true);
+	box->set_coefficient_of_static_friction(0.0f);
+	box->set_coefficient_of_dynamic_friction(0.0f);
+	box->add_shape(std::make_shared<shape<float>>(aa_box<float>(
+		vec3<float>(-0.5f, -0.5f, -0.5f), vec3<float>(0.5f, 0.5f, 0.5f)
+	)));
+	box->set_position({0.0f, 0.0f, 3.0f});
+	box->set_collision_listener(&listen);
+	sim.add_solid(box);
+
+	for (int i = 0; i < 200 && !listen.got; ++i)
+		sim.update(10, simulator<float>::scope_report_collisions);
+
+	assert(listen.got);
+	// point = box center, should be ~0.5 (half-extent above floor)
+	// impact = bottom face of box, should be ~0.0
+	printf("point.z=%.2f impact.z=%.2f ", listen.last.point.z, listen.last.impact.z);
+	assert(approx(listen.last.point.z, 0.5f, 0.15f));
+	assert(approx(listen.last.impact.z, 0.0f, 0.15f));
+	printf("OK\n");
+}
+
 int main() {
 	printf("test_collision:\n");
 	test_sphere_floor_bounce();
@@ -366,6 +466,9 @@ int main() {
 	test_constraint();
 	test_add_remove_solid();
 	test_fixed16_collision();
+	test_impact_sphere_on_floor();
+	test_impact_segment_trace();
+	test_impact_box_on_floor();
 	printf("ALL PASSED\n");
 	return 0;
 }

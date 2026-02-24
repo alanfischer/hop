@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <cmath>
+#include <vector>
 
 // Hop is Z-up, raylib is Y-up — swap Y and Z
 template<typename T>
@@ -15,6 +16,69 @@ Vector3 to_raylib(const hop::vec3<T>& v) {
 	using tr = hop::scalar_traits<T>;
 	return {tr::to_float(v.x), tr::to_float(v.z), tr::to_float(v.y)};
 }
+
+// Spark particle
+struct spark {
+	Vector3 pos;
+	Vector3 vel;
+	float life;     // remaining lifetime in seconds
+	float max_life;
+};
+
+static std::vector<spark> sparks;
+
+static void spawn_sparks(Vector3 pos, int count = 8) {
+	for (int i = 0; i < count; ++i) {
+		float angle = (float)i / count * 2.0f * PI + (float)GetRandomValue(0, 100) / 100.0f * 0.5f;
+		float pitch = (float)GetRandomValue(-60, 60) * DEG2RAD;
+		float speed = 1.5f + (float)GetRandomValue(0, 100) / 50.0f;
+		spark s;
+		s.pos = pos;
+		s.vel = {
+			cosf(pitch) * cosf(angle) * speed,
+			sinf(pitch) * speed,
+			cosf(pitch) * sinf(angle) * speed,
+		};
+		s.life = 0.3f + (float)GetRandomValue(0, 100) / 400.0f;
+		s.max_life = s.life;
+		sparks.push_back(s);
+	}
+}
+
+static void update_and_draw_sparks(float dt) {
+	for (int i = (int)sparks.size() - 1; i >= 0; --i) {
+		auto& s = sparks[i];
+		s.pos.x += s.vel.x * dt;
+		s.pos.y += s.vel.y * dt;
+		s.pos.z += s.vel.z * dt;
+		s.vel.y -= 9.8f * dt; // gravity
+		s.life -= dt;
+		if (s.life <= 0.0f) {
+			sparks[i] = sparks.back();
+			sparks.pop_back();
+			continue;
+		}
+		float t = s.life / s.max_life; // 1 = fresh, 0 = dead
+		unsigned char alpha = (unsigned char)(255 * t);
+		unsigned char r = 255;
+		unsigned char g = (unsigned char)(200 * t + 55); // yellow -> orange
+		unsigned char b = (unsigned char)(50 * t);
+		float radius = 0.04f * t;
+		DrawSphere(s.pos, radius, {r, g, b, alpha});
+	}
+}
+
+template<typename T>
+struct spark_listener : hop::collision_listener<T> {
+	void on_collision(const hop::collision<T>& c) override {
+		Vector3 p = to_raylib(c.impact);
+		// Scale spark count by collision speed
+		float speed = hop::scalar_traits<T>::to_float(hop::length(c.velocity));
+		int count = 4 + (int)(speed * 1.5f);
+		if (count > 16) count = 16;
+		spawn_sparks(p, count);
+	}
+};
 
 // Helper: create a wall solid (infinite mass, no gravity, positioned at `pos`)
 template<typename T>
@@ -128,6 +192,12 @@ void run() {
 	capsule_solid->set_velocity(hop::vec3<T>(tr::from_int(2), tr::from_int(1), tr::from_int(-3)));
 	sim.add_solid(capsule_solid);
 
+	// Collision sparks
+	spark_listener<T> sparker;
+	box_solid->set_collision_listener(&sparker);
+	sphere_solid->set_collision_listener(&sparker);
+	capsule_solid->set_collision_listener(&sparker);
+
 	// Raylib window
 	int win_w = capture_dir ? 400 : 800;
 	int win_h = capture_dir ? 300 : 600;
@@ -141,8 +211,9 @@ void run() {
 
 	float elapsed = 0.0f;
 	while (!WindowShouldClose() && elapsed < duration) {
-		elapsed += GetFrameTime();
-		sim.update(16);
+		float frame_dt = GetFrameTime();
+		elapsed += frame_dt;
+		sim.update(16, hop::simulator<T>::scope_report_collisions);
 
 		// Orbiting camera looking at room center
 		cam_angle += 0.3f * GetFrameTime();
@@ -187,6 +258,9 @@ void run() {
 		Vector3 cp_top = to_raylib(cap_top);
 		DrawCapsule(cp_bot, cp_top, 0.4f, 8, 8, GREEN);
 		DrawCapsuleWires(cp_bot, cp_top, 0.4f, 8, 8, DARKGREEN);
+
+		// Sparks
+		update_and_draw_sparks(frame_dt);
 
 		EndMode3D();
 

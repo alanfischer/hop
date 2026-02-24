@@ -734,6 +734,9 @@ void simulator<T>::test_segment(collision<T>& result, const segment<T>& seg, sol
 				break;
 		}
 
+		// Segment traces have no Minkowski expansion: impact == point
+		if (col.time < one) col.impact.set(col.point);
+
 		if (col.time == T{}) col.scope |= s->internal_scope_;
 
 		int scope = result.scope;
@@ -873,6 +876,30 @@ void simulator<T>::test_solid(collision<T>& result, solid<T>* s1, const segment<
 				modify_scope = true;
 			}
 
+			// Compute impact point for solid traces
+			if (col.time < one && sh1->type_ != shape_type::traceable && sh2->type_ != shape_type::traceable) {
+				vec3<T> sup;
+				vec3<T> neg_n;
+				neg(neg_n, col.normal);
+				switch (sh1->type_) {
+					case shape_type::aa_box:
+						support(sup, sh1->aa_box_, neg_n);
+						break;
+					case shape_type::sphere:
+						support(sup, sh1->sphere_, neg_n);
+						break;
+					case shape_type::capsule:
+						support(sup, sh1->capsule_, neg_n);
+						break;
+					default:
+						sup.reset();
+						break;
+				}
+				add(col.impact, col.point, sup);
+			} else if (col.time < one) {
+				col.impact.set(col.point);
+			}
+
 			if (sh1->type_ != shape_type::traceable && sh2->type_ != shape_type::traceable && col.time == zero_val) {
 				col.scope = s2->scope_;
 			}
@@ -932,7 +959,10 @@ void simulator<T>::trace_segment_with_current_spacials(collision<T>& result, con
 		result.scope = scope | col.scope;
 	}
 
-	if (result.time == tr::one()) seg.get_end_point(result.point);
+	if (result.time == tr::one()) {
+		seg.get_end_point(result.point);
+		result.impact.set(result.point);
+	}
 }
 
 template<typename T>
@@ -972,7 +1002,10 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T>& result, solid
 		result.scope = scope | col.scope;
 	}
 
-	if (result.time == tr::one()) seg.get_end_point(result.point);
+	if (result.time == tr::one()) {
+		seg.get_end_point(result.point);
+		result.impact.set(result.point);
+	}
 }
 
 template<typename T>

@@ -13,6 +13,7 @@ struct collision {
 
 	T time = tr::one();
 	vec3<T> point;
+	vec3<T> impact;
 	vec3<T> normal;
 	vec3<T> velocity;
 	std::shared_ptr<solid<T>> collider;
@@ -22,6 +23,7 @@ struct collision {
 	collision& set(const collision& c) {
 		time = c.time;
 		point.set(c.point);
+		impact.set(c.impact);
 		normal.set(c.normal);
 		velocity.set(c.velocity);
 		collider = c.collider;
@@ -33,6 +35,7 @@ struct collision {
 	collision& reset() {
 		time = tr::one();
 		point.reset();
+		impact.reset();
 		normal.reset();
 		velocity.reset();
 		collider = nullptr;
