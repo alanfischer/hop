@@ -4,26 +4,26 @@
 // Extracted from the Toadlet Engine's hop module
 
 #include <hop/fixed16.h>
-#include <hop/scalar_traits.h>
 #include <hop/fwd.h>
+#include <hop/scalar_traits.h>
 
-#include <hop/math/vec3.h>
 #include <hop/math/aa_box.h>
-#include <hop/math/sphere.h>
-#include <hop/math/capsule.h>
-#include <hop/math/segment.h>
-#include <hop/math/plane.h>
-#include <hop/math/convex_solid.h>
-#include <hop/math/math_ops.h>
-#include <hop/math/intersect.h>
 #include <hop/math/bounding.h>
+#include <hop/math/capsule.h>
+#include <hop/math/convex_solid.h>
+#include <hop/math/intersect.h>
+#include <hop/math/math_ops.h>
+#include <hop/math/plane.h>
 #include <hop/math/project.h>
+#include <hop/math/segment.h>
+#include <hop/math/sphere.h>
+#include <hop/math/vec3.h>
 
 #include <hop/collision.h>
 #include <hop/collision_listener.h>
-#include <hop/traceable.h>
+#include <hop/constraint.h>
 #include <hop/manager.h>
 #include <hop/shape.h>
-#include <hop/solid.h>
-#include <hop/constraint.h>
 #include <hop/simulator.h>
+#include <hop/solid.h>
+#include <hop/traceable.h>

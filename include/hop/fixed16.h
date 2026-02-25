@@ -15,7 +15,7 @@ struct fixed16 {
 	constexpr fixed16() = default;
 	constexpr explicit fixed16(int32_t r, raw_tag) : raw(r) {}
 
-	static constexpr fixed16 from_raw(int32_t r) { return fixed16(r, raw_tag{}); }
+	static constexpr fixed16 from_raw(int32_t r) { return fixed16(r, raw_tag {}); }
 	static constexpr fixed16 from_int(int i) { return from_raw(i << bits); }
 	static constexpr fixed16 from_float(float f) { return from_raw(static_cast<int32_t>(f * one_raw)); }
 	static constexpr fixed16 from_milli(int m) {
@@ -35,16 +35,29 @@ struct fixed16 {
 	}
 
 	constexpr fixed16 operator/(fixed16 b) const {
-		if (b.raw == 0) return from_raw(0);
+		if (b.raw == 0)
+			return from_raw(0);
 		return from_raw(static_cast<int32_t>((((static_cast<int64_t>(raw)) << 32) / b.raw) >> bits));
 	}
 
 	constexpr fixed16 operator%(fixed16 b) const { return from_raw(raw % b.raw); }
 
-	constexpr fixed16& operator+=(fixed16 b) { raw += b.raw; return *this; }
-	constexpr fixed16& operator-=(fixed16 b) { raw -= b.raw; return *this; }
-	constexpr fixed16& operator*=(fixed16 b) { *this = *this * b; return *this; }
-	constexpr fixed16& operator/=(fixed16 b) { *this = *this / b; return *this; }
+	constexpr fixed16 & operator+=(fixed16 b) {
+		raw += b.raw;
+		return *this;
+	}
+	constexpr fixed16 & operator-=(fixed16 b) {
+		raw -= b.raw;
+		return *this;
+	}
+	constexpr fixed16 & operator*=(fixed16 b) {
+		*this = *this * b;
+		return *this;
+	}
+	constexpr fixed16 & operator/=(fixed16 b) {
+		*this = *this / b;
+		return *this;
+	}
 
 	// Comparison operators
 	constexpr bool operator==(fixed16 b) const { return raw == b.raw; }
@@ -58,7 +71,11 @@ struct fixed16 {
 	constexpr fixed16 operator+(int b) const { return *this + from_int(b); }
 	constexpr fixed16 operator-(int b) const { return *this - from_int(b); }
 	constexpr fixed16 operator*(int b) const { return from_raw(raw * b); }
-	constexpr fixed16 operator/(int b) const { if (b == 0) return from_raw(0); return from_raw(raw / b); }
+	constexpr fixed16 operator/(int b) const {
+		if (b == 0)
+			return from_raw(0);
+		return from_raw(raw / b);
+	}
 
 	constexpr bool operator==(int b) const { return raw == (b << bits); }
 	constexpr bool operator!=(int b) const { return raw != (b << bits); }

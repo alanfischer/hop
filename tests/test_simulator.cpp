@@ -1,24 +1,23 @@
-#include <hop/hop.h>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <hop/hop.h>
 
 using namespace hop;
 
-template<typename T>
-static void test_gravity_drop() {
+template <typename T> static void test_gravity_drop() {
 	using tr = scalar_traits<T>;
 
 	auto sim = std::make_shared<simulator<T>>();
-	sim->set_gravity({T{}, T{}, -tr::from_milli(9810)});
+	sim->set_gravity({ T {}, T {}, -tr::from_milli(9810) });
 
 	// Create a solid with a sphere shape
 	auto s = std::make_shared<solid<T>>();
 	s->set_mass(tr::one());
-	s->set_position({T{}, T{}, tr::from_int(10)});
+	s->set_position({ T {}, T {}, tr::from_int(10) });
 	s->set_collide_with_scope(0); // No collision, pure freefall
 
-	auto sh = std::make_shared<shape<T>>(hop::sphere<T>{vec3<T>{}, tr::one()});
+	auto sh = std::make_shared<shape<T>>(hop::sphere<T> { vec3<T> {}, tr::one() });
 	s->add_shape(sh);
 
 	sim->add_solid(s);
@@ -35,8 +34,7 @@ static void test_gravity_drop() {
 	printf("  gravity drop: OK\n");
 }
 
-template<typename T>
-static void test_dual_instantiation() {
+template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
 	solid<T> s;
@@ -60,10 +58,10 @@ int main() {
 		auto sim = std::make_shared<simulator<fixed16>>();
 		auto s = std::make_shared<solid<fixed16>>();
 		s->set_mass(tr::one());
-		s->set_position({fixed16{}, fixed16{}, tr::from_int(10)});
+		s->set_position({ fixed16 {}, fixed16 {}, tr::from_int(10) });
 		s->set_collide_with_scope(0);
 
-		auto sh = std::make_shared<shape<fixed16>>(hop::sphere<fixed16>{vec3<fixed16>{}, tr::one()});
+		auto sh = std::make_shared<shape<fixed16>>(hop::sphere<fixed16> { vec3<fixed16> {}, tr::one() });
 		s->add_shape(sh);
 		sim->add_solid(s);
 

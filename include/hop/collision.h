@@ -1,14 +1,13 @@
 #pragma once
 
-#include <memory>
 #include <hop/math/math_ops.h>
+#include <memory>
 
 namespace hop {
 
-template<typename T> class solid;
+template <typename T> class solid;
 
-template<typename T>
-struct collision {
+template <typename T> struct collision {
 	using tr = scalar_traits<T>;
 
 	T time = tr::one();
@@ -20,7 +19,7 @@ struct collision {
 	std::shared_ptr<solid<T>> collidee;
 	int scope = 0;
 
-	collision& set(const collision& c) {
+	collision & set(const collision & c) {
 		time = c.time;
 		point.set(c.point);
 		impact.set(c.impact);
@@ -32,7 +31,7 @@ struct collision {
 		return *this;
 	}
 
-	collision& reset() {
+	collision & reset() {
 		time = tr::one();
 		point.reset();
 		impact.reset();

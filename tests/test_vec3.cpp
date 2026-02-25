@@ -1,15 +1,14 @@
-#include <hop/hop.h>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <hop/hop.h>
 
 using namespace hop;
 
-template<typename T>
-static void test_basic_ops() {
+template <typename T> static void test_basic_ops() {
 	using tr = scalar_traits<T>;
-	vec3<T> a{tr::one(), tr::two(), tr::three()};
-	vec3<T> b{tr::one(), tr::one(), tr::one()};
+	vec3<T> a { tr::one(), tr::two(), tr::three() };
+	vec3<T> b { tr::one(), tr::one(), tr::one() };
 	vec3<T> r;
 
 	add(r, a, b);
@@ -17,7 +16,7 @@ static void test_basic_ops() {
 	assert(r.y == tr::three());
 
 	sub(r, a, b);
-	assert(r.x == T{});
+	assert(r.x == T {});
 	assert(r.y == tr::one());
 
 	mul(r, a, tr::two());
@@ -26,29 +25,27 @@ static void test_basic_ops() {
 	printf("  vec3 basic ops: OK\n");
 }
 
-template<typename T>
-static void test_dot_cross() {
+template <typename T> static void test_dot_cross() {
 	using tr = scalar_traits<T>;
-	vec3<T> x{tr::one(), T{}, T{}};
-	vec3<T> y{T{}, tr::one(), T{}};
+	vec3<T> x { tr::one(), T {}, T {} };
+	vec3<T> y { T {}, tr::one(), T {} };
 
 	T d = dot(x, y);
-	assert(d == T{});
+	assert(d == T {});
 
 	vec3<T> r;
 	cross(r, x, y);
 	// x cross y = z
 	assert(r.z == tr::one());
-	assert(r.x == T{});
-	assert(r.y == T{});
+	assert(r.x == T {});
+	assert(r.y == T {});
 
 	printf("  vec3 dot/cross: OK\n");
 }
 
-template<typename T>
-static void test_length_normalize() {
+template <typename T> static void test_length_normalize() {
 	using tr = scalar_traits<T>;
-	vec3<T> v{tr::three(), tr::four(), T{}};
+	vec3<T> v { tr::three(), tr::four(), T {} };
 	T len = length(v);
 	float flen = tr::to_float(len);
 	assert(flen > 4.9f && flen < 5.1f);

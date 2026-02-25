@@ -1,5 +1,5 @@
 // demo_bounce.js — hop physics + Three.js visualization
-// A box, sphere, and capsule bounce around inside a 6x6x6 room.
+// A box, sphere, and two capsules bounce around inside a 6x6x6 room.
 
 import * as THREE from 'three';
 
@@ -63,6 +63,14 @@ async function main() {
 	sim.setPosition(capId, 0, -1, 3);
 	sim.setVelocity(capId, 2, 1, -3);
 
+	// Capsule 2: radius 0.3, direction (2,0,0) — horizontal along X, starts at (1, 1, 2)
+	const cap2Id = sim.addCapsule(1, 0.3, 2, 0, 0);
+	sim.setCoefficientOfRestitution(cap2Id, COR);
+	sim.setCoefficientOfRestitutionOverride(cap2Id, true);
+	sim.setFriction(cap2Id, 0, 0);
+	sim.setPosition(cap2Id, 1, 1, 2);
+	sim.setVelocity(cap2Id, -1, 2, 3);
+
 	// --- Three.js setup ---
 	const scene = new THREE.Scene();
 	scene.background = new THREE.Color(0x1e1e28);
@@ -114,6 +122,14 @@ async function main() {
 	const capMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.5, 8, 16), capMat);
 	scene.add(capMesh);
 
+	// Capsule 2 mesh — direction (2,0,0), horizontal along X
+	// Three.js CapsuleGeometry creates a Y-aligned capsule, so rotate it to lie along X (Z in Three.js coords after hop→three swap)
+	const cap2Mat = new THREE.MeshStandardMaterial({ color: 0xdd8833 });
+	const cap2Mesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 2.0, 8, 16), cap2Mat);
+	// Hop X maps to Three.js X, so rotate capsule from Y-axis to X-axis: rotate 90° around Z
+	cap2Mesh.rotation.z = -Math.PI / 2;
+	scene.add(cap2Mesh);
+
 	// HUD
 	const hud = document.getElementById('hud');
 
@@ -141,6 +157,10 @@ async function main() {
 		// In Three.js Y-up: center.y = cz + 0.75
 		capMesh.position.set(...hopToThree(cx, cy, cz + 0.75));
 
+		// Capsule 2: direction is (2,0,0), so center = position + (1,0,0)
+		const c2x = sim.getX(cap2Id), c2y = sim.getY(cap2Id), c2z = sim.getZ(cap2Id);
+		cap2Mesh.position.set(...hopToThree(c2x + 1, c2y, c2z));
+
 		// Orbit camera
 		camAngle += 0.005;
 		camera.position.set(
@@ -153,9 +173,10 @@ async function main() {
 		// HUD
 		if (hud) {
 			hud.textContent =
-				`box:     z=${sim.getZ(boxId).toFixed(2)}\n` +
-				`sphere:  z=${sim.getZ(sphereId).toFixed(2)}\n` +
-				`capsule: z=${sim.getZ(capId).toFixed(2)}`;
+				`box:      z=${sim.getZ(boxId).toFixed(2)}\n` +
+				`sphere:   z=${sim.getZ(sphereId).toFixed(2)}\n` +
+				`capsule:  z=${sim.getZ(capId).toFixed(2)}\n` +
+				`capsule2: z=${sim.getZ(cap2Id).toFixed(2)}`;
 		}
 
 		renderer.render(scene, camera);

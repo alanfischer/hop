@@ -1,8 +1,8 @@
-#include <hop/fixed16.h>
-#include <hop/scalar_traits.h>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <hop/fixed16.h>
+#include <hop/scalar_traits.h>
 
 using namespace hop;
 

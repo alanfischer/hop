@@ -5,12 +5,12 @@
 namespace hop {
 
 // Project point onto segment
-template<typename T>
-inline void project(vec3<T>& result, const segment<T>& seg, const vec3<T>& point, bool limit_to_segment) {
-	const vec3<T>& o = seg.origin;
-	const vec3<T>& d = seg.direction;
+template <typename T>
+inline void project(vec3<T> & result, const segment<T> & seg, const vec3<T> & point, bool limit_to_segment) {
+	const vec3<T> & o = seg.origin;
+	const vec3<T> & d = seg.direction;
 
-	T zero_val{};
+	T zero_val {};
 	if (d.x == zero_val && d.y == zero_val && d.z == zero_val) {
 		result = o;
 	} else {
@@ -18,8 +18,10 @@ inline void project(vec3<T>& result, const segment<T>& seg, const vec3<T>& point
 		      (d.x * d.x + d.y * d.y + d.z * d.z);
 		if (limit_to_segment) {
 			using tr = scalar_traits<T>;
-			if (u < zero_val) u = zero_val;
-			else if (u > tr::one()) u = tr::one();
+			if (u < zero_val)
+				u = zero_val;
+			else if (u > tr::one())
+				u = tr::one();
 		}
 		result.x = o.x + u * d.x;
 		result.y = o.y + u * d.y;
@@ -28,13 +30,13 @@ inline void project(vec3<T>& result, const segment<T>& seg, const vec3<T>& point
 }
 
 // Project closest points between two segments
-template<typename T>
-inline void project(vec3<T>& point1, vec3<T>& point2, const segment<T>& seg1, const segment<T>& seg2, T epsilon) {
+template <typename T>
+inline void project(vec3<T> & point1, vec3<T> & point2, const segment<T> & seg1, const segment<T> & seg2, T epsilon) {
 	T a = dot(seg1.direction, seg1.direction);
 	T b = dot(seg1.direction, seg2.direction);
 	T c = dot(seg2.direction, seg2.direction);
 	using tr = scalar_traits<T>;
-	T zero_val{};
+	T zero_val {};
 	T one_val = tr::one();
 
 	if (a <= epsilon) {
@@ -52,7 +54,7 @@ inline void project(vec3<T>& point1, vec3<T>& point2, const segment<T>& seg1, co
 	T e = dot(seg2.direction, point1);
 	T denom = a * c - b * b;
 
-	T u1N{}, u2N{};
+	T u1N {}, u2N {};
 	T u1D = denom, u2D = denom;
 
 	if (denom < tr::from_milli(1)) {

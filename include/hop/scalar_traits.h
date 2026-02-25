@@ -6,18 +6,16 @@
 namespace hop {
 
 // Epsilon state — differs between float (stores 1/epsilon) and fixed16 (stores bit count)
-template<typename T> struct epsilon_state;
+template <typename T> struct epsilon_state;
 
-template<>
-struct epsilon_state<float> {
+template <> struct epsilon_state<float> {
 	float epsilon = 0;
 	float half_epsilon = 0;
 	float quarter_epsilon = 0;
 	float one_over_epsilon = 0;
 };
 
-template<>
-struct epsilon_state<fixed16> {
+template <> struct epsilon_state<fixed16> {
 	int epsilon_bits = 0;
 	fixed16 epsilon = {};
 	fixed16 half_epsilon = {};
@@ -25,10 +23,9 @@ struct epsilon_state<fixed16> {
 };
 
 // scalar_traits<float>
-template<typename T> struct scalar_traits;
+template <typename T> struct scalar_traits;
 
-template<>
-struct scalar_traits<float> {
+template <> struct scalar_traits<float> {
 	using type = float;
 
 	static constexpr float one() { return 1.0f; }
@@ -59,16 +56,14 @@ struct scalar_traits<float> {
 
 	static float min_val(float a, float b) { return a < b ? a : b; }
 	static float max_val(float a, float b) { return a > b ? a : b; }
-	static float clamp(float low, float high, float v) {
-		return min_val(high, max_val(low, v));
-	}
+	static float clamp(float low, float high, float v) { return min_val(high, max_val(low, v)); }
 
 	static float mul(float a, float b) { return a * b; }
 	static float div(float a, float b) { return a / b; }
 	static float madd(float a, float b, float c) { return a * b + c; }
 
 	// Epsilon
-	static void make_epsilon(epsilon_state<float>& s, float epsilon) {
+	static void make_epsilon(epsilon_state<float> & s, float epsilon) {
 		s.epsilon = epsilon;
 		s.one_over_epsilon = 1.0f / epsilon;
 		s.half_epsilon = epsilon * 0.5f;
@@ -79,7 +74,7 @@ struct scalar_traits<float> {
 	static float default_max_position_component() { return 100000.0f; }
 	static float default_max_velocity_component() { return 1000.0f; }
 	static float default_max_force_component() { return 1000.0f; }
-	static float default_deactivate_speed(const epsilon_state<float>& s) { return s.epsilon * 2.0f; }
+	static float default_deactivate_speed(const epsilon_state<float> & s) { return s.epsilon * 2.0f; }
 
 	// Cap — clamp + NaN guard
 	static float cap(float v, float limit) {
@@ -89,14 +84,13 @@ struct scalar_traits<float> {
 	}
 
 	// Snap to grid (float version)
-	static void snap_to_grid(float& v, const epsilon_state<float>& s) {
+	static void snap_to_grid(float & v, const epsilon_state<float> & s) {
 		v = static_cast<int64_t>((v + (s.half_epsilon * -(v < 0))) * s.one_over_epsilon) * s.epsilon;
 	}
 };
 
 // scalar_traits<fixed16>
-template<>
-struct scalar_traits<fixed16> {
+template <> struct scalar_traits<fixed16> {
 	using type = fixed16;
 
 	static constexpr fixed16 one() { return fixed16::from_raw(65536); }
@@ -118,13 +112,12 @@ struct scalar_traits<fixed16> {
 	static constexpr float to_float(fixed16 v) { return v.to_float(); }
 
 	// Bit-hack abs
-	static constexpr fixed16 abs(fixed16 v) {
-		return fixed16::from_raw((v.raw ^ (v.raw >> 31)) - (v.raw >> 31));
-	}
+	static constexpr fixed16 abs(fixed16 v) { return fixed16::from_raw((v.raw ^ (v.raw >> 31)) - (v.raw >> 31)); }
 
 	// Newton-Raphson sqrt (8 iterations)
 	static fixed16 sqrt(fixed16 v) {
-		if (v.raw <= 0) return zero();
+		if (v.raw <= 0)
+			return zero();
 		int32_t s = (v.raw + fixed16::one_raw) >> 1;
 		for (int i = 0; i < 8; ++i) {
 			s = (s + static_cast<int32_t>(((static_cast<int64_t>(v.raw) << 32) / s) >> 16)) >> 1;
@@ -139,8 +132,10 @@ struct scalar_traits<fixed16> {
 		constexpr int32_t half_pi_raw = 102943;
 		constexpr int32_t one_raw = 65536;
 
-		if (f.raw < 0) f.raw = ((f.raw % two_pi_raw) + two_pi_raw);
-		else if (f.raw >= two_pi_raw) f.raw = f.raw % two_pi_raw;
+		if (f.raw < 0)
+			f.raw = ((f.raw % two_pi_raw) + two_pi_raw);
+		else if (f.raw >= two_pi_raw)
+			f.raw = f.raw % two_pi_raw;
 
 		int sign = 1;
 		if (f.raw > half_pi_raw && f.raw <= pi_raw) {
@@ -170,8 +165,10 @@ struct scalar_traits<fixed16> {
 		constexpr int32_t half_pi_raw = 102943;
 		constexpr int32_t one_raw = 65536;
 
-		if (f.raw < 0) f.raw = ((f.raw % two_pi_raw) + two_pi_raw);
-		else if (f.raw >= two_pi_raw) f.raw = f.raw % two_pi_raw;
+		if (f.raw < 0)
+			f.raw = ((f.raw % two_pi_raw) + two_pi_raw);
+		else if (f.raw >= two_pi_raw)
+			f.raw = f.raw % two_pi_raw;
 
 		int sign = 1;
 		if (f.raw > half_pi_raw && f.raw <= pi_raw) {
@@ -220,16 +217,14 @@ struct scalar_traits<fixed16> {
 		return fixed16::from_raw(a.raw - ((a.raw - b.raw) & -(a.raw < b.raw)));
 	}
 
-	static constexpr fixed16 clamp(fixed16 low, fixed16 high, fixed16 v) {
-		return min_val(high, max_val(low, v));
-	}
+	static constexpr fixed16 clamp(fixed16 low, fixed16 high, fixed16 v) { return min_val(high, max_val(low, v)); }
 
 	static constexpr fixed16 mul(fixed16 a, fixed16 b) { return a * b; }
 	static constexpr fixed16 div(fixed16 a, fixed16 b) { return a / b; }
 	static constexpr fixed16 madd(fixed16 a, fixed16 b, fixed16 c) { return a * b + c; }
 
 	// Epsilon (fixed uses bit-shift)
-	static void make_epsilon(epsilon_state<fixed16>& s, int epsilon_bits) {
+	static void make_epsilon(epsilon_state<fixed16> & s, int epsilon_bits) {
 		s.epsilon_bits = epsilon_bits;
 		s.epsilon = fixed16::from_raw(1 << epsilon_bits);
 		s.half_epsilon = fixed16::from_raw(s.epsilon.raw >> 1);
@@ -240,7 +235,7 @@ struct scalar_traits<fixed16> {
 	static fixed16 default_max_position_component() { return fixed16::from_raw(0x7FFF0000); } // ~32767
 	static fixed16 default_max_velocity_component() { return fixed16::from_int(104); }
 	static fixed16 default_max_force_component() { return fixed16::from_int(104); }
-	static fixed16 default_deactivate_speed(const epsilon_state<fixed16>&) { return fixed16::from_raw(1 << 8); }
+	static fixed16 default_deactivate_speed(const epsilon_state<fixed16> &) { return fixed16::from_raw(1 << 8); }
 
 	// Cap — branchless clamp (no NaN possible for fixed)
 	static constexpr fixed16 cap(fixed16 v, fixed16 limit) {
@@ -248,7 +243,7 @@ struct scalar_traits<fixed16> {
 	}
 
 	// Snap to grid (fixed version — bit-shift)
-	static void snap_to_grid(fixed16& v, const epsilon_state<fixed16>& s) {
+	static void snap_to_grid(fixed16 & v, const epsilon_state<fixed16> & s) {
 		v.raw = (((v.raw + (s.half_epsilon.raw * -(v.raw < 0))) >> s.epsilon_bits) << s.epsilon_bits);
 	}
 };
