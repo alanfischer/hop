@@ -88,7 +88,7 @@ std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	auto wall = std::make_shared<hop::solid<T>>();
 	wall->set_infinite_mass();
 	wall->set_coefficient_of_gravity(T {});
-	wall->set_coefficient_of_restitution(tr::from_milli(900));
+	wall->set_coefficient_of_restitution(tr::one());
 	auto sh = std::make_shared<hop::shape<T>>(box);
 	wall->add_shape(sh);
 	wall->set_position(pos);
@@ -141,7 +141,7 @@ template <typename T> void run() {
 	          hop::aa_box<T>(hop::vec3<T>(-half_size, zero, zero), hop::vec3<T>(half_size, wall_thick, size)),
 	          hop::vec3<T>(zero, half_size, zero));
 
-	T cor = tr::from_milli(800);
+	T cor = tr::one();
 	T fric_zero = T {};
 
 	// Dynamic box: 1x1x1, starts at (2, 0, 7)
@@ -169,7 +169,7 @@ template <typename T> void run() {
 	sphere_solid->set_velocity(hop::vec3<T>(tr::from_int(-1), tr::from_int(3), tr::from_int(2)));
 	sim.add_solid(sphere_solid);
 
-	// Dynamic capsule: radius 0.4, length 1.5 along Z, starts at (0, -2, 6)
+	// Dynamic capsule: radius 0.4, length 1.5 along Z, hangs from ceiling via spring constraint
 	auto capsule_solid = std::make_shared<hop::solid<T>>();
 	capsule_solid->set_mass(tr::one());
 	capsule_solid->set_coefficient_of_restitution(cor);
@@ -178,9 +178,17 @@ template <typename T> void run() {
 	capsule_solid->set_coefficient_of_dynamic_friction(fric_zero);
 	hop::capsule<T> cap_shape(hop::vec3<T>(), hop::vec3<T>(zero, zero, tr::from_milli(1500)), tr::from_milli(400));
 	capsule_solid->add_shape(std::make_shared<hop::shape<T>>(cap_shape));
-	capsule_solid->set_position(hop::vec3<T>(zero, tr::from_int(-1), tr::from_int(3)));
-	capsule_solid->set_velocity(hop::vec3<T>(tr::from_int(2), tr::from_int(1), tr::from_int(-3)));
+	capsule_solid->set_position(hop::vec3<T>(tr::from_int(2), zero, tr::from_int(4)));
+	capsule_solid->set_velocity(hop::vec3<T>(tr::from_int(-3), tr::from_int(2), zero));
 	sim.add_solid(capsule_solid);
+
+	// Spring constraint: capsule hangs from ceiling anchor point
+	hop::vec3<T> anchor(zero, zero, size);
+	auto rope = std::make_shared<hop::constraint<T>>(capsule_solid, anchor);
+	rope->set_spring_constant(tr::from_int(5));
+	rope->set_damping_constant(tr::from_milli(500));
+	rope->set_distance_threshold(tr::from_int(2));
+	sim.add_constraint(rope);
 
 	// Dynamic capsule 2: radius 0.3, length 2.0 along X (horizontal), starts at (1, 1, 2)
 	auto capsule2_solid = std::make_shared<hop::solid<T>>();
@@ -205,7 +213,7 @@ template <typename T> void run() {
 	// Raylib window
 	int win_w = capture_dir ? 400 : 800;
 	int win_h = capture_dir ? 300 : 600;
-	float duration = capture_dir ? 6.0f : 10.0f;
+	float duration = capture_dir ? 6.0f : 0.0f;
 	InitWindow(win_w, win_h, "hop physics — bounce room");
 	SetTargetFPS(60);
 
@@ -214,7 +222,7 @@ template <typename T> void run() {
 	int frame_num = 0;
 
 	float elapsed = 0.0f;
-	while (!WindowShouldClose() && elapsed < duration) {
+	while (!WindowShouldClose() && (duration <= 0.0f || elapsed < duration)) {
 		float frame_dt = GetFrameTime();
 		elapsed += frame_dt;
 		sim.update(16, hop::simulator<T>::scope_report_collisions);
@@ -258,6 +266,10 @@ template <typename T> void run() {
 		Vector3 cp_top = to_raylib(cap_top);
 		DrawCapsule(cp_bot, cp_top, 0.4f, 8, 8, GREEN);
 		DrawCapsuleWires(cp_bot, cp_top, 0.4f, 8, 8, DARKGREEN);
+
+		// Rope line from ceiling anchor to capsule
+		Vector3 anchor_rl = to_raylib(anchor);
+		DrawLine3D(anchor_rl, cp_bot, LIGHTGRAY);
 
 		// Capsule 2 — direction along X (2, 0, 0)
 		auto & cap2_pos = capsule2_solid->get_position();

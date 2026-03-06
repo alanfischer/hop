@@ -14,14 +14,15 @@ async function main() {
 	const WT = 1;   // wall thickness
 
 	function addWall(hx, hy, hz, px, py, pz) {
-		const id = sim.addBox(1, hx, hy, hz);
-		sim.setInfiniteMass(id);
-		sim.setCoefficientOfGravity(id, 0);
-		sim.setCoefficientOfRestitution(id, 1.0);
-		sim.setCoefficientOfRestitutionOverride(id, true);
-		sim.setFriction(id, 0, 0);
-		sim.setPosition(id, px, py, pz);
-		return id;
+		const wall = sim.addSolid();
+		wall.setInfiniteMass();
+		wall.addShape(Module.HopShape.box(hx, hy, hz));
+		wall.setCoefficientOfGravity(0);
+		wall.setCoefficientOfRestitution(1.0);
+		wall.setCoefficientOfRestitutionOverride(true);
+		wall.setFriction(0, 0);
+		wall.setPosition(px, py, pz);
+		return wall;
 	}
 
 	// Floor and ceiling
@@ -39,37 +40,68 @@ async function main() {
 	// --- Dynamic objects ---
 	const COR = 1.0;
 
+	function addDynamic(shape) {
+		const solid = sim.addSolid();
+		solid.setMass(1);
+		solid.addShape(shape);
+		solid.setCoefficientOfRestitution(COR);
+		solid.setCoefficientOfRestitutionOverride(true);
+		solid.setFriction(0, 0);
+		return solid;
+	}
+
 	// Box: 1x1x1, starts at (1, 0, 4)
-	const boxId = sim.addBox(1, 0.5, 0.5, 0.5);
-	sim.setCoefficientOfRestitution(boxId, COR);
-	sim.setCoefficientOfRestitutionOverride(boxId, true);
-	sim.setFriction(boxId, 0, 0);
-	sim.setPosition(boxId, 1, 0, 4);
-	sim.setVelocity(boxId, 3, -2, 0);
+	const box = addDynamic(Module.HopShape.box(0.5, 0.5, 0.5));
+	box.setPosition(1, 0, 4);
+	box.setVelocity(3, -2, 0);
 
 	// Sphere: radius 0.5, starts at (-1, 1, 5)
-	const sphereId = sim.addSphere(1, 0.5);
-	sim.setCoefficientOfRestitution(sphereId, COR);
-	sim.setCoefficientOfRestitutionOverride(sphereId, true);
-	sim.setFriction(sphereId, 0, 0);
-	sim.setPosition(sphereId, -1, 1, 5);
-	sim.setVelocity(sphereId, -1, 3, 2);
+	const sphere = addDynamic(Module.HopShape.sphere(0.5));
+	sphere.setPosition(-1, 1, 5);
+	sphere.setVelocity(-1, 3, 2);
 
-	// Capsule: radius 0.4, direction (0,0,1.5), starts at (0, -1, 3)
-	const capId = sim.addCapsule(1, 0.4, 0, 0, 1.5);
-	sim.setCoefficientOfRestitution(capId, COR);
-	sim.setCoefficientOfRestitutionOverride(capId, true);
-	sim.setFriction(capId, 0, 0);
-	sim.setPosition(capId, 0, -1, 3);
-	sim.setVelocity(capId, 2, 1, -3);
+	// Capsule: radius 0.4, direction (0,0,1.5), hangs from the ceiling via a spring constraint
+	const cap = addDynamic(Module.HopShape.capsule(0.4, 0, 0, 1.5));
+	cap.setPosition(2, 0, 4);
+	cap.setVelocity(-3, 2, 0);
+	const anchorPoint = {x: 0, y: 0, z: S}; // ceiling
+	const rope = sim.addConstraint(cap, anchorPoint.x, anchorPoint.y, anchorPoint.z);
+	rope.setSpringConstant(5);
+	rope.setDampingConstant(0.5);
+	rope.setDistanceThreshold(2);
 
 	// Capsule 2: radius 0.3, direction (2,0,0) — horizontal along X, starts at (1, 1, 2)
-	const cap2Id = sim.addCapsule(1, 0.3, 2, 0, 0);
-	sim.setCoefficientOfRestitution(cap2Id, COR);
-	sim.setCoefficientOfRestitutionOverride(cap2Id, true);
-	sim.setFriction(cap2Id, 0, 0);
-	sim.setPosition(cap2Id, 1, 1, 2);
-	sim.setVelocity(cap2Id, -1, 2, 3);
+	const cap2 = addDynamic(Module.HopShape.capsule(0.3, 2, 0, 0));
+	cap2.setPosition(1, 1, 2);
+	cap2.setVelocity(-1, 2, 3);
+
+	// --- Collision sparks ---
+	const sparks = [];
+
+	function onCollision(c) {
+		const speed = Math.sqrt(c.velocity.x ** 2 + c.velocity.y ** 2 + c.velocity.z ** 2);
+		const count = Math.min(16, 4 + Math.floor(speed * 1.5));
+		for (let i = 0; i < count; i++) {
+			const angle = (i / count) * Math.PI * 2 + Math.random() * 0.5;
+			const pitch = (Math.random() - 0.5) * 2 * Math.PI / 3;
+			const spd = 1.5 + Math.random() * 2;
+			const maxLife = 0.3 + Math.random() * 0.25;
+			sparks.push({
+				// Store in hop coords (Z-up), convert when rendering
+				x: c.impact.x, y: c.impact.y, z: c.impact.z,
+				vx: Math.cos(pitch) * Math.cos(angle) * spd,
+				vy: Math.cos(pitch) * Math.sin(angle) * spd,
+				vz: Math.sin(pitch) * spd,
+				life: maxLife,
+				maxLife,
+			});
+		}
+	}
+
+	box.setCollisionListener(onCollision);
+	sphere.setCollisionListener(onCollision);
+	cap.setCollisionListener(onCollision);
+	cap2.setCollisionListener(onCollision);
 
 	// --- Three.js setup ---
 	const scene = new THREE.Scene();
@@ -130,17 +162,45 @@ async function main() {
 	cap2Mesh.rotation.z = -Math.PI / 2;
 	scene.add(cap2Mesh);
 
+	// Spark particles (pre-allocate buffer, render as points)
+	const MAX_SPARKS = 256;
+	const sparkGeo = new THREE.BufferGeometry();
+	const sparkPositions = new Float32Array(MAX_SPARKS * 3);
+	const sparkColors = new Float32Array(MAX_SPARKS * 3);
+	sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPositions, 3));
+	sparkGeo.setAttribute('color', new THREE.BufferAttribute(sparkColors, 3));
+	sparkGeo.setDrawRange(0, 0);
+	const sparkMat = new THREE.PointsMaterial({
+		size: 0.08,
+		vertexColors: true,
+		transparent: true,
+		depthWrite: false,
+		sizeAttenuation: true,
+	});
+	const sparkPoints = new THREE.Points(sparkGeo, sparkMat);
+	scene.add(sparkPoints);
+
+	// Rope line from ceiling anchor to capsule
+	const ropeGeo = new THREE.BufferGeometry().setFromPoints([
+		new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)
+	]);
+	const ropeLine = new THREE.Line(ropeGeo, new THREE.LineBasicMaterial({ color: 0xaaaaaa }));
+	scene.add(ropeLine);
+
 	// HUD
 	const hud = document.getElementById('hud');
 
 	// Hop is Z-up, Three.js is Y-up — swap Y and Z
-	function hopToThree(x, y, z) {
-		return [x, z, y];
+	function hopToThree(pos) {
+		return [pos.x, pos.z, pos.y];
 	}
 
 	let camAngle = 0;
 	const CAM_DIST = 18;
 	const CAM_HEIGHT = 8;
+	let lastTime = performance.now();
+	let frameCount = 0;
+	let fps = 0;
 
 	function animate() {
 		requestAnimationFrame(animate);
@@ -148,18 +208,57 @@ async function main() {
 		sim.update(16);
 
 		// Update mesh positions (Z-up → Y-up)
-		boxMesh.position.set(...hopToThree(sim.getX(boxId), sim.getY(boxId), sim.getZ(boxId)));
-		sphereMesh.position.set(...hopToThree(sim.getX(sphereId), sim.getY(sphereId), sim.getZ(sphereId)));
+		boxMesh.position.set(...hopToThree(box.getPosition()));
+		sphereMesh.position.set(...hopToThree(sphere.getPosition()));
 
 		// Capsule: position is the base; offset to center for Three.js mesh
-		const cx = sim.getX(capId), cy = sim.getY(capId), cz = sim.getZ(capId);
+		const cp = cap.getPosition();
 		// hop capsule direction is (0,0,1.5), so center = position + (0,0,0.75)
 		// In Three.js Y-up: center.y = cz + 0.75
-		capMesh.position.set(...hopToThree(cx, cy, cz + 0.75));
+		capMesh.position.set(...hopToThree({x: cp.x, y: cp.y, z: cp.z + 0.75}));
+
+		// Update rope line from anchor to capsule
+		const ropePositions = ropeLine.geometry.attributes.position.array;
+		const anchorThree = hopToThree(anchorPoint);
+		ropePositions[0] = anchorThree[0]; ropePositions[1] = anchorThree[1]; ropePositions[2] = anchorThree[2];
+		const capThree = hopToThree(cp);
+		ropePositions[3] = capThree[0]; ropePositions[4] = capThree[1]; ropePositions[5] = capThree[2];
+		ropeLine.geometry.attributes.position.needsUpdate = true;
 
 		// Capsule 2: direction is (2,0,0), so center = position + (1,0,0)
-		const c2x = sim.getX(cap2Id), c2y = sim.getY(cap2Id), c2z = sim.getZ(cap2Id);
-		cap2Mesh.position.set(...hopToThree(c2x + 1, c2y, c2z));
+		const c2p = cap2.getPosition();
+		cap2Mesh.position.set(...hopToThree({x: c2p.x + 1, y: c2p.y, z: c2p.z}));
+
+		// Update sparks
+		const dt = 1 / 60;
+		for (let i = sparks.length - 1; i >= 0; i--) {
+			const s = sparks[i];
+			s.x += s.vx * dt;
+			s.y += s.vy * dt;
+			s.z += s.vz * dt;
+			s.vz -= 9.8 * dt;
+			s.life -= dt;
+			if (s.life <= 0) {
+				sparks[i] = sparks[sparks.length - 1];
+				sparks.pop();
+			}
+		}
+		const n = Math.min(sparks.length, MAX_SPARKS);
+		for (let i = 0; i < n; i++) {
+			const s = sparks[i];
+			const t = s.life / s.maxLife;
+			// Hop Z-up to Three.js Y-up
+			sparkPositions[i * 3] = s.x;
+			sparkPositions[i * 3 + 1] = s.z;
+			sparkPositions[i * 3 + 2] = s.y;
+			// Yellow-orange fade
+			sparkColors[i * 3] = 1.0;
+			sparkColors[i * 3 + 1] = 0.78 * t + 0.22;
+			sparkColors[i * 3 + 2] = 0.2 * t;
+		}
+		sparkGeo.attributes.position.needsUpdate = true;
+		sparkGeo.attributes.color.needsUpdate = true;
+		sparkGeo.setDrawRange(0, n);
 
 		// Orbit camera
 		camAngle += 0.005;
@@ -170,13 +269,24 @@ async function main() {
 		);
 		camera.lookAt(0, S / 2, 0);
 
+		// FPS counter
+		frameCount++;
+		const now = performance.now();
+		if (now - lastTime >= 1000) {
+			fps = frameCount;
+			frameCount = 0;
+			lastTime = now;
+		}
+
 		// HUD
 		if (hud) {
-			hud.textContent =
-				`box:      z=${sim.getZ(boxId).toFixed(2)}\n` +
-				`sphere:   z=${sim.getZ(sphereId).toFixed(2)}\n` +
-				`capsule:  z=${sim.getZ(capId).toFixed(2)}\n` +
-				`capsule2: z=${sim.getZ(cap2Id).toFixed(2)}`;
+			hud.innerHTML =
+				`<span style="color:#ccc">float</span>\n` +
+				`<span style="color:#ccc">${fps} FPS</span>\n\n` +
+				`<span style="color:#cc3333">box:      z=${box.getPosition().z.toFixed(2)}</span>\n` +
+				`<span style="color:#3366cc">sphere:   z=${sphere.getPosition().z.toFixed(2)}</span>\n` +
+				`<span style="color:#33aa44">capsule:  z=${cap.getPosition().z.toFixed(2)}</span>\n` +
+				`<span style="color:#dd8833">capsule2: z=${cap2.getPosition().z.toFixed(2)}</span>`;
 		}
 
 		renderer.render(scene, camera);
