@@ -4,7 +4,7 @@ A standalone, header-only C++17 physics library for swept-collision simulation. 
 
 Supports both `float` and 16.16 `fixed16` scalar types via template parameterization, allowing deterministic fixed-point physics alongside standard floating-point in the same binary.
 
-![demo_bounce — box, sphere, and capsule bouncing inside a room](docs/demo_bounce.gif)
+![demo_bounce — box, sphere, and capsules bouncing inside a room with collision sparks and a spring-constraint pendulum](docs/demo_bounce.gif)
 
 ## Authors
 
