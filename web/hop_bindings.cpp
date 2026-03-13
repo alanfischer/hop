@@ -72,8 +72,8 @@ public:
 		s_->set_coefficient_of_dynamic_friction(dynamic_f);
 	}
 
-	void setCollisionListener(emscripten::val callback) {
-		s_->set_collision_listener([callback](const hop::collision<float>& c) {
+	void setCollisionCallback(emscripten::val callback) {
+		s_->set_collision_callback([callback](const hop::collision<float>& c) {
 			auto obj = emscripten::val::object();
 			obj.set("impact", vec3_to_val(c.impact));
 			obj.set("point", vec3_to_val(c.point));
@@ -140,7 +140,7 @@ EMSCRIPTEN_BINDINGS(hop) {
 	    .function("setCoefficientOfRestitutionOverride", &HopSolid::setCoefficientOfRestitutionOverride)
 	    .function("setCoefficientOfGravity", &HopSolid::setCoefficientOfGravity)
 	    .function("setFriction", &HopSolid::setFriction)
-	    .function("setCollisionListener", &HopSolid::setCollisionListener);
+	    .function("setCollisionCallback", &HopSolid::setCollisionCallback);
 
 	emscripten::class_<HopConstraint>("HopConstraint")
 	    .function("setSpringConstant", &HopConstraint::setSpringConstant)

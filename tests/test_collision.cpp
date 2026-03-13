@@ -369,7 +369,7 @@ static void test_impact_sphere_on_floor() {
 	sph->set_coefficient_of_dynamic_friction(0.0f);
 	sph->add_shape(std::make_shared<shape<float>>(hop::sphere<float>(0.5f)));
 	sph->set_position({ 0.0f, 0.0f, 2.0f });
-	sph->set_collision_listener([&](const collision<float> & c) {
+	sph->set_collision_callback([&](const collision<float> & c) {
 		last_col.set(c);
 		got = true;
 	});
@@ -426,7 +426,7 @@ static void test_impact_box_on_floor() {
 	box->add_shape(
 	    std::make_shared<shape<float>>(aa_box<float>(vec3<float>(-0.5f, -0.5f, -0.5f), vec3<float>(0.5f, 0.5f, 0.5f))));
 	box->set_position({ 0.0f, 0.0f, 3.0f });
-	box->set_collision_listener([&](const collision<float> & c) {
+	box->set_collision_callback([&](const collision<float> & c) {
 		last_col.set(c);
 		got = true;
 	});

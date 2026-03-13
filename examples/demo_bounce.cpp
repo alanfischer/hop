@@ -202,10 +202,10 @@ template <typename T> void run() {
 	sim.add_solid(capsule2_solid);
 
 	// Collision sparks
-	box_solid->set_collision_listener(spark_on_collision<T>);
-	sphere_solid->set_collision_listener(spark_on_collision<T>);
-	capsule_solid->set_collision_listener(spark_on_collision<T>);
-	capsule2_solid->set_collision_listener(spark_on_collision<T>);
+	box_solid->set_collision_callback(spark_on_collision<T>);
+	sphere_solid->set_collision_callback(spark_on_collision<T>);
+	capsule_solid->set_collision_callback(spark_on_collision<T>);
+	capsule2_solid->set_collision_callback(spark_on_collision<T>);
 
 	// Raylib window
 	int win_w = capture_dir ? 400 : 800;

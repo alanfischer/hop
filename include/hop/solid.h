@@ -56,7 +56,7 @@ public:
 		shape_types_ = 0;
 		local_bound_.reset();
 		world_bound_.reset();
-		collision_listener_ = nullptr;
+		collision_callback_ = nullptr;
 		user_data_ = nullptr;
 		active_ = true;
 		deactivate_count_ = 0;
@@ -156,8 +156,8 @@ public:
 	const vec3<T> & get_touching_normal() const { return touching_normal_; }
 
 	using collision_fn = std::function<void(const collision<T> &)>;
-	void set_collision_listener(collision_fn fn) { collision_listener_ = std::move(fn); }
-	const collision_fn & get_collision_listener() const { return collision_listener_; }
+	void set_collision_callback(collision_fn fn) { collision_callback_ = std::move(fn); }
+	const collision_fn & get_collision_callback() const { return collision_callback_; }
 
 	void set_user_data(void * d) { user_data_ = d; }
 	void * get_user_data() const { return user_data_; }
@@ -242,7 +242,7 @@ private:
 
 	std::vector<constraint<T> *> constraints_;
 
-	collision_fn collision_listener_;
+	collision_fn collision_callback_;
 	void * user_data_ = nullptr;
 
 	bool active_ = true;

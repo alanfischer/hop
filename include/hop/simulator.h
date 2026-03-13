@@ -551,8 +551,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 
 			// Store collision for reporting
 			if (c.collider.get() != solid_ptr->touching_ &&
-			    (solid_ptr->collision_listener_ != nullptr ||
-			     (c.collider && c.collider->collision_listener_ != nullptr))) {
+			    (solid_ptr->collision_callback_ != nullptr ||
+			     (c.collider && c.collider->collision_callback_ != nullptr))) {
 				c.collidee = solid_ptr->shared_from_this();
 				if (c.collider) {
 					sub(c.velocity, solid_ptr->velocity_, c.collider->velocity_);
@@ -708,13 +708,13 @@ template <typename T> void simulator<T>::report_collisions() {
 	for (int i = 0; i < num_collisions_; ++i) {
 		auto & col = collisions_[i];
 		if (col.collidee) {
-			auto & listener = col.collidee->collision_listener_;
+			auto & listener = col.collidee->collision_callback_;
 			if (listener && col.collider && (col.collidee->collide_with_scope_ & col.collider->collision_scope_) != 0) {
 				listener(col);
 			}
 		}
 		if (col.collider) {
-			auto & listener = col.collider->collision_listener_;
+			auto & listener = col.collider->collision_callback_;
 			if (listener && col.collidee && (col.collider->collide_with_scope_ & col.collidee->collision_scope_) != 0) {
 				collision<T> inverted;
 				inverted.set(col);
