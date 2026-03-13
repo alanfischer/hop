@@ -358,14 +358,8 @@ static void test_impact_sphere_on_floor() {
 
 	make_floor(sim);
 
-	struct listener : collision_listener<float> {
-		collision<float> last;
-		bool got = false;
-		void on_collision(const collision<float> & c) override {
-			last.set(c);
-			got = true;
-		}
-	} listen;
+	collision<float> last_col;
+	bool got = false;
 
 	auto sph = std::make_shared<solid<float>>();
 	sph->set_mass(1.0f);
@@ -375,19 +369,22 @@ static void test_impact_sphere_on_floor() {
 	sph->set_coefficient_of_dynamic_friction(0.0f);
 	sph->add_shape(std::make_shared<shape<float>>(hop::sphere<float>(0.5f)));
 	sph->set_position({ 0.0f, 0.0f, 2.0f });
-	sph->set_collision_listener(&listen);
+	sph->set_collision_callback([&](const collision<float> & c) {
+		last_col.set(c);
+		got = true;
+	});
 	sim.add_solid(sph);
 
 	// Run with collision reporting until we get a collision
-	for (int i = 0; i < 200 && !listen.got; ++i)
+	for (int i = 0; i < 200 && !got; ++i)
 		sim.update(10, simulator<float>::scope_report_collisions);
 
-	assert(listen.got);
+	assert(got);
 	// point = sphere center at collision time, should be ~0.5 (radius above floor)
-	printf("point.z=%.2f impact.z=%.2f ", listen.last.point.z, listen.last.impact.z);
-	assert(approx(listen.last.point.z, 0.5f, 0.15f));
+	printf("point.z=%.2f impact.z=%.2f ", last_col.point.z, last_col.impact.z);
+	assert(approx(last_col.point.z, 0.5f, 0.15f));
 	// impact = actual surface contact, should be ~0.0 (floor surface)
-	assert(approx(listen.last.impact.z, 0.0f, 0.15f));
+	assert(approx(last_col.impact.z, 0.0f, 0.15f));
 	printf("OK\n");
 }
 
@@ -417,14 +414,8 @@ static void test_impact_box_on_floor() {
 
 	make_floor(sim);
 
-	struct listener : collision_listener<float> {
-		collision<float> last;
-		bool got = false;
-		void on_collision(const collision<float> & c) override {
-			last.set(c);
-			got = true;
-		}
-	} listen;
+	collision<float> last_col;
+	bool got = false;
 
 	auto box = std::make_shared<solid<float>>();
 	box->set_mass(1.0f);
@@ -435,18 +426,21 @@ static void test_impact_box_on_floor() {
 	box->add_shape(
 	    std::make_shared<shape<float>>(aa_box<float>(vec3<float>(-0.5f, -0.5f, -0.5f), vec3<float>(0.5f, 0.5f, 0.5f))));
 	box->set_position({ 0.0f, 0.0f, 3.0f });
-	box->set_collision_listener(&listen);
+	box->set_collision_callback([&](const collision<float> & c) {
+		last_col.set(c);
+		got = true;
+	});
 	sim.add_solid(box);
 
-	for (int i = 0; i < 200 && !listen.got; ++i)
+	for (int i = 0; i < 200 && !got; ++i)
 		sim.update(10, simulator<float>::scope_report_collisions);
 
-	assert(listen.got);
+	assert(got);
 	// point = box center, should be ~0.5 (half-extent above floor)
 	// impact = bottom face of box, should be ~0.0
-	printf("point.z=%.2f impact.z=%.2f ", listen.last.point.z, listen.last.impact.z);
-	assert(approx(listen.last.point.z, 0.5f, 0.15f));
-	assert(approx(listen.last.impact.z, 0.0f, 0.15f));
+	printf("point.z=%.2f impact.z=%.2f ", last_col.point.z, last_col.impact.z);
+	assert(approx(last_col.point.z, 0.5f, 0.15f));
+	assert(approx(last_col.impact.z, 0.0f, 0.15f));
 	printf("OK\n");
 }
 

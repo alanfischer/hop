@@ -104,7 +104,6 @@ include/hop/
   shape.h                # collision geometry (box, sphere, capsule, convex)
   constraint.h           # spring/damper constraints
   collision.h            # collision result data
-  collision_listener.h   # collision event callback
   manager.h              # spatial partitioning interface
   traceable.h            # custom shape interface
   fwd.h                  # forward declarations

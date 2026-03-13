@@ -67,17 +67,15 @@ static void update_and_draw_sparks(float dt) {
 	}
 }
 
-template <typename T> struct spark_listener : hop::collision_listener<T> {
-	void on_collision(const hop::collision<T> & c) override {
-		Vector3 p = to_raylib(c.impact);
-		// Scale spark count by collision speed
-		float speed = hop::scalar_traits<T>::to_float(hop::length(c.velocity));
-		int count = 4 + (int)(speed * 1.5f);
-		if (count > 16)
-			count = 16;
-		spawn_sparks(p, count);
-	}
-};
+template <typename T> void spark_on_collision(const hop::collision<T> & c) {
+	Vector3 p = to_raylib(c.impact);
+	// Scale spark count by collision speed
+	float speed = hop::scalar_traits<T>::to_float(hop::length(c.velocity));
+	int count = 4 + (int)(speed * 1.5f);
+	if (count > 16)
+		count = 16;
+	spawn_sparks(p, count);
+}
 
 // Helper: create a wall solid (infinite mass, no gravity, positioned at `pos`)
 template <typename T>
@@ -204,11 +202,10 @@ template <typename T> void run() {
 	sim.add_solid(capsule2_solid);
 
 	// Collision sparks
-	spark_listener<T> sparker;
-	box_solid->set_collision_listener(&sparker);
-	sphere_solid->set_collision_listener(&sparker);
-	capsule_solid->set_collision_listener(&sparker);
-	capsule2_solid->set_collision_listener(&sparker);
+	box_solid->set_collision_callback(spark_on_collision<T>);
+	sphere_solid->set_collision_callback(spark_on_collision<T>);
+	capsule_solid->set_collision_callback(spark_on_collision<T>);
+	capsule2_solid->set_collision_callback(spark_on_collision<T>);
 
 	// Raylib window
 	int win_w = capture_dir ? 400 : 800;

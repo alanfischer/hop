@@ -45,25 +45,8 @@ public:
 	}
 };
 
-class JsCollisionListener : public hop::collision_listener<float> {
-	emscripten::val callback_;
-
-public:
-	explicit JsCollisionListener(emscripten::val cb) : callback_(std::move(cb)) {}
-
-	void on_collision(const hop::collision<float>& c) override {
-		auto obj = emscripten::val::object();
-		obj.set("impact", vec3_to_val(c.impact));
-		obj.set("point", vec3_to_val(c.point));
-		obj.set("normal", vec3_to_val(c.normal));
-		obj.set("velocity", vec3_to_val(c.velocity));
-		callback_(obj);
-	}
-};
-
 class HopSolid {
 	std::shared_ptr<hop::solid<float>> s_;
-	std::shared_ptr<JsCollisionListener> listener_;
 
 public:
 	explicit HopSolid(std::shared_ptr<hop::solid<float>> s) : s_(std::move(s)) {}
@@ -89,9 +72,15 @@ public:
 		s_->set_coefficient_of_dynamic_friction(dynamic_f);
 	}
 
-	void setCollisionListener(emscripten::val callback) {
-		listener_ = std::make_shared<JsCollisionListener>(std::move(callback));
-		s_->set_collision_listener(listener_.get());
+	void setCollisionCallback(emscripten::val callback) {
+		s_->set_collision_callback([callback](const hop::collision<float>& c) {
+			auto obj = emscripten::val::object();
+			obj.set("impact", vec3_to_val(c.impact));
+			obj.set("point", vec3_to_val(c.point));
+			obj.set("normal", vec3_to_val(c.normal));
+			obj.set("velocity", vec3_to_val(c.velocity));
+			callback(obj);
+		});
 	}
 };
 
@@ -151,7 +140,7 @@ EMSCRIPTEN_BINDINGS(hop) {
 	    .function("setCoefficientOfRestitutionOverride", &HopSolid::setCoefficientOfRestitutionOverride)
 	    .function("setCoefficientOfGravity", &HopSolid::setCoefficientOfGravity)
 	    .function("setFriction", &HopSolid::setFriction)
-	    .function("setCollisionListener", &HopSolid::setCollisionListener);
+	    .function("setCollisionCallback", &HopSolid::setCollisionCallback);
 
 	emscripten::class_<HopConstraint>("HopConstraint")
 	    .function("setSpringConstant", &HopConstraint::setSpringConstant)

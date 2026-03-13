@@ -20,7 +20,6 @@
 #include <hop/math/vec3.h>
 
 #include <hop/collision.h>
-#include <hop/collision_listener.h>
 #include <hop/constraint.h>
 #include <hop/manager.h>
 #include <hop/shape.h>
