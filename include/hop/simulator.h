@@ -708,18 +708,18 @@ template <typename T> void simulator<T>::report_collisions() {
 	for (int i = 0; i < num_collisions_; ++i) {
 		auto & col = collisions_[i];
 		if (col.collidee) {
-			auto * listener = col.collidee->collision_listener_;
+			auto & listener = col.collidee->collision_listener_;
 			if (listener && col.collider && (col.collidee->collide_with_scope_ & col.collider->collision_scope_) != 0) {
-				listener->on_collision(col);
+				listener(col);
 			}
 		}
 		if (col.collider) {
-			auto * listener = col.collider->collision_listener_;
+			auto & listener = col.collider->collision_listener_;
 			if (listener && col.collidee && (col.collider->collide_with_scope_ & col.collidee->collision_scope_) != 0) {
 				collision<T> inverted;
 				inverted.set(col);
 				inverted.invert();
-				listener->on_collision(inverted);
+				listener(inverted);
 			}
 		}
 	}

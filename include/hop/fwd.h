@@ -13,7 +13,6 @@ template <typename T> struct segment;
 template <typename T> struct plane;
 template <typename T> struct convex_solid;
 template <typename T> struct collision;
-template <typename T> class collision_listener;
 template <typename T> class traceable;
 template <typename T> class manager;
 template <typename T> class shape;

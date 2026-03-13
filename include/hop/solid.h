@@ -1,7 +1,8 @@
 #pragma once
 
 #include <algorithm>
-#include <hop/collision_listener.h>
+#include <functional>
+#include <hop/collision.h>
 #include <hop/math/math_ops.h>
 #include <hop/shape.h>
 #include <memory>
@@ -154,8 +155,9 @@ public:
 	solid<T> * get_touching() const { return touching_; }
 	const vec3<T> & get_touching_normal() const { return touching_normal_; }
 
-	void set_collision_listener(collision_listener<T> * l) { collision_listener_ = l; }
-	collision_listener<T> * get_collision_listener() const { return collision_listener_; }
+	using collision_fn = std::function<void(const collision<T> &)>;
+	void set_collision_listener(collision_fn fn) { collision_listener_ = std::move(fn); }
+	const collision_fn & get_collision_listener() const { return collision_listener_; }
 
 	void set_user_data(void * d) { user_data_ = d; }
 	void * get_user_data() const { return user_data_; }
@@ -240,7 +242,7 @@ private:
 
 	std::vector<constraint<T> *> constraints_;
 
-	collision_listener<T> * collision_listener_ = nullptr;
+	collision_fn collision_listener_;
 	void * user_data_ = nullptr;
 
 	bool active_ = true;
