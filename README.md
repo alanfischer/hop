@@ -30,6 +30,20 @@ This is intentional. Hop was designed for the [Toadlet](https://github.com/alanf
 - **Zero external dependencies** — only the C++ standard library
 - **Zero-allocation hot paths** — all temporaries are pre-allocated as cache members on the simulator
 
+## Collision Pairs
+
+Not all shape combinations are supported for solid-vs-solid collision. The matrix below shows which pairs have swept collision detection:
+
+|               | AA-Box | Sphere | Capsule | Convex Solid | Traceable |
+|---------------|:------:|:------:|:-------:|:------------:|:---------:|
+| **AA-Box**    |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
+| **Sphere**    |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
+| **Capsule**   |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
+| **Convex**    |   ✓    |   ✓    |    ✓    |              |           |
+| **Traceable** |   ✓    |   ✓    |    ✓    |      ✓       |           |
+
+Convex-vs-convex and convex-vs-traceable are not supported. Segment traces (raycasting) work against all shape types.
+
 ## Usage
 
 ```cpp

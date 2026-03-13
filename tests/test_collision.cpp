@@ -529,6 +529,353 @@ static void test_capsule_capsule_parallel() {
 	printf("OK\n");
 }
 
+// Helper: create a convex floor at z=0 as a convex_solid (thick slab)
+static std::shared_ptr<solid<float>> make_convex_floor(simulator<float> & sim) {
+	auto wall = std::make_shared<solid<float>>();
+	wall->set_infinite_mass();
+	wall->set_coefficient_of_gravity(0.0f);
+	wall->set_coefficient_of_restitution(1.0f);
+	// Convex slab: 6 planes forming a 20x20x1 box centered at z=-0.5
+	hop::convex_solid<float> cs;
+	cs.planes.push_back(hop::plane<float>(0, 0, 1, 0));     // top face at z=0
+	cs.planes.push_back(hop::plane<float>(0, 0, -1, 1));    // bottom face at z=-1
+	cs.planes.push_back(hop::plane<float>(1, 0, 0, 10));    // +x
+	cs.planes.push_back(hop::plane<float>(-1, 0, 0, 10));   // -x
+	cs.planes.push_back(hop::plane<float>(0, 1, 0, 10));    // +y
+	cs.planes.push_back(hop::plane<float>(0, -1, 0, 10));   // -y
+	wall->add_shape(std::make_shared<shape<float>>(cs));
+	sim.add_solid(wall);
+	return wall;
+}
+
+// Test: ray (segment trace) hits a convex_solid wall
+static void test_ray_convex_solid() {
+	printf("  ray_convex_solid: ");
+	simulator<float> sim;
+
+	make_convex_floor(sim);
+
+	collision<float> result;
+	segment<float> seg;
+	seg.origin = { 0.0f, 0.0f, 5.0f };
+	seg.direction = { 0.0f, 0.0f, -10.0f };
+	sim.trace_segment(result, seg);
+
+	printf("time=%.3f point.z=%.2f ", result.time, result.point.z);
+	assert(result.time < 1.0f); // Should hit
+	assert(approx(result.point.z, 0.0f, 0.01f)); // At floor surface
+	assert(approx(result.normal.z, 1.0f, 0.01f)); // Normal pointing up
+	printf("OK\n");
+}
+
+// Test: ray misses a convex_solid (parallel to surface)
+static void test_ray_convex_solid_miss() {
+	printf("  ray_convex_solid_miss: ");
+	simulator<float> sim;
+
+	make_convex_floor(sim);
+
+	collision<float> result;
+	segment<float> seg;
+	seg.origin = { 0.0f, 0.0f, 5.0f };
+	seg.direction = { 10.0f, 0.0f, 0.0f }; // Parallel, never hits
+	sim.trace_segment(result, seg);
+
+	printf("time=%.3f ", result.time);
+	assert(result.time >= 1.0f); // No hit
+	printf("OK\n");
+}
+
+// Test: sphere drops onto convex_solid floor and bounces
+static void test_sphere_convex_solid() {
+	printf("  sphere_convex_solid: ");
+	simulator<float> sim;
+
+	make_convex_floor(sim);
+
+	auto sph = std::make_shared<solid<float>>();
+	sph->set_mass(1.0f);
+	sph->set_coefficient_of_restitution(1.0f);
+	sph->set_coefficient_of_restitution_override(true);
+	sph->set_coefficient_of_static_friction(0.0f);
+	sph->set_coefficient_of_dynamic_friction(0.0f);
+	sph->add_shape(std::make_shared<shape<float>>(hop::sphere<float>(0.5f)));
+	sph->set_position({ 0.0f, 0.0f, 5.0f });
+	sim.add_solid(sph);
+
+	for (int i = 0; i < 200; ++i)
+		sim.update(10);
+
+	float z = sph->get_position().z;
+	printf("z=%.2f ", z);
+	assert(z > 0.4f); // Must be above floor, bouncing
+	printf("OK\n");
+}
+
+// Test: capsule drops onto convex_solid floor (the critical wizardwars case)
+static void test_capsule_convex_solid() {
+	printf("  capsule_convex_solid: ");
+	simulator<float> sim;
+
+	make_convex_floor(sim);
+
+	auto cap = std::make_shared<solid<float>>();
+	cap->set_mass(1.0f);
+	cap->set_coefficient_of_restitution(0.8f);
+	cap->set_coefficient_of_restitution_override(true);
+	cap->set_coefficient_of_static_friction(0.0f);
+	cap->set_coefficient_of_dynamic_friction(0.0f);
+	// Vertical capsule (like a player character)
+	cap->add_shape(std::make_shared<shape<float>>(
+	    hop::capsule<float>(vec3<float>(0, 0, 0), vec3<float>(0, 0, 1.0f), 0.3f)));
+	cap->set_position({ 0.0f, 0.0f, 5.0f });
+	sim.add_solid(cap);
+
+	for (int i = 0; i < 200; ++i)
+		sim.update(10);
+
+	float z = cap->get_position().z;
+	printf("z=%.2f ", z);
+	assert(z > 0.2f); // Must be above floor
+	printf("OK\n");
+}
+
+// Test: aa_box drops onto convex_solid floor
+static void test_box_convex_solid() {
+	printf("  box_convex_solid: ");
+	simulator<float> sim;
+
+	make_convex_floor(sim);
+
+	auto box = std::make_shared<solid<float>>();
+	box->set_mass(1.0f);
+	box->set_coefficient_of_restitution(0.8f);
+	box->set_coefficient_of_restitution_override(true);
+	box->set_coefficient_of_static_friction(0.0f);
+	box->set_coefficient_of_dynamic_friction(0.0f);
+	box->add_shape(std::make_shared<shape<float>>(
+	    aa_box<float>(vec3<float>(-0.5f, -0.5f, -0.5f), vec3<float>(0.5f, 0.5f, 0.5f))));
+	box->set_position({ 0.0f, 0.0f, 5.0f });
+	sim.add_solid(box);
+
+	for (int i = 0; i < 200; ++i)
+		sim.update(10);
+
+	float z = box->get_position().z;
+	printf("z=%.2f ", z);
+	assert(z > 0.3f); // Must be above floor
+	printf("OK\n");
+}
+
+// Test: sphere hits an angled convex wall (wedge shape) — tests non-axis-aligned planes
+static void test_sphere_convex_wedge() {
+	printf("  sphere_convex_wedge: ");
+	simulator<float> sim;
+	sim.set_gravity({ 0, 0, 0 });
+
+	// Wedge: a ramp-like shape. Normal of angled face points (+x, 0, +z) normalized
+	auto wedge = std::make_shared<solid<float>>();
+	wedge->set_infinite_mass();
+	wedge->set_coefficient_of_gravity(0.0f);
+	wedge->set_coefficient_of_restitution(1.0f);
+	hop::convex_solid<float> cs;
+	float n = 0.7071f; // 1/sqrt(2)
+	cs.planes.push_back(hop::plane<float>(n, 0, n, 0));      // angled face through origin
+	cs.planes.push_back(hop::plane<float>(-1, 0, 0, 5));     // back
+	cs.planes.push_back(hop::plane<float>(0, 0, -1, 5));     // bottom
+	cs.planes.push_back(hop::plane<float>(0, 1, 0, 10));     // +y
+	cs.planes.push_back(hop::plane<float>(0, -1, 0, 10));    // -y
+	wedge->add_shape(std::make_shared<shape<float>>(cs));
+	sim.add_solid(wedge);
+
+	// Fire sphere at the angled face
+	auto sph = std::make_shared<solid<float>>();
+	sph->set_mass(1.0f);
+	sph->set_coefficient_of_restitution(1.0f);
+	sph->set_coefficient_of_restitution_override(true);
+	sph->set_coefficient_of_static_friction(0.0f);
+	sph->set_coefficient_of_dynamic_friction(0.0f);
+	sph->add_shape(std::make_shared<shape<float>>(hop::sphere<float>(0.3f)));
+	sph->set_position({ 3.0f, 0.0f, 3.0f });
+	sph->set_velocity({ -5.0f, 0.0f, -5.0f });
+	sim.add_solid(sph);
+
+	for (int i = 0; i < 100; ++i)
+		sim.update(10);
+
+	// Should have bounced off — velocity should now have +x and +z components
+	float vx = sph->get_velocity().x;
+	float vz = sph->get_velocity().z;
+	printf("vx=%.2f vz=%.2f ", vx, vz);
+	assert(vx > 1.0f || vz > 1.0f); // At least one component should be positive after bounce
+	printf("OK\n");
+}
+
+// Test: moving convex_solid drops onto a static aa_box floor
+static void test_convex_solid_vs_box() {
+	printf("  convex_solid_vs_box: ");
+	simulator<float> sim;
+
+	make_floor(sim); // aa_box floor at z=0
+
+	// Falling convex cube
+	auto conv = std::make_shared<solid<float>>();
+	conv->set_mass(1.0f);
+	conv->set_coefficient_of_restitution(0.8f);
+	conv->set_coefficient_of_restitution_override(true);
+	conv->set_coefficient_of_static_friction(0.0f);
+	conv->set_coefficient_of_dynamic_friction(0.0f);
+	hop::convex_solid<float> cs;
+	cs.planes.push_back(hop::plane<float>(1, 0, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(-1, 0, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 1, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, -1, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 0, 1, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 0, -1, 0.5f));
+	conv->add_shape(std::make_shared<shape<float>>(cs));
+	conv->set_position({ 0.0f, 0.0f, 5.0f });
+	sim.add_solid(conv);
+
+	for (int i = 0; i < 200; ++i)
+		sim.update(10);
+
+	float z = conv->get_position().z;
+	printf("z=%.2f ", z);
+	assert(z > 0.3f); // Must be above floor
+	printf("OK\n");
+}
+
+// Test: moving convex_solid hits a static sphere
+static void test_convex_solid_vs_sphere() {
+	printf("  convex_solid_vs_sphere: ");
+	simulator<float> sim;
+	sim.set_gravity({ 0, 0, 0 });
+
+	// Static large sphere
+	auto sph = std::make_shared<solid<float>>();
+	sph->set_infinite_mass();
+	sph->set_coefficient_of_gravity(0.0f);
+	sph->set_coefficient_of_restitution(1.0f);
+	sph->add_shape(std::make_shared<shape<float>>(hop::sphere<float>(1.0f)));
+	sph->set_position({ 0.0f, 0.0f, 0.0f });
+	sim.add_solid(sph);
+
+	// Moving convex cube toward sphere
+	auto conv = std::make_shared<solid<float>>();
+	conv->set_mass(1.0f);
+	conv->set_coefficient_of_restitution(1.0f);
+	conv->set_coefficient_of_restitution_override(true);
+	conv->set_coefficient_of_static_friction(0.0f);
+	conv->set_coefficient_of_dynamic_friction(0.0f);
+	hop::convex_solid<float> cs;
+	cs.planes.push_back(hop::plane<float>(1, 0, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(-1, 0, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 1, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, -1, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 0, 1, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 0, -1, 0.5f));
+	conv->add_shape(std::make_shared<shape<float>>(cs));
+	conv->set_position({ 5.0f, 0.0f, 0.0f });
+	conv->set_velocity({ -5.0f, 0.0f, 0.0f });
+	sim.add_solid(conv);
+
+	for (int i = 0; i < 100; ++i)
+		sim.update(10);
+
+	// Should have bounced back to +x
+	float vx = conv->get_velocity().x;
+	printf("vx=%.2f ", vx);
+	assert(vx > 1.0f);
+	printf("OK\n");
+}
+
+// Test: moving convex_solid hits a static capsule
+static void test_convex_solid_vs_capsule() {
+	printf("  convex_solid_vs_capsule: ");
+	simulator<float> sim;
+	sim.set_gravity({ 0, 0, 0 });
+
+	// Static vertical capsule
+	auto cap = std::make_shared<solid<float>>();
+	cap->set_infinite_mass();
+	cap->set_coefficient_of_gravity(0.0f);
+	cap->set_coefficient_of_restitution(1.0f);
+	cap->add_shape(std::make_shared<shape<float>>(
+	    hop::capsule<float>(vec3<float>(0, 0, -1.0f), vec3<float>(0, 0, 2.0f), 0.5f)));
+	cap->set_position({ 0.0f, 0.0f, 0.0f });
+	sim.add_solid(cap);
+
+	// Moving convex cube toward capsule
+	auto conv = std::make_shared<solid<float>>();
+	conv->set_mass(1.0f);
+	conv->set_coefficient_of_restitution(1.0f);
+	conv->set_coefficient_of_restitution_override(true);
+	conv->set_coefficient_of_static_friction(0.0f);
+	conv->set_coefficient_of_dynamic_friction(0.0f);
+	hop::convex_solid<float> cs;
+	cs.planes.push_back(hop::plane<float>(1, 0, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(-1, 0, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 1, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, -1, 0, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 0, 1, 0.5f));
+	cs.planes.push_back(hop::plane<float>(0, 0, -1, 0.5f));
+	conv->add_shape(std::make_shared<shape<float>>(cs));
+	conv->set_position({ 5.0f, 0.0f, 0.0f });
+	conv->set_velocity({ -5.0f, 0.0f, 0.0f });
+	sim.add_solid(conv);
+
+	for (int i = 0; i < 100; ++i)
+		sim.update(10);
+
+	float vx = conv->get_velocity().x;
+	printf("vx=%.2f ", vx);
+	assert(vx > 1.0f); // Bounced back
+	printf("OK\n");
+}
+
+// Test: two convex solids colliding — neither pair is handled, so they should pass through
+static void test_convex_solid_vs_convex_solid() {
+	printf("  convex_solid_vs_convex_solid: ");
+	simulator<float> sim;
+	sim.set_gravity({ 0, 0, 0 });
+
+	auto make_convex_cube = [](float half) {
+		hop::convex_solid<float> cs;
+		cs.planes.push_back(hop::plane<float>(1, 0, 0, half));
+		cs.planes.push_back(hop::plane<float>(-1, 0, 0, half));
+		cs.planes.push_back(hop::plane<float>(0, 1, 0, half));
+		cs.planes.push_back(hop::plane<float>(0, -1, 0, half));
+		cs.planes.push_back(hop::plane<float>(0, 0, 1, half));
+		cs.planes.push_back(hop::plane<float>(0, 0, -1, half));
+		return cs;
+	};
+
+	auto c1 = std::make_shared<solid<float>>();
+	c1->set_mass(1.0f);
+	c1->add_shape(std::make_shared<shape<float>>(make_convex_cube(0.5f)));
+	c1->set_position({ -5.0f, 0.0f, 0.0f });
+	c1->set_velocity({ 3.0f, 0.0f, 0.0f });
+	sim.add_solid(c1);
+
+	auto c2 = std::make_shared<solid<float>>();
+	c2->set_mass(1.0f);
+	c2->add_shape(std::make_shared<shape<float>>(make_convex_cube(0.5f)));
+	c2->set_position({ 5.0f, 0.0f, 0.0f });
+	c2->set_velocity({ -3.0f, 0.0f, 0.0f });
+	sim.add_solid(c2);
+
+	for (int i = 0; i < 200; ++i)
+		sim.update(10);
+
+	// convex vs convex is not implemented — they pass through each other
+	float x1 = c1->get_position().x;
+	float x2 = c2->get_position().x;
+	printf("x1=%.2f x2=%.2f (pass-through expected) ", x1, x2);
+	// They should have passed through (no collision handling)
+	// Just verify no crash occurred
+	printf("OK\n");
+}
+
 int main() {
 	printf("test_collision:\n");
 	test_sphere_floor_bounce();
@@ -546,6 +893,16 @@ int main() {
 	test_impact_box_on_floor();
 	test_capsule_capsule_perpendicular();
 	test_capsule_capsule_parallel();
+	test_ray_convex_solid();
+	test_ray_convex_solid_miss();
+	test_sphere_convex_solid();
+	test_capsule_convex_solid();
+	test_box_convex_solid();
+	test_sphere_convex_wedge();
+	test_convex_solid_vs_box();
+	test_convex_solid_vs_sphere();
+	test_convex_solid_vs_capsule();
+	test_convex_solid_vs_convex_solid();
 	printf("ALL PASSED\n");
 	return 0;
 }
