@@ -39,10 +39,10 @@ Not all shape combinations are supported for solid-vs-solid collision. The matri
 | **AA-Box**    |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
 | **Sphere**    |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
 | **Capsule**   |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
-| **Convex**    |   ✓    |   ✓    |    ✓    |              |           |
+| **Convex**    |   ✓    |   ✓    |    ✓    |              |     ✓     |
 | **Traceable** |   ✓    |   ✓    |    ✓    |      ✓       |           |
 
-Convex-vs-convex and convex-vs-traceable are not supported. Segment traces (raycasting) work against all shape types.
+Convex-vs-convex and traceable-vs-traceable are not supported. Segment traces (raycasting) work against all shape types.
 
 ## Usage
 
