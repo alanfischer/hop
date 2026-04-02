@@ -626,6 +626,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 					hit_solid->activate();
 					sub(hit_solid->velocity_, temp);
 				}
+
 			}
 
 			// Touching code
@@ -644,8 +645,11 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 				new_pos.set(old_pos);
 				break;
 			} else if (loop > 4) {
-				solid_ptr->velocity_.reset();
-				new_pos.set(old_pos);
+				// Push the body out along the last contact normal rather
+				// than zeroing velocity. Zeroing causes permanent overlap
+				// when two dynamic bodies collide at the loop limit.
+				mul(temp, c.normal, epsilon_ * tr::from_int(4));
+				add(new_pos, old_pos, temp);
 				break;
 			} else {
 				if (!normalize_carefully(vel, solid_ptr->velocity_, epsilon_)) {
@@ -684,10 +688,17 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 					auto * con = solid_ptr->constraints_[j];
 					auto * start = con->start_solid_.get();
 					auto * end = con->end_solid_.get();
+					// Never deactivate a body constrained to a static/infinite-mass
+					// body — the constraint represents a persistent external force
+					// (e.g. spring anchored to the world).
 					if (start != solid_ptr) {
+						if (start->mass_ == solid<T>::infinite_mass())
+							break;
 						if (start->active_ && start->deactivate_count_ <= deactivate_count_)
 							break;
 					} else if (end) {
+						if (end->mass_ == solid<T>::infinite_mass())
+							break;
 						if (end->active_ && end->deactivate_count_ <= deactivate_count_)
 							break;
 					}
