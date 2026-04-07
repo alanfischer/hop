@@ -17,3 +17,7 @@ add_test(NAME test_simulator COMMAND test_simulator)
 add_executable(test_collision test_collision.cpp)
 target_link_libraries(test_collision PRIVATE hop)
 add_test(NAME test_collision COMMAND test_collision)
+
+add_executable(test_bvh test_bvh.cpp)
+target_link_libraries(test_bvh PRIVATE hop)
+add_test(NAME test_bvh COMMAND test_bvh)

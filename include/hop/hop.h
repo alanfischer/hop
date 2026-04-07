@@ -22,6 +22,8 @@
 #include <hop/collision.h>
 #include <hop/constraint.h>
 #include <hop/manager.h>
+#include <hop/bvh.h>
+#include <hop/bvh_manager.h>
 #include <hop/shape.h>
 #include <hop/simulator.h>
 #include <hop/solid.h>
