@@ -24,7 +24,9 @@ This is intentional. Hop was designed for the [Toadlet](https://github.com/alanf
 - **Collision response** with coefficient of restitution, conservation of momentum, and friction
 - **Constraint system** with spring constants, damping, and distance thresholds
 - **Deactivation/sleeping** for inactive solids
+- **BVH spatial acceleration** — bounding volume hierarchy for broad-phase collision queries via `bvh_manager`
 - **Collision scopes** — bitmask filtering for selective collision groups
+- **Per-solid collision filters** — custom `std::function` callback for fine-grained collision filtering
 - **Fixed-point arithmetic** — `fixed16` type with polynomial sin/cos/atan2, Newton-Raphson sqrt, and branchless min/max/abs
 - **JavaScript bindings** — WebAssembly build via Emscripten/embind for browser-based physics
 - **Zero external dependencies** — only the C++ standard library
@@ -119,6 +121,8 @@ include/hop/
   constraint.h           # spring/damper constraints
   collision.h            # collision result data
   manager.h              # spatial partitioning interface
+  bvh.h                  # bounding volume hierarchy
+  bvh_manager.h          # BVH-based manager implementation
   traceable.h            # custom shape interface
   fwd.h                  # forward declarations
   math/
