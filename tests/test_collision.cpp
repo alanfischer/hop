@@ -1099,10 +1099,105 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_ray_traceable_floor<T>(label);
 }
 
+// Test: collision filter prevents two spheres from colliding
+template <typename T> static void test_collision_filter(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  collision_filter[%s]: ", label);
+
+	simulator<T> sim;
+	sim.set_gravity({ T {}, T {}, T {} });
+
+	// Two spheres heading toward each other
+	auto s1 = std::make_shared<solid<T>>();
+	s1->set_mass(tr::one());
+	s1->set_coefficient_of_restitution(tr::one());
+	s1->add_shape(std::make_shared<shape<T>>(sphere<T>({ T {}, T {}, T {} }, tr::one())));
+	s1->set_position({ -tr::from_int(3), T {}, T {} });
+	s1->set_velocity({ tr::from_int(10), T {}, T {} });
+
+	auto s2 = std::make_shared<solid<T>>();
+	s2->set_mass(tr::one());
+	s2->set_coefficient_of_restitution(tr::one());
+	s2->add_shape(std::make_shared<shape<T>>(sphere<T>({ T {}, T {}, T {} }, tr::one())));
+	s2->set_position({ tr::from_int(3), T {}, T {} });
+	s2->set_velocity({ -tr::from_int(10), T {}, T {} });
+
+	// Set filter: s1 rejects s2
+	auto * s2_raw = s2.get();
+	s1->set_collision_filter([s2_raw](solid<T> * other) -> bool {
+		return other != s2_raw;
+	});
+
+	sim.add_solid(s1);
+	sim.add_solid(s2);
+
+	// Step enough for them to pass through each other
+	for (int i = 0; i < 20; ++i)
+		sim.update(16);
+
+	// Without filter they'd bounce apart. With filter, s1 passes through s2.
+	// s1 started at x=-3 moving +10, after 320ms should be around x=-3+3.2=0.2
+	// If they collided, s1 would be moving in -x direction.
+	float v1x = tr::to_float(s1->get_velocity().x);
+	printf("v1x=%.2f ", v1x);
+	assert(v1x > 0.0f); // Still moving in +x, didn't bounce
+
+	printf("OK\n");
+}
+
+// Test: collision filter is bidirectional (both must agree)
+template <typename T> static void test_collision_filter_bidirectional(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  collision_filter_bidi[%s]: ", label);
+
+	simulator<T> sim;
+	sim.set_gravity({ T {}, T {}, T {} });
+
+	auto s1 = std::make_shared<solid<T>>();
+	s1->set_mass(tr::one());
+	s1->set_coefficient_of_restitution(tr::one());
+	s1->add_shape(std::make_shared<shape<T>>(sphere<T>({ T {}, T {}, T {} }, tr::one())));
+	s1->set_position({ -tr::from_int(3), T {}, T {} });
+	s1->set_velocity({ tr::from_int(10), T {}, T {} });
+
+	auto s2 = std::make_shared<solid<T>>();
+	s2->set_mass(tr::one());
+	s2->set_coefficient_of_restitution(tr::one());
+	s2->add_shape(std::make_shared<shape<T>>(sphere<T>({ T {}, T {}, T {} }, tr::one())));
+	s2->set_position({ tr::from_int(3), T {}, T {} });
+	s2->set_velocity({ -tr::from_int(10), T {}, T {} });
+
+	// Only s2 rejects s1 — should still prevent collision since both must agree
+	auto * s1_raw = s1.get();
+	s2->set_collision_filter([s1_raw](solid<T> * other) -> bool {
+		return other != s1_raw;
+	});
+
+	sim.add_solid(s1);
+	sim.add_solid(s2);
+
+	for (int i = 0; i < 20; ++i)
+		sim.update(16);
+
+	float v1x = tr::to_float(s1->get_velocity().x);
+	printf("v1x=%.2f ", v1x);
+	assert(v1x > 0.0f); // Still moving in +x
+
+	printf("OK\n");
+}
+
+template <typename T> static void run_filter_tests(const char * label) {
+	test_collision_filter<T>(label);
+	test_collision_filter_bidirectional<T>(label);
+}
+
 int main() {
 	printf("test_collision:\n");
 	run_all_tests<float>("float");
 	run_all_tests<fixed16>("fixed16");
+	printf("test_collision_filter:\n");
+	run_filter_tests<float>("float");
+	run_filter_tests<fixed16>("fixed16");
 	printf("ALL PASSED\n");
 	return 0;
 }

@@ -621,6 +621,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 				}
 
 				if (hit_solid && (hit_solid->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
+				    hit_solid->should_collide(solid_ptr) &&
 				    (tr::abs(temp.x) >= deactivate_speed_ || tr::abs(temp.y) >= deactivate_speed_ ||
 				     tr::abs(temp.z) >= deactivate_speed_)) {
 					hit_solid->activate();
@@ -1265,7 +1266,8 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 	auto & col = cache_trace_solid_collision_.reset();
 	for (int i = 0; i < num_spacial_collection_; ++i) {
 		auto * s2 = spacial_collection_[i];
-		if (s != s2 && (collide_with_bits & s2->collision_scope_) != 0) {
+		if (s != s2 && (collide_with_bits & s2->collision_scope_) != 0 &&
+		    s->should_collide(s2) && s2->should_collide(s)) {
 			col.time = tr::one();
 			test_solid(col, s, seg, s2);
 			int scope = result.scope;
