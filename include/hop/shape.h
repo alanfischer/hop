@@ -154,4 +154,24 @@ private:
 	friend class simulator<T>;
 };
 
+template <typename T> inline void support(vec3<T> & result, const shape<T> & sh, const vec3<T> & d) {
+	switch (sh.get_type()) {
+	case shape_type::aa_box:
+		support(result, sh.get_aa_box(), d);
+		break;
+	case shape_type::sphere:
+		support(result, sh.get_sphere(), d);
+		break;
+	case shape_type::capsule:
+		support(result, sh.get_capsule(), d);
+		break;
+	case shape_type::convex_solid:
+		support(result, sh.get_convex_solid(), d);
+		break;
+	default:
+		result.reset();
+		break;
+	}
+}
+
 } // namespace hop

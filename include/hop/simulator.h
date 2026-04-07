@@ -1174,20 +1174,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				vec3<T> sup;
 				vec3<T> neg_n;
 				neg(neg_n, col.normal);
-				switch (sh1->type_) {
-				case shape_type::aa_box:
-					support(sup, sh1->aa_box_, neg_n);
-					break;
-				case shape_type::sphere:
-					support(sup, sh1->sphere_, neg_n);
-					break;
-				case shape_type::capsule:
-					support(sup, sh1->capsule_, neg_n);
-					break;
-				default:
-					sup.reset();
-					break;
-				}
+				support(sup, *sh1, neg_n);
 				add(col.impact, col.point, sup);
 			} else if (col.time < one) {
 				col.impact.set(col.point);

@@ -2,10 +2,13 @@
 
 #include <hop/math/aa_box.h>
 #include <hop/math/capsule.h>
+#include <hop/math/convex_solid.h>
 #include <hop/math/plane.h>
 #include <hop/math/segment.h>
 #include <hop/math/sphere.h>
 #include <hop/math/vec3.h>
+
+#include <type_traits>
 
 namespace hop {
 
@@ -350,6 +353,50 @@ template <typename T> inline void support(vec3<T> & result, const capsule<T> & c
 	normalize_carefully(nd, T {});
 	mul(nd, cap.radius);
 	add(result, nd);
+}
+
+template <typename T> inline void support(vec3<T> & result, const convex_solid<T> & cs, const vec3<T> & d) {
+	using tr = scalar_traits<T>;
+	T epsilon;
+	if constexpr (std::is_same_v<T, fixed16>)
+		epsilon = fixed16::from_raw(1 << 4);
+	else
+		epsilon = T(0.0001);
+
+	auto & planes = cs.planes;
+	int sz = static_cast<int>(planes.size());
+	bool first = true;
+	T best_dot {};
+
+	for (int i = 0; i < sz - 2; ++i) {
+		for (int j = i + 1; j < sz - 1; ++j) {
+			for (int k = j + 1; k < sz; ++k) {
+				vec3<T> r;
+				if (get_intersection_of_three_planes(r, planes[i], planes[j], planes[k], epsilon)) {
+					bool legal = true;
+					for (int l = 0; l < sz; ++l) {
+						if (l != i && l != j && l != k) {
+							if ((dot(planes[l].normal, r) - planes[l].distance) > epsilon) {
+								legal = false;
+								break;
+							}
+						}
+					}
+					if (legal) {
+						T dp = dot(r, d);
+						if (first || dp > best_dot) {
+							result = r;
+							best_dot = dp;
+							first = false;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if (first)
+		result.reset();
 }
 
 } // namespace hop
