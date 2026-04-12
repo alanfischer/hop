@@ -304,6 +304,10 @@ private:
 	                   const vec3<T> & hit_normal,
 	                   const vec3<T> & applied_force,
 	                   T fdt);
+	// Apply Coulomb friction impulse at the moment of collision, opposing the
+	// tangential relative velocity, capped by µ_d * |normal_impulse|.
+	void collision_friction(solid<T> * s, solid<T> * hit, const collision<T> & c,
+	                        T normal_impulse, T one_over_mass);
 	void constraint_link(vec3<T> & result, solid<T> * s, const vec3<T> & solid_pos, const vec3<T> & solid_vel);
 	void update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T fdt);
 	void integration_step(solid<T> * s,
@@ -380,6 +384,8 @@ private:
 	vec3<T> cache_friction_link_ff_;
 	vec3<T> cache_friction_link_fs_;
 	vec3<T> cache_friction_link_norm_vr_;
+	vec3<T> cache_collision_friction_vtan_;
+	vec3<T> cache_collision_friction_dir_;
 	vec3<T> cache_constraint_link_tx_;
 	vec3<T> cache_constraint_link_tv_;
 	vec3<T> cache_update_acceleration_friction_force_;
@@ -608,6 +614,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 						mul(t, c.normal, impulse);
 						mul(t, one_over_mass);
 						add(solid_ptr->velocity_, t);
+						collision_friction(solid_ptr, hit_solid, c, impulse, one_over_mass);
 					}
 					if (hit_solid && hit_solid->mass_ != solid<T>::infinite_mass()) {
 						mul(temp, c.normal, impulse);
@@ -1610,6 +1617,38 @@ void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, 
 			}
 		}
 	}
+}
+
+template <typename T>
+void simulator<T>::collision_friction(solid<T> * s, solid<T> * hit,
+                                      const collision<T> & c,
+                                      T normal_impulse, T one_over_mass) {
+	T zero_val {};
+	if (s->coefficient_of_dynamic_friction_ <= zero_val) return;
+	T abs_impulse = normal_impulse < zero_val ? -normal_impulse : normal_impulse;
+	if (abs_impulse <= zero_val) return;
+
+	auto & vtan = cache_collision_friction_vtan_;
+	auto & dir  = cache_collision_friction_dir_;
+
+	// Tangential relative velocity (post-restitution)
+	if (hit) {
+		sub(vtan, s->velocity_, hit->velocity_);
+	} else {
+		vtan.set(s->velocity_);
+	}
+	mul(dir, c.normal, dot(vtan, c.normal));
+	sub(vtan, dir);
+
+	T tan_speed = length(vtan);
+	if (tan_speed <= epsilon_) return;
+
+	// Cap friction to not exceed what's needed to stop tangential motion
+	T max_dv = s->coefficient_of_dynamic_friction_ * abs_impulse * one_over_mass;
+	if (max_dv > tan_speed) max_dv = tan_speed;
+
+	mul(dir, vtan, -(max_dv / tan_speed));
+	add(s->velocity_, dir);
 }
 
 template <typename T>
