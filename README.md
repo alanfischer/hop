@@ -89,6 +89,8 @@ Not all shape combinations are supported for solid-vs-solid collision. The matri
 
 Convex-vs-convex and traceable-vs-traceable are not supported. Segment traces (raycasting) work against all shape types.
 
+**No cylinder primitive**: a cylinder's flat cap meets its curved side at a sharp circular edge. Sweeping any shape against that edge requires finding the intersection with a quarter-torus, which is a degree-4 polynomial — inconsistent with the quadratic math used everywhere else in hop, and impractical in fixed-point. Use a **capsule** instead: it is geometrically equivalent for collision purposes, and its hemispherical caps turn the hard rim problem into a smooth sphere test. If flat caps are required, a `convex_solid` approximation is available.
+
 ## Usage
 
 ```cpp
