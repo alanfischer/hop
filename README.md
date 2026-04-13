@@ -32,6 +32,49 @@ This is intentional. Hop was designed for the [Toadlet](https://github.com/alanf
 - **Zero external dependencies** — only the C++ standard library
 - **Zero-allocation hot paths** — all temporaries are pre-allocated as cache members on the simulator
 
+## Overlap / Intersection Queries
+
+Hop's fundamental primitive is the **swept segment** — every collision test moves a shape along a line and finds the earliest contact time `t ∈ [0, 1]`. There is no separate static overlap API; instead, use a **zero-direction segment** (`seg.origin == seg.end`) to ask "is this solid already overlapping something?"
+
+```cpp
+hop::segment<float> seg;
+seg.set_start_end(pos, pos);   // zero direction = static overlap query
+
+hop::collision<float> result;
+sim->trace_solid(result, my_solid, seg, collision_mask);
+
+bool overlapping = result.time < 1.0f;  // t == 0 means solid is inside
+```
+
+### Zero-direction behaviour by shape type
+
+| Shape pair | Zero-direction result |
+|---|---|
+| Solid vs aa_box | `t = 0` when inside (via `test_inside` path) |
+| Solid vs sphere | `t = 0` when inside |
+| Solid vs capsule | `t = 0` when inside |
+| Solid vs traceable | Depends on the `traceable` implementation — **see below** |
+
+### Implementing `traceable::trace_solid` for zero direction
+
+The sweep loop inside a traceable typically guards each face with:
+
+```cpp
+T denom = dot(face_n, seg.direction);
+if (denom >= T{}) continue;   // moving away or parallel — skip
+```
+
+When `seg.direction` is zero, `denom` is always zero and **every face is skipped**, making the test silently report "clear" even when the solid is fully inside the mesh.
+
+Traceable implementations **must** add an explicit zero-direction branch.  The correct algorithm is a Minkowski-sum static overlap check:
+
+1. Compute `expanded_d = dot(face_n, v0) + dot(support(shape, -face_n), -face_n)` — the triangle plane expanded outward by the solid's extent.
+2. If `dot(face_n, local_origin) <= expanded_d`, the solid's support surface has crossed the plane (penetrating from this face's side).
+3. Project `local_origin` onto the original triangle plane and run a barycentric in-triangle test.
+4. On a hit, set `result.time = T{}` and return.
+
+See `HopTrimeshTraceable::trace_solid` in `hop-godot` for a reference implementation.
+
 ## Collision Pairs
 
 Not all shape combinations are supported for solid-vs-solid collision. The matrix below shows which pairs have swept collision detection:
