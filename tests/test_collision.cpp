@@ -898,7 +898,7 @@ template <typename T> static void test_convex_solid_vs_capsule(const char * labe
 	printf("OK\n");
 }
 
-// Test: two convex solids colliding — not implemented, should pass through
+// Test: two convex solids colliding and bouncing apart
 template <typename T> static void test_convex_solid_vs_convex_solid(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  convex_solid_vs_convex_solid[%s]: ", label);
@@ -924,7 +924,10 @@ template <typename T> static void test_convex_solid_vs_convex_solid(const char *
 
 	float x1 = tr::to_float(c1->get_position().x);
 	float x2 = tr::to_float(c2->get_position().x);
-	printf("x1=%.2f x2=%.2f (pass-through expected) ", x1, x2);
+	printf("x1=%.2f x2=%.2f ", x1, x2);
+	assert(x1 < x2);   // solids did not pass through each other
+	assert(x2 > 0.0f); // c2 bounced to the right
+	assert(x1 < 0.0f); // c1 bounced to the left
 	printf("OK\n");
 }
 

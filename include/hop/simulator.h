@@ -1112,6 +1112,23 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 					add(col.point, seg.origin, travel);
 				}
 			}
+			// Convex solid vs convex solid (exact Minkowski sum: inflate sh2's planes per sh1's support)
+			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::convex_solid) {
+				hop::convex_solid<T> cs;
+				cs.set(sh2->convex_solid_);
+				for (auto & p : cs.planes) {
+					vec3<T> sup;
+					support(sup, sh1->convex_solid_, p.normal);
+					p.distance = p.distance + dot(sup, p.normal);
+				}
+				segment<T> tmp;
+				tmp.set(seg);
+				sub(tmp.origin, s2->get_position());
+				trace_convex_solid(col, tmp, cs);
+				if (col.time < one) {
+					add(col.point, s2->get_position());
+				}
+			}
 			// Traceable vs aa_box
 			else if (sh1->type_ == shape_type::traceable && sh2->type_ == shape_type::aa_box) {
 				segment<T> iseg;
