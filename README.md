@@ -1,4 +1,4 @@
-# hop
+#hop
 
 A standalone, header-only C++17 physics library for swept-collision simulation. Extracted from the [Toadlet](https://github.com/alanfischer/toadlet) game engine.
 
@@ -79,15 +79,15 @@ See `HopTrimeshTraceable::trace_solid` in `hop-godot` for a reference implementa
 
 Not all shape combinations are supported for solid-vs-solid collision. The matrix below shows which pairs have swept collision detection:
 
-|               | AA-Box | Sphere | Capsule | Convex Solid | Traceable |
-|---------------|:------:|:------:|:-------:|:------------:|:---------:|
-| **AA-Box**    |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
-| **Sphere**    |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
-| **Capsule**   |   ✓    |   ✓    |    ✓    |      ✓       |     ✓     |
-| **Convex**    |   ✓    |   ✓    |    ✓    |              |     ✓     |
-| **Traceable** |   ✓    |   ✓    |    ✓    |      ✓       |           |
+|               | AA-Box | Sphere | Capsule | Convex | Traceable |
+|---------------|:------:|:------:|:-------:|:------:|:---------:|
+| **AA-Box**    |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
+| **Sphere**    |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
+| **Capsule**   |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
+| **Convex**    |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
+| **Traceable** |   ✓    |   ✓    |    ✓    |   ✓    |           |
 
-Convex-vs-convex and traceable-vs-traceable are not supported. Segment traces (raycasting) work against all shape types.
+Traceable-vs-Traceable is not supported. Segment traces (raycasting) work against all shape types.
 
 **No cylinder primitive**: a cylinder's flat cap meets its curved side at a sharp circular edge. Sweeping any shape against that edge requires finding the intersection with a quarter-torus, which is a degree-4 polynomial — inconsistent with the quadratic math used everywhere else in hop, and impractical in fixed-point. Use a **capsule** instead: it is geometrically equivalent for collision purposes, and its hemispherical caps turn the hard rim problem into a smooth sphere test. If flat caps are required, a `convex_solid` approximation is available.
 
@@ -112,7 +112,7 @@ sim->add_solid(s);
 
 // Simulate 1 second in 10ms steps
 for (int i = 0; i < 100; ++i) {
-    sim->update(10);
+	sim->update(10);
 }
 // s->get_position().z is now ~5.1 (freefall: 10 - 0.5 * 9.81 * 1^2)
 ```
@@ -130,7 +130,7 @@ A browser-based [demo](web/) using WebAssembly + Three.js is included — precom
 
 ```sh
 cd web && python3 -m http.server 8080
-# Open http://localhost:8080
+#Open http: // localhost:8080
 ```
 
 To rebuild the WASM bindings from source (requires [Emscripten](https://emscripten.org)):

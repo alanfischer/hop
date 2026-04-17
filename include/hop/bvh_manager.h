@@ -2,8 +2,8 @@
 
 #include <hop/bvh.h>
 #include <hop/manager.h>
-#include <hop/solid.h>
 #include <hop/math/intersect.h>
+#include <hop/solid.h>
 
 #include <algorithm>
 #include <utility>
@@ -24,8 +24,7 @@ namespace hop {
 // Call rebuild() after adding/removing static solids, or it will
 // rebuild lazily on the next query.
 
-template <typename T>
-class bvh_manager : public manager<T> {
+template <typename T> class bvh_manager : public manager<T> {
 public:
 	void add_solid(solid<T> * s, bool is_static) {
 		if (is_static) {
@@ -54,7 +53,8 @@ public:
 		entries.reserve(static_solids_.size());
 
 		for (auto * s : static_solids_) {
-			if (s->get_num_shapes() == 0) continue;
+			if (s->get_num_shapes() == 0)
+				continue;
 			entries.push_back({ s->get_world_bound(), s });
 		}
 
@@ -68,7 +68,8 @@ public:
 	// ---- manager<T> interface ----
 
 	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) override {
-		if (dirty_) rebuild();
+		if (dirty_)
+			rebuild();
 
 		int count = 0;
 
@@ -82,7 +83,8 @@ public:
 
 		// Linear scan for dynamic solids
 		for (auto * s : dynamic_solids_) {
-			if (count >= max_solids) break;
+			if (count >= max_solids)
+				break;
 			if (test_intersection(box, s->get_world_bound())) {
 				solids[count] = s;
 				count++;
@@ -102,7 +104,9 @@ public:
 	void post_update(int dt, T fdt) override {}
 	void pre_update(solid<T> * s, int dt, T fdt) override {}
 	void intra_update(solid<T> * s, int dt, T fdt) override {}
-	bool collision_response(solid<T> * s, vec3<T> & position, vec3<T> & remainder, collision<T> & col) override { return false; }
+	bool collision_response(solid<T> * s, vec3<T> & position, vec3<T> & remainder, collision<T> & col) override {
+		return false;
+	}
 	void post_update(solid<T> * s, int dt, T fdt) override {}
 
 private:
