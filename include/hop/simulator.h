@@ -306,8 +306,7 @@ private:
 	                   T fdt);
 	// Apply Coulomb friction impulse at the moment of collision, opposing the
 	// tangential relative velocity, capped by µ_d * |normal_impulse|.
-	void collision_friction(solid<T> * s, solid<T> * hit, const collision<T> & c,
-	                        T normal_impulse, T one_over_mass);
+	void collision_friction(solid<T> * s, solid<T> * hit, const collision<T> & c, T normal_impulse, T one_over_mass);
 	void constraint_link(vec3<T> & result, solid<T> * s, const vec3<T> & solid_pos, const vec3<T> & solid_vel);
 	void update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T fdt);
 	void integration_step(solid<T> * s,
@@ -634,7 +633,6 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 					hit_solid->activate();
 					sub(hit_solid->velocity_, temp);
 				}
-
 			}
 
 			// Touching code
@@ -893,8 +891,10 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				mul(half, tr::half());
 				// Use the maximum half-extent as inflation radius (conservative)
 				T max_half = half.x;
-				if (half.y > max_half) max_half = half.y;
-				if (half.z > max_half) max_half = half.z;
+				if (half.y > max_half)
+					max_half = half.y;
+				if (half.z > max_half)
+					max_half = half.z;
 				for (auto & p : cs.planes)
 					p.distance = p.distance + max_half;
 				segment<T> tmp;
@@ -1020,8 +1020,10 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				sub(half, sh2->aa_box_.maxs, sh2->aa_box_.mins);
 				mul(half, tr::half());
 				T max_half = half.x;
-				if (half.y > max_half) max_half = half.y;
-				if (half.z > max_half) max_half = half.z;
+				if (half.y > max_half)
+					max_half = half.y;
+				if (half.z > max_half)
+					max_half = half.z;
 				for (auto & p : cs.planes)
 					p.distance = p.distance + max_half;
 				segment<T> tmp;
@@ -1290,8 +1292,8 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 	auto & col = cache_trace_solid_collision_.reset();
 	for (int i = 0; i < num_spacial_collection_; ++i) {
 		auto * s2 = spacial_collection_[i];
-		if (s != s2 && (collide_with_bits & s2->collision_scope_) != 0 &&
-		    s->should_collide(s2) && s2->should_collide(s)) {
+		if (s != s2 && (collide_with_bits & s2->collision_scope_) != 0 && s->should_collide(s2) &&
+		    s2->should_collide(s)) {
 			col.time = tr::one();
 			test_solid(col, s, seg, s2);
 			int scope = result.scope;
@@ -1637,16 +1639,17 @@ void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, 
 }
 
 template <typename T>
-void simulator<T>::collision_friction(solid<T> * s, solid<T> * hit,
-                                      const collision<T> & c,
-                                      T normal_impulse, T one_over_mass) {
+void simulator<T>::collision_friction(
+    solid<T> * s, solid<T> * hit, const collision<T> & c, T normal_impulse, T one_over_mass) {
 	T zero_val {};
-	if (s->coefficient_of_dynamic_friction_ <= zero_val) return;
+	if (s->coefficient_of_dynamic_friction_ <= zero_val)
+		return;
 	T abs_impulse = normal_impulse < zero_val ? -normal_impulse : normal_impulse;
-	if (abs_impulse <= zero_val) return;
+	if (abs_impulse <= zero_val)
+		return;
 
 	auto & vtan = cache_collision_friction_vtan_;
-	auto & dir  = cache_collision_friction_dir_;
+	auto & dir = cache_collision_friction_dir_;
 
 	// Tangential relative velocity (post-restitution)
 	if (hit) {
@@ -1658,11 +1661,13 @@ void simulator<T>::collision_friction(solid<T> * s, solid<T> * hit,
 	sub(vtan, dir);
 
 	T tan_speed = length(vtan);
-	if (tan_speed <= epsilon_) return;
+	if (tan_speed <= epsilon_)
+		return;
 
 	// Cap friction to not exceed what's needed to stop tangential motion
 	T max_dv = s->coefficient_of_dynamic_friction_ * abs_impulse * one_over_mass;
-	if (max_dv > tan_speed) max_dv = tan_speed;
+	if (max_dv > tan_speed)
+		max_dv = tan_speed;
 
 	mul(dir, vtan, -(max_dv / tan_speed));
 	add(s->velocity_, dir);

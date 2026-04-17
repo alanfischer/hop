@@ -5,8 +5,8 @@
 #include <hop/scalar_traits.h>
 
 #include <algorithm>
-#include <vector>
 #include <utility>
+#include <vector>
 
 namespace hop {
 
@@ -23,8 +23,7 @@ namespace hop {
 //   tree.query_aabb(box, [](int item) { ... });
 //   tree.query_ray(origin, direction, [](int item, float &best_t) { ... });
 
-template <typename T, typename Item>
-class bvh {
+template <typename T, typename Item> class bvh {
 public:
 	using tr = scalar_traits<T>;
 
@@ -39,15 +38,16 @@ public:
 	// Build from a list of (AABB, item) pairs. The input vector may be reordered.
 	void build(std::vector<std::pair<aa_box<T>, Item>> & entries) {
 		nodes_.clear();
-		if (entries.empty()) return;
+		if (entries.empty())
+			return;
 		nodes_.reserve(entries.size() * 2);
 		build_recursive(entries, 0, static_cast<int>(entries.size()));
 	}
 
 	// Find all items whose AABBs overlap the given box.
-	template <typename Callback>
-	void query_aabb(const aa_box<T> & box, Callback && cb) const {
-		if (nodes_.empty()) return;
+	template <typename Callback> void query_aabb(const aa_box<T> & box, Callback && cb) const {
+		if (nodes_.empty())
+			return;
 		query_aabb_recursive(0, box, cb);
 	}
 
@@ -55,7 +55,8 @@ public:
 	// and should update best_t if it finds a closer hit, enabling early pruning.
 	template <typename Callback>
 	void query_ray(const vec3<T> & origin, const vec3<T> & direction, Callback && cb) const {
-		if (nodes_.empty()) return;
+		if (nodes_.empty())
+			return;
 		T best_t = tr::one();
 		vec3<T> inv_dir = safe_inv_dir(direction);
 		query_ray_recursive(0, origin, inv_dir, best_t, cb);
@@ -93,22 +94,22 @@ private:
 		int axis = (dx >= dy && dx >= dz) ? 0 : (dy >= dz) ? 1 : 2;
 
 		// Sort by centroid on split axis
-		std::sort(entries.begin() + start, entries.begin() + end,
-			[axis](const std::pair<aa_box<T>, Item> & a,
-			       const std::pair<aa_box<T>, Item> & b) {
-				T ca, cb;
-				if (axis == 0) {
-					ca = a.first.mins.x + a.first.maxs.x;
-					cb = b.first.mins.x + b.first.maxs.x;
-				} else if (axis == 1) {
-					ca = a.first.mins.y + a.first.maxs.y;
-					cb = b.first.mins.y + b.first.maxs.y;
-				} else {
-					ca = a.first.mins.z + a.first.maxs.z;
-					cb = b.first.mins.z + b.first.maxs.z;
-				}
-				return ca < cb;
-			});
+		std::sort(entries.begin() + start,
+		          entries.begin() + end,
+		          [axis](const std::pair<aa_box<T>, Item> & a, const std::pair<aa_box<T>, Item> & b) {
+			          T ca, cb;
+			          if (axis == 0) {
+				          ca = a.first.mins.x + a.first.maxs.x;
+				          cb = b.first.mins.x + b.first.maxs.x;
+			          } else if (axis == 1) {
+				          ca = a.first.mins.y + a.first.maxs.y;
+				          cb = b.first.mins.y + b.first.maxs.y;
+			          } else {
+				          ca = a.first.mins.z + a.first.maxs.z;
+				          cb = b.first.mins.z + b.first.maxs.z;
+			          }
+			          return ca < cb;
+		          });
 
 		int mid = (start + end) / 2;
 
@@ -122,25 +123,26 @@ private:
 		return idx;
 	}
 
-	template <typename Callback>
-	void query_aabb_recursive(int idx, const aa_box<T> & box, Callback && cb) const {
+	template <typename Callback> void query_aabb_recursive(int idx, const aa_box<T> & box, Callback && cb) const {
 		const auto & n = nodes_[idx];
-		if (!test_intersection(n.box, box)) return;
+		if (!test_intersection(n.box, box))
+			return;
 
 		if (n.is_leaf()) {
 			cb(n.item);
 			return;
 		}
-		if (n.left >= 0) query_aabb_recursive(n.left, box, cb);
-		if (n.right >= 0) query_aabb_recursive(n.right, box, cb);
+		if (n.left >= 0)
+			query_aabb_recursive(n.left, box, cb);
+		if (n.right >= 0)
+			query_aabb_recursive(n.right, box, cb);
 	}
 
 	// Ray-AABB slab test. Returns true if ray hits box before best_t.
 	// We use a dedicated slab test rather than hop's find_intersection(segment, aa_box)
 	// because we only need a boolean (no hit point/normal), making this faster for
 	// BVH traversal where we test many nodes but only care about pruning.
-	static bool ray_hits_aabb(const vec3<T> & origin, const vec3<T> & inv_dir,
-	                          const aa_box<T> & box, T best_t) {
+	static bool ray_hits_aabb(const vec3<T> & origin, const vec3<T> & inv_dir, const aa_box<T> & box, T best_t) {
 		T zero_val {};
 
 		T t1 = (box.mins.x - origin.x) * inv_dir.x;
@@ -172,27 +174,27 @@ private:
 		} else {
 			big = tr::from_int(10000);
 		}
-		return vec3<T>(
-			direction.x != zero_val ? tr::one() / direction.x : big,
-			direction.y != zero_val ? tr::one() / direction.y : big,
-			direction.z != zero_val ? tr::one() / direction.z : big
-		);
+		return vec3<T>(direction.x != zero_val ? tr::one() / direction.x : big,
+		               direction.y != zero_val ? tr::one() / direction.y : big,
+		               direction.z != zero_val ? tr::one() / direction.z : big);
 	}
 
 	template <typename Callback>
-	void query_ray_recursive(int idx, const vec3<T> & origin,
-	                         const vec3<T> & inv_dir,
-	                         T & best_t, Callback && cb) const {
+	void query_ray_recursive(
+	    int idx, const vec3<T> & origin, const vec3<T> & inv_dir, T & best_t, Callback && cb) const {
 		const auto & n = nodes_[idx];
 
-		if (!ray_hits_aabb(origin, inv_dir, n.box, best_t)) return;
+		if (!ray_hits_aabb(origin, inv_dir, n.box, best_t))
+			return;
 
 		if (n.is_leaf()) {
 			cb(n.item, best_t);
 			return;
 		}
-		if (n.left >= 0) query_ray_recursive(n.left, origin, inv_dir, best_t, cb);
-		if (n.right >= 0) query_ray_recursive(n.right, origin, inv_dir, best_t, cb);
+		if (n.left >= 0)
+			query_ray_recursive(n.left, origin, inv_dir, best_t, cb);
+		if (n.right >= 0)
+			query_ray_recursive(n.right, origin, inv_dir, best_t, cb);
 	}
 };
 
