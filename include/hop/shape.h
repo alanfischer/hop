@@ -12,7 +12,7 @@ template <typename T> class solid;
 template <typename T> class simulator;
 
 enum class shape_type {
-	aa_box = 1 << 0,
+	box = 1 << 0,
 	sphere = 1 << 1,
 	capsule = 1 << 2,
 	convex_solid = 1 << 3,
@@ -25,7 +25,7 @@ public:
 	using tr = scalar_traits<T>;
 
 	shape() = default;
-	explicit shape(const aa_box<T> & box) : type_(shape_type::aa_box), aa_box_(box) {}
+	explicit shape(const aa_box<T> & box) : type_(shape_type::box), box_(box) {}
 	explicit shape(const hop::sphere<T> & s) : type_(shape_type::sphere), sphere_(s) {}
 	explicit shape(const hop::capsule<T> & c) : type_(shape_type::capsule), capsule_(c) {}
 	explicit shape(const hop::convex_solid<T> & cs) : type_(shape_type::convex_solid), convex_solid_(cs) {}
@@ -36,19 +36,19 @@ public:
 			solid_->remove_shape(this->shared_from_this());
 			solid_ = nullptr;
 		}
-		aa_box_ = {};
-		type_ = shape_type::aa_box;
+		box_ = {};
+		type_ = shape_type::box;
 		sphere_ = {};
 		capsule_ = {};
 	}
 
-	void set_aa_box(const aa_box<T> & box) {
-		type_ = shape_type::aa_box;
-		aa_box_ = box;
+	void set_box(const aa_box<T> & box) {
+		type_ = shape_type::box;
+		box_ = box;
 		if (solid_)
 			solid_->update_local_bound();
 	}
-	const aa_box<T> & get_aa_box() const { return aa_box_; }
+	const aa_box<T> & get_box() const { return box_; }
 
 	void set_sphere(const hop::sphere<T> & s) {
 		type_ = shape_type::sphere;
@@ -86,8 +86,8 @@ public:
 
 	void get_bound(aa_box<T> & box) const {
 		switch (type_) {
-		case shape_type::aa_box:
-			box.set(aa_box_);
+		case shape_type::box:
+			box.set(box_);
 			break;
 		case shape_type::sphere:
 			find_bounding_box(box, sphere_);
@@ -142,8 +142,8 @@ public:
 	}
 
 private:
-	shape_type type_ = shape_type::aa_box;
-	aa_box<T> aa_box_;
+	shape_type type_ = shape_type::box;
+	aa_box<T> box_;
 	hop::sphere<T> sphere_;
 	hop::capsule<T> capsule_;
 	hop::convex_solid<T> convex_solid_;
@@ -156,8 +156,8 @@ private:
 
 template <typename T> inline void support(vec3<T> & result, const shape<T> & sh, const vec3<T> & d) {
 	switch (sh.get_type()) {
-	case shape_type::aa_box:
-		support(result, sh.get_aa_box(), d);
+	case shape_type::box:
+		support(result, sh.get_box(), d);
 		break;
 	case shape_type::sphere:
 		support(result, sh.get_sphere(), d);
