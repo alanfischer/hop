@@ -783,8 +783,8 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 	for (int i = 0; i < n; ++i) {
 		auto * sh = shapes[i].get();
 		switch (sh->type_) {
-		case shape_type::aa_box: {
-			auto & box = cache_test_segment_box_.set(sh->aa_box_);
+		case shape_type::box: {
+			auto & box = cache_test_segment_box_.set(sh->box_);
 			add(box, s->position_);
 			trace_aa_box(col, seg, box);
 			break;
@@ -862,32 +862,32 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			modify_scope = false;
 
 			// AABox vs *
-			if (sh1->type_ == shape_type::aa_box && sh2->type_ == shape_type::aa_box) {
-				auto & box = cache_test_solid_box_.set(sh2->aa_box_);
+			if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::box) {
+				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
-				sub(box.maxs, sh1->aa_box_.mins);
-				sub(box.mins, sh1->aa_box_.maxs);
+				sub(box.maxs, sh1->box_.mins);
+				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
-			} else if (sh1->type_ == shape_type::aa_box && sh2->type_ == shape_type::sphere) {
+			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::sphere) {
 				auto & box = cache_test_solid_box_.set(sh2->sphere_.radius);
 				add(box, sh2->sphere_.origin);
 				add(box, s2->position_);
-				sub(box.maxs, sh1->aa_box_.mins);
-				sub(box.mins, sh1->aa_box_.maxs);
+				sub(box.maxs, sh1->box_.mins);
+				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
-			} else if (sh1->type_ == shape_type::aa_box && sh2->type_ == shape_type::capsule) {
+			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::capsule) {
 				auto & box = cache_test_solid_box_;
 				sh2->get_bound(box);
 				add(box, s2->position_);
-				sub(box.maxs, sh1->aa_box_.mins);
-				sub(box.mins, sh1->aa_box_.maxs);
+				sub(box.maxs, sh1->box_.mins);
+				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
-			} else if (sh1->type_ == shape_type::aa_box && sh2->type_ == shape_type::convex_solid) {
+			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::convex_solid) {
 				// Conservative: inflate convex planes by max half-extent of the aa_box
 				hop::convex_solid<T> cs;
 				cs.set(sh2->convex_solid_);
 				vec3<T> half;
-				sub(half, sh1->aa_box_.maxs, sh1->aa_box_.mins);
+				sub(half, sh1->box_.maxs, sh1->box_.mins);
 				mul(half, tr::half());
 				// Use the maximum half-extent as inflation radius (conservative)
 				T max_half = half.x;
@@ -902,7 +902,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				sub(tmp.origin, s2->get_position());
 				// Use center of aa_box as trace origin
 				vec3<T> center;
-				add(center, sh1->aa_box_.mins, sh1->aa_box_.maxs);
+				add(center, sh1->box_.mins, sh1->box_.maxs);
 				mul(center, tr::half());
 				add(tmp.origin, center);
 				trace_convex_solid(col, tmp, cs);
@@ -911,10 +911,10 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				}
 			}
 			// Sphere vs *
-			else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::aa_box) {
+			else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::box) {
 				auto & box1 = cache_test_solid_box1_.set(sh1->sphere_.radius);
 				add(box1, sh1->sphere_.origin);
-				auto & box = cache_test_solid_box_.set(sh2->aa_box_);
+				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
@@ -947,10 +947,10 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				}
 			}
 			// Capsule vs *
-			else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::aa_box) {
+			else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::box) {
 				auto & box1 = cache_test_solid_box1_;
 				sh1->get_bound(box1);
-				auto & box = cache_test_solid_box_.set(sh2->aa_box_);
+				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
@@ -1009,7 +1009,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				                      sh1->capsule_.radius + sh2->capsule_.radius);
 			}
 			// Convex solid vs aa_box
-			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::aa_box) {
+			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::box) {
 				segment<T> iseg;
 				mul(iseg.direction, seg.direction, -tr::one());
 				collision<T> icol;
@@ -1017,7 +1017,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				hop::convex_solid<T> cs;
 				cs.set(sh1->convex_solid_);
 				vec3<T> half;
-				sub(half, sh2->aa_box_.maxs, sh2->aa_box_.mins);
+				sub(half, sh2->box_.maxs, sh2->box_.mins);
 				mul(half, tr::half());
 				T max_half = half.x;
 				if (half.y > max_half)
@@ -1031,7 +1031,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				tmp.origin.set(s2->position_);
 				sub(tmp.origin, s1->get_position());
 				vec3<T> center;
-				add(center, sh2->aa_box_.mins, sh2->aa_box_.maxs);
+				add(center, sh2->box_.mins, sh2->box_.maxs);
 				mul(center, tr::half());
 				add(tmp.origin, center);
 				trace_convex_solid(icol, tmp, cs);
@@ -1132,7 +1132,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				}
 			}
 			// Traceable vs aa_box
-			else if (sh1->type_ == shape_type::traceable && sh2->type_ == shape_type::aa_box) {
+			else if (sh1->type_ == shape_type::traceable && sh2->type_ == shape_type::box) {
 				segment<T> iseg;
 				iseg.origin.set(s2->position_);
 				mul(iseg.direction, seg.direction, -tr::one());
@@ -1176,7 +1176,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				modify_scope = true;
 			}
 			// aa_box vs traceable
-			else if (sh1->type_ == shape_type::aa_box && sh2->type_ == shape_type::traceable) {
+			else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::traceable) {
 				sh2->traceable_->trace_solid(col, s1, s2->position_, seg);
 				modify_scope = true;
 			}
