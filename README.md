@@ -1,4 +1,4 @@
-#hop
+# hop
 
 A standalone, header-only C++17 physics library for swept-collision simulation. Extracted from the [Toadlet](https://github.com/alanfischer/toadlet) game engine.
 
@@ -130,7 +130,7 @@ A browser-based [demo](web/) using WebAssembly + Three.js is included — precom
 
 ```sh
 cd web && python3 -m http.server 8080
-#Open http: // localhost:8080
+# Open http: // localhost:8080
 ```
 
 To rebuild the WASM bindings from source (requires [Emscripten](https://emscripten.org)):
