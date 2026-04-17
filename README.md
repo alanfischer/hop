@@ -19,7 +19,7 @@ This is intentional. Hop was designed for the [Toadlet](https://github.com/alanf
 
 ## Features
 
-- **Swept collision detection** (continuous collision detection) for sphere, capsule, AA-box, and convex solid shapes
+- **Swept collision detection** (continuous collision detection) for sphere, capsule, box, and convex solid shapes
 - **Multiple numerical integrators**: Euler, Improved Euler, Heun (default), Runge-Kutta
 - **Collision response** with coefficient of restitution, conservation of momentum, and friction
 - **Constraint system** with spring constants, damping, and distance thresholds
@@ -50,7 +50,7 @@ bool overlapping = result.time < 1.0f;  // t == 0 means solid is inside
 
 | Shape pair | Zero-direction result |
 |---|---|
-| Solid vs aa_box | `t = 0` when inside (via `test_inside` path) |
+| Solid vs box | `t = 0` when inside (via `test_inside` path) |
 | Solid vs sphere | `t = 0` when inside |
 | Solid vs capsule | `t = 0` when inside |
 | Solid vs traceable | Depends on the `traceable` implementation — **see below** |
@@ -79,9 +79,9 @@ See `HopTrimeshTraceable::trace_solid` in `hop-godot` for a reference implementa
 
 Not all shape combinations are supported for solid-vs-solid collision. The matrix below shows which pairs have swept collision detection:
 
-|               | AA-Box | Sphere | Capsule | Convex | Traceable |
+|               |  Box   | Sphere | Capsule | Convex | Traceable |
 |---------------|:------:|:------:|:-------:|:------:|:---------:|
-| **AA-Box**    |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
+| **Box**       |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
 | **Sphere**    |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
 | **Capsule**   |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
 | **Convex**    |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
