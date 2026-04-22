@@ -787,21 +787,21 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 		case shape_type::box: {
 			auto & box = cache_test_segment_box_.set(sh->box_);
 			add(box, s->position_);
-			box += lp;
+			add(box, lp);
 			trace_aa_box(col, seg, box);
 			break;
 		}
 		case shape_type::sphere: {
 			auto & sph = cache_test_segment_sphere_.set(sh->sphere_);
 			add(sph, s->position_);
-			sph += lp;
+			add(sph, lp);
 			trace_sphere(col, seg, sph);
 			break;
 		}
 		case shape_type::capsule: {
 			auto & cap = cache_test_segment_capsule_.set(sh->capsule_);
 			add(cap, s->position_);
-			cap += lp;
+			add(cap, lp);
 			trace_capsule(col, seg, cap);
 			break;
 		}
@@ -898,7 +898,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::box) {
 				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
-				box += lp_delta;
+				add(box, lp_delta);
 				sub(box.maxs, sh1->box_.mins);
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
@@ -906,7 +906,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				auto & box = cache_test_solid_box_.set(sh2->sphere_.radius);
 				add(box, sh2->sphere_.origin);
 				add(box, s2->position_);
-				box += lp_delta;
+				add(box, lp_delta);
 				sub(box.maxs, sh1->box_.mins);
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
@@ -914,7 +914,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				auto & box = cache_test_solid_box_;
 				sh2->get_bound(box);
 				add(box, s2->position_);
-				box += lp_delta;
+				add(box, lp_delta);
 				sub(box.maxs, sh1->box_.mins);
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
@@ -953,7 +953,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				add(box1, sh1->sphere_.origin);
 				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
-				box += lp_delta;
+				add(box, lp_delta);
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
 				trace_aa_box(col, seg, box);
@@ -995,7 +995,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				sh1->get_bound(box1);
 				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
-				box += lp_delta;
+				add(box, lp_delta);
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
 				trace_aa_box(col, seg, box);
@@ -1037,10 +1037,12 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				col_top.time = one;
 				trace_convex_solid(col_top, tmp2, cs);
 
-				if (col_bottom.time < col_top.time)
-					col = col_bottom;
-				else
-					col = col_top;
+				// Pick earliest hit. Copy fields individually rather than
+				// struct-assigning col — col.collider was set at the top of
+				// test_solid and struct-assign would clobber it to null.
+				const collision<T> & hit = (col_bottom.time < col_top.time) ? col_bottom : col_top;
+				col.time = hit.time;
+				col.normal.set(hit.normal);
 				// Normalize col.point to s1's center at impact (the trace was of
 				// an endpoint, not s1's origin).
 				if (col.time < one) {

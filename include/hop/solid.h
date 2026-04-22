@@ -206,12 +206,12 @@ public:
 		} else {
 			shape_types_ |= static_cast<int>(shapes_[0]->get_type());
 			shapes_[0]->get_bound(local_bound_);
-			local_bound_ += shapes_[0]->get_local_position();
+			add(local_bound_, shapes_[0]->get_local_position());
 			aa_box<T> box;
 			for (int i = 1; i < static_cast<int>(shapes_.size()); ++i) {
 				shape_types_ |= static_cast<int>(shapes_[i]->get_type());
 				shapes_[i]->get_bound(box);
-				box += shapes_[i]->get_local_position();
+				add(box, shapes_[i]->get_local_position());
 				local_bound_.merge(box);
 			}
 		}

@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <hop/hop.h>
 
 using namespace hop;
@@ -349,6 +350,66 @@ template <typename T> static void test_impact_with_local_position(const char * l
 	printf("OK\n");
 }
 
+// Regression: capsule-vs-convex_solid picks the earliest of two spine-endpoint
+// traces. An earlier version struct-assigned the chosen sub-collision into the
+// shared col, clobbering col.collider (set at the top of test_solid) to null.
+// The callback should see a non-null collider after a capsule/convex_solid hit.
+template <typename T> static void test_capsule_vs_convex_preserves_collider(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  capsule_vs_convex_preserves_collider[%s]: ", label);
+	simulator<T> sim;
+	sim.set_gravity({ T {}, T {}, T {} });
+
+	// Target: infinite-mass convex cube at x=5
+	auto target = std::make_shared<solid<T>>();
+	target->set_infinite_mass();
+	target->set_coefficient_of_gravity(T {});
+	hop::convex_solid<T> cs;
+	T one = tr::one(), zero {}, neg_one = -tr::one(), half = tr::half();
+	cs.planes.push_back(hop::plane<T>(one, zero, zero, half));
+	cs.planes.push_back(hop::plane<T>(neg_one, zero, zero, half));
+	cs.planes.push_back(hop::plane<T>(zero, one, zero, half));
+	cs.planes.push_back(hop::plane<T>(zero, neg_one, zero, half));
+	cs.planes.push_back(hop::plane<T>(zero, zero, one, half));
+	cs.planes.push_back(hop::plane<T>(zero, zero, neg_one, half));
+	target->add_shape(std::make_shared<shape<T>>(cs));
+	target->set_position({ tr::from_int(2), T {}, T {} });
+	sim.add_solid(target);
+
+	// Mover: capsule sliding +x toward the cube
+	auto mover = std::make_shared<solid<T>>();
+	mover->set_mass(tr::one());
+	mover->set_coefficient_of_restitution(tr::one());
+	mover->set_coefficient_of_restitution_override(true);
+	mover->add_shape(std::make_shared<shape<T>>(
+	    hop::capsule<T>(vec3<T>(), vec3<T>(T {}, T {}, tr::from_int(1)), tr::from_milli(300))));
+	mover->set_position({ T {}, T {}, T {} });
+	mover->set_velocity({ tr::from_int(5), T {}, T {} });
+
+	std::shared_ptr<solid<T>> seen_collider;
+	int callback_count = 0;
+	mover->set_collision_callback([&](const collision<T> & c) {
+		++callback_count;
+		if (!seen_collider)
+			seen_collider = c.collider;
+	});
+	sim.add_solid(mover);
+
+	for (int i = 0; i < 200; ++i) sim.update(10, simulator<T>::scope_report_collisions);
+
+	// Release-safe checks: assert is a no-op under NDEBUG, so verify manually.
+	if (callback_count == 0) {
+		printf("FAIL: no callback fired (c.collider likely wiped to null)\n");
+		std::exit(1);
+	}
+	if (seen_collider.get() != target.get()) {
+		printf("FAIL: callback saw collider=%p, expected target=%p\n",
+		       (void *)seen_collider.get(), (void *)target.get());
+		std::exit(1);
+	}
+	printf("OK\n");
+}
+
 template <typename T> static void run_all_tests(const char * label) {
 	printf(" [%s]\n", label);
 	test_sphere_local_position_equivalence<T>(label);
@@ -357,6 +418,7 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_character_compound_lands_on_feet<T>(label);
 	test_compound_segment_trace<T>(label);
 	test_impact_with_local_position<T>(label);
+	test_capsule_vs_convex_preserves_collider<T>(label);
 }
 
 int main() {
