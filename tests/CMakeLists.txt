@@ -25,3 +25,7 @@ add_test(NAME test_bvh COMMAND test_bvh)
 add_executable(test_support test_support.cpp)
 target_link_libraries(test_support PRIVATE hop)
 add_test(NAME test_support COMMAND test_support)
+
+add_executable(test_compound test_compound.cpp)
+target_link_libraries(test_compound PRIVATE hop)
+add_test(NAME test_compound COMMAND test_compound)

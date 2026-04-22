@@ -782,22 +782,26 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 
 	for (int i = 0; i < n; ++i) {
 		auto * sh = shapes[i].get();
+		const vec3<T> & lp = sh->get_local_position();
 		switch (sh->type_) {
 		case shape_type::box: {
 			auto & box = cache_test_segment_box_.set(sh->box_);
 			add(box, s->position_);
+			box += lp;
 			trace_aa_box(col, seg, box);
 			break;
 		}
 		case shape_type::sphere: {
 			auto & sph = cache_test_segment_sphere_.set(sh->sphere_);
 			add(sph, s->position_);
+			sph += lp;
 			trace_sphere(col, seg, sph);
 			break;
 		}
 		case shape_type::capsule: {
 			auto & cap = cache_test_segment_capsule_.set(sh->capsule_);
 			add(cap, s->position_);
+			cap += lp;
 			trace_capsule(col, seg, cap);
 			break;
 		}
@@ -807,16 +811,21 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 			segment<T> tmp;
 			tmp.set(seg);
 			sub(tmp.origin, s->position_);
+			sub(tmp.origin, lp);
 			trace_convex_solid(col, tmp, cs);
 			if (col.time < one) {
 				add(col.point, s->position_);
+				add(col.point, lp);
 			}
 			break;
 		}
-		case shape_type::traceable:
-			sh->traceable_->trace_segment(col, s->position_, seg);
+		case shape_type::traceable: {
+			vec3<T> traceable_origin;
+			add(traceable_origin, s->position_, lp);
+			sh->traceable_->trace_segment(col, traceable_origin, seg);
 			modify_scope = true;
 			break;
+		}
 		}
 
 		// Segment traces have no Minkowski expansion: impact == point
@@ -861,10 +870,15 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			auto * sh2 = shapes2[j].get();
 			modify_scope = false;
 
+			const vec3<T> & lp1 = sh1->get_local_position();
+			const vec3<T> & lp2 = sh2->get_local_position();
+
 			// AABox vs *
 			if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::box) {
 				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
+				box += lp2;
+				box -= lp1;
 				sub(box.maxs, sh1->box_.mins);
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
@@ -872,13 +886,16 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				auto & box = cache_test_solid_box_.set(sh2->sphere_.radius);
 				add(box, sh2->sphere_.origin);
 				add(box, s2->position_);
+				box += lp2;
+				box -= lp1;
 				sub(box.maxs, sh1->box_.mins);
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::capsule) {
 				auto & box = cache_test_solid_box_;
-				sh2->get_bound(box);
+				sh2->get_bound(box);  // already includes sh2's local_position
 				add(box, s2->position_);
+				box -= lp1;
 				sub(box.maxs, sh1->box_.mins);
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
@@ -889,25 +906,27 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				vec3<T> half;
 				sub(half, sh1->box_.maxs, sh1->box_.mins);
 				mul(half, tr::half());
-				// Use the maximum half-extent as inflation radius (conservative)
 				T max_half = half.x;
 				if (half.y > max_half)
 					max_half = half.y;
 				if (half.z > max_half)
 					max_half = half.z;
-				for (auto & p : cs.planes)
-					p.distance = p.distance + max_half;
-				segment<T> tmp;
-				tmp.set(seg);
-				sub(tmp.origin, s2->get_position());
-				// Use center of aa_box as trace origin
 				vec3<T> center;
 				add(center, sh1->box_.mins, sh1->box_.maxs);
 				mul(center, tr::half());
-				add(tmp.origin, center);
+				// Offset of sh1's box-center in s1's local frame (including lp1)
+				vec3<T> sh1_offset;
+				add(sh1_offset, center, lp1);
+				for (auto & p : cs.planes)
+					p.distance = p.distance + max_half - dot(sh1_offset, p.normal);
+				segment<T> tmp;
+				tmp.set(seg);
+				sub(tmp.origin, s2->get_position());
+				sub(tmp.origin, lp2);
 				trace_convex_solid(col, tmp, cs);
 				if (col.time < one) {
 					add(col.point, s2->get_position());
+					add(col.point, lp2);
 				}
 			}
 			// Sphere vs *
@@ -916,17 +935,23 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				add(box1, sh1->sphere_.origin);
 				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
+				box += lp2;
+				box -= lp1;
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::sphere) {
 				auto & origin = cache_test_solid_origin_.set(s2->position_);
+				add(origin, lp2);
+				sub(origin, lp1);
 				sub(origin, sh1->sphere_.origin);
 				add(origin, sh2->sphere_.origin);
 				auto & sph = cache_test_solid_sphere_.set(origin, sh2->sphere_.radius + sh1->sphere_.radius);
 				trace_sphere(col, seg, sph);
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::capsule) {
 				auto & origin = cache_test_solid_origin_.set(s2->position_);
+				add(origin, lp2);
+				sub(origin, lp1);
 				sub(origin, sh1->sphere_.origin);
 				add(origin, sh2->capsule_.origin);
 				auto & cap = cache_test_solid_capsule_.set(
@@ -935,28 +960,37 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::convex_solid) {
 				hop::convex_solid<T> cs;
 				cs.set(sh2->convex_solid_);
+				vec3<T> sh1_offset;
+				add(sh1_offset, sh1->sphere_.origin, lp1);
 				for (auto & p : cs.planes)
-					p.distance = p.distance + sh1->sphere_.radius;
+					p.distance = p.distance + sh1->sphere_.radius - dot(sh1_offset, p.normal);
 				segment<T> tmp;
 				tmp.set(seg);
 				sub(tmp.origin, s2->get_position());
-				add(tmp.origin, sh1->sphere_.origin);
+				sub(tmp.origin, lp2);
 				trace_convex_solid(col, tmp, cs);
 				if (col.time < one) {
 					add(col.point, s2->get_position());
+					add(col.point, lp2);
 				}
 			}
 			// Capsule vs *
 			else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::box) {
 				auto & box1 = cache_test_solid_box1_;
-				sh1->get_bound(box1);
+				sh1->get_bound(box1);  // already includes sh1's local_position
+				// Undo the lp1 in box1 — we want Minkowski expansion by sh1.capsule only
+				box1 -= lp1;
 				auto & box = cache_test_solid_box_.set(sh2->box_);
 				add(box, s2->position_);
+				box += lp2;
+				box -= lp1;
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::sphere) {
 				auto & origin = cache_test_solid_origin_.set(s2->position_);
+				add(origin, lp2);
+				sub(origin, lp1);
 				sub(origin, sh1->capsule_.origin);
 				add(origin, sh2->sphere_.origin);
 				auto & dir = cache_test_solid_direction_.set(sh1->capsule_.direction);
@@ -966,29 +1000,32 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::convex_solid) {
 				// Inflate convex solid planes by capsule radius, then trace
 				// the capsule spine (two endpoints) as a segment against it.
-				// This is a conservative Minkowski-sum approximation.
-				hop::convex_solid<T> cs;
-				cs.set(sh2->convex_solid_);
-				for (auto & p : cs.planes)
-					p.distance = p.distance + sh1->capsule_.radius;
-				// Trace from capsule bottom endpoint
+				// Conservative Minkowski-sum approximation.
+				vec3<T> bottom_offset;
+				add(bottom_offset, sh1->capsule_.origin, lp1);
+				vec3<T> top_offset;
+				add(top_offset, bottom_offset, sh1->capsule_.direction);
+
+				hop::convex_solid<T> cs_bottom;
+				cs_bottom.set(sh2->convex_solid_);
+				for (auto & p : cs_bottom.planes)
+					p.distance = p.distance + sh1->capsule_.radius - dot(bottom_offset, p.normal);
 				segment<T> tmp;
 				tmp.set(seg);
 				sub(tmp.origin, s2->get_position());
-				add(tmp.origin, sh1->capsule_.origin);
+				sub(tmp.origin, lp2);
 				collision<T> col_bottom;
 				col_bottom.time = one;
-				trace_convex_solid(col_bottom, tmp, cs);
-				// Trace from capsule top endpoint
-				segment<T> tmp2;
-				tmp2.set(seg);
-				sub(tmp2.origin, s2->get_position());
-				add(tmp2.origin, sh1->capsule_.origin);
-				add(tmp2.origin, sh1->capsule_.direction);
+				trace_convex_solid(col_bottom, tmp, cs_bottom);
+
+				hop::convex_solid<T> cs_top;
+				cs_top.set(sh2->convex_solid_);
+				for (auto & p : cs_top.planes)
+					p.distance = p.distance + sh1->capsule_.radius - dot(top_offset, p.normal);
 				collision<T> col_top;
 				col_top.time = one;
-				trace_convex_solid(col_top, tmp2, cs);
-				// Use the earliest hit
+				trace_convex_solid(col_top, tmp, cs_top);
+
 				if (col_bottom.time < col_top.time) {
 					col = col_bottom;
 				} else {
@@ -996,9 +1033,12 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				}
 				if (col.time < one) {
 					add(col.point, s2->get_position());
+					add(col.point, lp2);
 				}
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::capsule) {
 				auto & base = cache_test_solid_origin_.set(s2->position_);
+				add(base, lp2);
+				sub(base, lp1);
 				sub(base, sh1->capsule_.origin);
 				add(base, sh2->capsule_.origin);
 				trace_capsule_capsule(col,
@@ -1030,13 +1070,14 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				tmp.set(iseg);
 				tmp.origin.set(s2->position_);
 				sub(tmp.origin, s1->get_position());
+				add(tmp.origin, lp2);
+				sub(tmp.origin, lp1);
 				vec3<T> center;
 				add(center, sh2->box_.mins, sh2->box_.maxs);
 				mul(center, tr::half());
 				add(tmp.origin, center);
 				trace_convex_solid(icol, tmp, cs);
 				if (icol.time < one) {
-					add(icol.point, s1->get_position());
 					col.time = icol.time;
 					col.normal.set(icol.normal);
 					neg(col.normal);
@@ -1057,13 +1098,13 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 					p.distance = p.distance + sh2->sphere_.radius;
 				segment<T> tmp;
 				tmp.set(iseg);
-				iseg.origin.set(s1->position_);
 				tmp.origin.set(s2->position_);
 				sub(tmp.origin, s1->get_position());
+				add(tmp.origin, lp2);
+				sub(tmp.origin, lp1);
 				add(tmp.origin, sh2->sphere_.origin);
 				trace_convex_solid(icol, tmp, cs);
 				if (icol.time < one) {
-					add(icol.point, s1->get_position());
 					col.time = icol.time;
 					col.normal.set(icol.normal);
 					neg(col.normal);
@@ -1086,15 +1127,14 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				tmp.set(iseg);
 				tmp.origin.set(s2->position_);
 				sub(tmp.origin, s1->get_position());
+				add(tmp.origin, lp2);
+				sub(tmp.origin, lp1);
 				add(tmp.origin, sh2->capsule_.origin);
 				collision<T> col_bottom;
 				col_bottom.time = one;
 				trace_convex_solid(col_bottom, tmp, cs);
 				segment<T> tmp2;
-				tmp2.set(iseg);
-				tmp2.origin.set(s2->position_);
-				sub(tmp2.origin, s1->get_position());
-				add(tmp2.origin, sh2->capsule_.origin);
+				tmp2.set(tmp);
 				add(tmp2.origin, sh2->capsule_.direction);
 				collision<T> col_top;
 				col_top.time = one;
@@ -1105,7 +1145,6 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 					icol = col_top;
 				}
 				if (icol.time < one) {
-					add(icol.point, s1->get_position());
 					col.time = icol.time;
 					col.normal.set(icol.normal);
 					neg(col.normal);
@@ -1121,22 +1160,26 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				for (auto & p : cs.planes) {
 					vec3<T> sup;
 					support(sup, sh1->convex_solid_, p.normal);
-					p.distance = p.distance + dot(sup, p.normal);
+					p.distance = p.distance + dot(sup, p.normal) - dot(lp1, p.normal);
 				}
 				segment<T> tmp;
 				tmp.set(seg);
 				sub(tmp.origin, s2->get_position());
+				sub(tmp.origin, lp2);
 				trace_convex_solid(col, tmp, cs);
 				if (col.time < one) {
 					add(col.point, s2->get_position());
+					add(col.point, lp2);
 				}
 			}
 			// Traceable vs aa_box
 			else if (sh1->type_ == shape_type::traceable && sh2->type_ == shape_type::box) {
 				segment<T> iseg;
-				iseg.origin.set(s2->position_);
+				add(iseg.origin, s2->position_, lp2);
 				mul(iseg.direction, seg.direction, -tr::one());
-				sh1->traceable_->trace_solid(col, s2, seg.origin, iseg);
+				vec3<T> tr_origin;
+				add(tr_origin, seg.origin, lp1);
+				sh1->traceable_->trace_solid(col, s2, tr_origin, iseg);
 				col.invert();
 				sub(iseg.origin, col.point);
 				add(col.point, seg.origin, iseg.origin);
@@ -1145,9 +1188,11 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			// Traceable vs sphere
 			else if (sh1->type_ == shape_type::traceable && sh2->type_ == shape_type::sphere) {
 				segment<T> iseg;
-				iseg.origin.set(s2->position_);
+				add(iseg.origin, s2->position_, lp2);
 				mul(iseg.direction, seg.direction, -tr::one());
-				sh1->traceable_->trace_solid(col, s2, seg.origin, iseg);
+				vec3<T> tr_origin;
+				add(tr_origin, seg.origin, lp1);
+				sh1->traceable_->trace_solid(col, s2, tr_origin, iseg);
 				col.invert();
 				sub(iseg.origin, col.point);
 				add(col.point, seg.origin, iseg.origin);
@@ -1156,9 +1201,11 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			// Traceable vs capsule
 			else if (sh1->type_ == shape_type::traceable && sh2->type_ == shape_type::capsule) {
 				segment<T> iseg;
-				iseg.origin.set(s2->position_);
+				add(iseg.origin, s2->position_, lp2);
 				mul(iseg.direction, seg.direction, -tr::one());
-				sh1->traceable_->trace_solid(col, s2, seg.origin, iseg);
+				vec3<T> tr_origin;
+				add(tr_origin, seg.origin, lp1);
+				sh1->traceable_->trace_solid(col, s2, tr_origin, iseg);
 				col.invert();
 				sub(iseg.origin, col.point);
 				add(col.point, seg.origin, iseg.origin);
@@ -1167,9 +1214,11 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			// Traceable vs convex_solid
 			else if (sh1->type_ == shape_type::traceable && sh2->type_ == shape_type::convex_solid) {
 				segment<T> iseg;
-				iseg.origin.set(s2->position_);
+				add(iseg.origin, s2->position_, lp2);
 				mul(iseg.direction, seg.direction, -tr::one());
-				sh1->traceable_->trace_solid(col, s2, seg.origin, iseg);
+				vec3<T> tr_origin;
+				add(tr_origin, seg.origin, lp1);
+				sh1->traceable_->trace_solid(col, s2, tr_origin, iseg);
 				col.invert();
 				sub(iseg.origin, col.point);
 				add(col.point, seg.origin, iseg.origin);
@@ -1177,32 +1226,43 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// aa_box vs traceable
 			else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::traceable) {
-				sh2->traceable_->trace_solid(col, s1, s2->position_, seg);
+				vec3<T> tr_origin;
+				add(tr_origin, s2->position_, lp2);
+				sh2->traceable_->trace_solid(col, s1, tr_origin, seg);
 				modify_scope = true;
 			}
 			// Sphere vs traceable
 			else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::traceable) {
-				sh2->traceable_->trace_solid(col, s1, s2->position_, seg);
+				vec3<T> tr_origin;
+				add(tr_origin, s2->position_, lp2);
+				sh2->traceable_->trace_solid(col, s1, tr_origin, seg);
 				modify_scope = true;
 			}
 			// Capsule vs traceable
 			else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::traceable) {
-				sh2->traceable_->trace_solid(col, s1, s2->position_, seg);
+				vec3<T> tr_origin;
+				add(tr_origin, s2->position_, lp2);
+				sh2->traceable_->trace_solid(col, s1, tr_origin, seg);
 				modify_scope = true;
 			}
 			// Convex solid vs traceable
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::traceable) {
-				sh2->traceable_->trace_solid(col, s1, s2->position_, seg);
+				vec3<T> tr_origin;
+				add(tr_origin, s2->position_, lp2);
+				sh2->traceable_->trace_solid(col, s1, tr_origin, seg);
 				modify_scope = true;
 			}
 
-			// Compute impact point for solid traces
+			// Compute impact point for solid traces.
+			// col.point represents s1's center at impact time; sh1's world contact
+			// surface is offset from that by sh1's local_position + support(shape, -normal).
 			if (col.time < one && sh1->type_ != shape_type::traceable && sh2->type_ != shape_type::traceable) {
 				vec3<T> sup;
 				vec3<T> neg_n;
 				neg(neg_n, col.normal);
 				support(sup, *sh1, neg_n);
 				add(col.impact, col.point, sup);
+				add(col.impact, lp1);
 			} else if (col.time < one) {
 				col.impact.set(col.point);
 			}

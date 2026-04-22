@@ -43,6 +43,15 @@ public:
 		return HopShape(std::make_shared<hop::shape<float>>(
 		    hop::capsule<float>(hop::vec3<float>(), hop::vec3<float>(dx, dy, dz), radius)));
 	}
+
+	// Offset within the owning solid's frame. Default is (0,0,0).
+	void setLocalPosition(float x, float y, float z) { s_->set_local_position(hop::vec3<float>(x, y, z)); }
+	emscripten::val getLocalPosition() const {
+		auto obj = emscripten::val::object();
+		const auto& lp = s_->get_local_position();
+		obj.set("x", lp.x); obj.set("y", lp.y); obj.set("z", lp.z);
+		return obj;
+	}
 };
 
 class HopSolid {
@@ -126,7 +135,9 @@ EMSCRIPTEN_BINDINGS(hop) {
 	emscripten::class_<HopShape>("HopShape")
 	    .class_function("box", &HopShape::box)
 	    .class_function("sphere", &HopShape::sphere)
-	    .class_function("capsule", &HopShape::capsule);
+	    .class_function("capsule", &HopShape::capsule)
+	    .function("setLocalPosition", &HopShape::setLocalPosition)
+	    .function("getLocalPosition", &HopShape::getLocalPosition);
 
 	emscripten::class_<HopSolid>("HopSolid")
 	    .function("addShape", &HopSolid::addShape)
