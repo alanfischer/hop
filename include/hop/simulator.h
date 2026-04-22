@@ -297,6 +297,31 @@ private:
 	                           const vec3<T> & D2,
 	                           T radius);
 	void trace_convex_solid(collision<T> & c, const segment<T> & seg, const hop::convex_solid<T> & cs);
+
+	// Dispatch helpers for test_solid's convex-vs-* branches. `inflated_cs` is
+	// the target-side convex solid with its planes already inflated by the
+	// Minkowski-sum amount for the opposing shape (scalar radius, or per-plane
+	// `support(shape, p.normal)` for convex-vs-convex). Both helpers normalize
+	// col.point to s1's center at impact.
+	//
+	// Forward: sh1 is primitive, sh2 is convex. sh1_offset is sh1's reference
+	// point in s1's local frame (already includes lp1).
+	void trace_forward_convex(collision<T> & col,
+	                          const segment<T> & seg,
+	                          const solid<T> * s2,
+	                          const vec3<T> & lp2,
+	                          const hop::convex_solid<T> & inflated_cs,
+	                          const vec3<T> & sh1_offset);
+	// Inverted: sh1 is convex, sh2 is primitive. Traces sh2's reference point
+	// backwards against sh1's convex. sh2_offset is sh2's reference point in
+	// s2's local frame (does NOT include lp_delta — helper adds it).
+	void trace_inverted_convex(collision<T> & col,
+	                           const segment<T> & seg,
+	                           const solid<T> * s1,
+	                           const solid<T> * s2,
+	                           const vec3<T> & lp_delta,
+	                           const hop::convex_solid<T> & inflated_cs,
+	                           const vec3<T> & sh2_offset);
 	void friction_link(vec3<T> & result,
 	                   solid<T> * s,
 	                   const vec3<T> & solid_vel,
@@ -919,7 +944,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::convex_solid) {
-				// Conservative: inflate convex planes by max half-extent of the aa_box
+				// Conservative: inflate sh2's planes by max half-extent of sh1's aa_box.
 				hop::convex_solid<T> cs;
 				cs.set(sh2->convex_solid_);
 				vec3<T> half;
@@ -930,22 +955,14 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 					max_half = half.y;
 				if (half.z > max_half)
 					max_half = half.z;
-				vec3<T> center;
-				add(center, sh1->box_.mins, sh1->box_.maxs);
-				mul(center, tr::half());
-				vec3<T> sh1_offset;
-				add(sh1_offset, center, lp1);
 				for (auto & p : cs.planes)
-					p.distance = p.distance + max_half - dot(sh1_offset, p.normal);
-				segment<T> tmp;
-				tmp.set(seg);
-				sub(tmp.origin, s2->get_position());
-				sub(tmp.origin, lp2);
-				trace_convex_solid(col, tmp, cs);
-				if (col.time < one) {
-					add(col.point, s2->get_position());
-					add(col.point, lp2);
-				}
+					p.distance = p.distance + max_half;
+				// sh1 reference = box center + lp1.
+				vec3<T> sh1_offset;
+				add(sh1_offset, sh1->box_.mins, sh1->box_.maxs);
+				mul(sh1_offset, tr::half());
+				add(sh1_offset, lp1);
+				trace_forward_convex(col, seg, s2, lp2, cs, sh1_offset);
 			}
 			// Sphere vs *
 			else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::box) {
@@ -975,19 +992,11 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::convex_solid) {
 				hop::convex_solid<T> cs;
 				cs.set(sh2->convex_solid_);
+				for (auto & p : cs.planes)
+					p.distance = p.distance + sh1->sphere_.radius;
 				vec3<T> sh1_offset;
 				add(sh1_offset, sh1->sphere_.origin, lp1);
-				for (auto & p : cs.planes)
-					p.distance = p.distance + sh1->sphere_.radius - dot(sh1_offset, p.normal);
-				segment<T> tmp;
-				tmp.set(seg);
-				sub(tmp.origin, s2->get_position());
-				sub(tmp.origin, lp2);
-				trace_convex_solid(col, tmp, cs);
-				if (col.time < one) {
-					add(col.point, s2->get_position());
-					add(col.point, lp2);
-				}
+				trace_forward_convex(col, seg, s2, lp2, cs, sh1_offset);
 			}
 			// Capsule vs *
 			else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::box) {
@@ -1011,45 +1020,28 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::convex_solid) {
 				// Inflate sh2's planes by sh1's capsule radius, then trace sh1's
 				// two spine endpoints as separate segments. Conservative
-				// Minkowski-sum approximation, symmetric to the convex-vs-capsule
-				// branch below (one plane loop + two segments, not two + one).
+				// Minkowski-sum approximation.
 				hop::convex_solid<T> cs;
 				cs.set(sh2->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh1->capsule_.radius;
-
-				// Bottom endpoint in sh2's local frame:
-				//   (s1.pos + lp1 + capsule.origin) - (s2.pos + lp2)
-				segment<T> tmp;
-				tmp.set(seg);
-				sub(tmp.origin, s2->get_position());
-				sub(tmp.origin, lp2);
-				add(tmp.origin, lp1);
-				add(tmp.origin, sh1->capsule_.origin);
+				vec3<T> bottom_offset;
+				add(bottom_offset, sh1->capsule_.origin, lp1);
+				vec3<T> top_offset;
+				add(top_offset, bottom_offset, sh1->capsule_.direction);
 				collision<T> col_bottom;
 				col_bottom.time = one;
-				trace_convex_solid(col_bottom, tmp, cs);
-
-				segment<T> tmp2;
-				tmp2.set(tmp);
-				add(tmp2.origin, sh1->capsule_.direction);
+				trace_forward_convex(col_bottom, seg, s2, lp2, cs, bottom_offset);
 				collision<T> col_top;
 				col_top.time = one;
-				trace_convex_solid(col_top, tmp2, cs);
-
-				// Merge fields from the earlier hit without touching col.collider
-				// (set at the top of test_solid) or col.scope (accumulated across
-				// shape-pair iterations).
+				trace_forward_convex(col_top, seg, s2, lp2, cs, top_offset);
+				// Merge the earlier hit's fields without touching col.collider /
+				// col.scope (see test_solid preamble for why).
 				const collision<T> & hit = (col_bottom.time < col_top.time) ? col_bottom : col_top;
 				col.time = hit.time;
 				col.normal.set(hit.normal);
-				// Normalize col.point to s1's center at impact (the trace was of
-				// an endpoint, not s1's origin).
-				if (col.time < one) {
-					vec3<T> travel;
-					mul(travel, seg.direction, col.time);
-					add(col.point, seg.origin, travel);
-				}
+				if (col.time < one)
+					col.point.set(hit.point);
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::capsule) {
 				auto & base = cache_test_solid_origin_.set(s2->position_);
 				add(base, lp_delta);
@@ -1064,10 +1056,6 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// Convex solid vs aa_box
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::box) {
-				segment<T> iseg;
-				mul(iseg.direction, seg.direction, -tr::one());
-				collision<T> icol;
-				icol.time = one;
 				hop::convex_solid<T> cs;
 				cs.set(sh1->convex_solid_);
 				vec3<T> half;
@@ -1080,88 +1068,38 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 					max_half = half.z;
 				for (auto & p : cs.planes)
 					p.distance = p.distance + max_half;
-				segment<T> tmp;
-				tmp.set(iseg);
-				tmp.origin.set(s2->position_);
-				sub(tmp.origin, s1->get_position());
-				add(tmp.origin, lp_delta);
-				vec3<T> center;
-				add(center, sh2->box_.mins, sh2->box_.maxs);
-				mul(center, tr::half());
-				add(tmp.origin, center);
-				trace_convex_solid(icol, tmp, cs);
-				if (icol.time < one) {
-					col.time = icol.time;
-					col.normal.set(icol.normal);
-					neg(col.normal);
-					vec3<T> travel;
-					mul(travel, seg.direction, icol.time);
-					add(col.point, seg.origin, travel);
-				}
+				vec3<T> sh2_offset;
+				add(sh2_offset, sh2->box_.mins, sh2->box_.maxs);
+				mul(sh2_offset, tr::half());
+				trace_inverted_convex(col, seg, s1, s2, lp_delta, cs, sh2_offset);
 			}
 			// Convex solid vs sphere
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::sphere) {
-				segment<T> iseg;
-				mul(iseg.direction, seg.direction, -tr::one());
-				collision<T> icol;
-				icol.time = one;
 				hop::convex_solid<T> cs;
 				cs.set(sh1->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh2->sphere_.radius;
-				segment<T> tmp;
-				tmp.set(iseg);
-				tmp.origin.set(s2->position_);
-				sub(tmp.origin, s1->get_position());
-				add(tmp.origin, lp_delta);
-				add(tmp.origin, sh2->sphere_.origin);
-				trace_convex_solid(icol, tmp, cs);
-				if (icol.time < one) {
-					col.time = icol.time;
-					col.normal.set(icol.normal);
-					neg(col.normal);
-					vec3<T> travel;
-					mul(travel, seg.direction, icol.time);
-					add(col.point, seg.origin, travel);
-				}
+				trace_inverted_convex(col, seg, s1, s2, lp_delta, cs, sh2->sphere_.origin);
 			}
 			// Convex solid vs capsule
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::capsule) {
-				segment<T> iseg;
-				mul(iseg.direction, seg.direction, -tr::one());
-				collision<T> icol;
-				icol.time = one;
 				hop::convex_solid<T> cs;
 				cs.set(sh1->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh2->capsule_.radius;
-				segment<T> tmp;
-				tmp.set(iseg);
-				tmp.origin.set(s2->position_);
-				sub(tmp.origin, s1->get_position());
-				add(tmp.origin, lp_delta);
-				add(tmp.origin, sh2->capsule_.origin);
 				collision<T> col_bottom;
 				col_bottom.time = one;
-				trace_convex_solid(col_bottom, tmp, cs);
-				segment<T> tmp2;
-				tmp2.set(tmp);
-				add(tmp2.origin, sh2->capsule_.direction);
+				trace_inverted_convex(col_bottom, seg, s1, s2, lp_delta, cs, sh2->capsule_.origin);
+				vec3<T> top_offset;
+				add(top_offset, sh2->capsule_.origin, sh2->capsule_.direction);
 				collision<T> col_top;
 				col_top.time = one;
-				trace_convex_solid(col_top, tmp2, cs);
-				if (col_bottom.time < col_top.time) {
-					icol = col_bottom;
-				} else {
-					icol = col_top;
-				}
-				if (icol.time < one) {
-					col.time = icol.time;
-					col.normal.set(icol.normal);
-					neg(col.normal);
-					vec3<T> travel;
-					mul(travel, seg.direction, icol.time);
-					add(col.point, seg.origin, travel);
+				trace_inverted_convex(col_top, seg, s1, s2, lp_delta, cs, top_offset);
+				const collision<T> & hit = (col_bottom.time < col_top.time) ? col_bottom : col_top;
+				if (hit.time < one) {
+					col.time = hit.time;
+					col.normal.set(hit.normal);
+					col.point.set(hit.point);
 				}
 			}
 			// Convex solid vs convex solid (exact Minkowski sum: inflate sh2's planes per sh1's support)
@@ -1171,17 +1109,10 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				for (auto & p : cs.planes) {
 					vec3<T> sup;
 					support(sup, sh1->convex_solid_, p.normal);
-					p.distance = p.distance + dot(sup, p.normal) - dot(lp1, p.normal);
+					p.distance = p.distance + dot(sup, p.normal);
 				}
-				segment<T> tmp;
-				tmp.set(seg);
-				sub(tmp.origin, s2->get_position());
-				sub(tmp.origin, lp2);
-				trace_convex_solid(col, tmp, cs);
-				if (col.time < one) {
-					add(col.point, s2->get_position());
-					add(col.point, lp2);
-				}
+				// sh1 reference point in s1's local frame = lp1 (sh1's convex origin sits there).
+				trace_forward_convex(col, seg, s2, lp2, cs, lp1);
 			}
 
 			// Compute impact point for solid traces.
@@ -1626,6 +1557,55 @@ void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, 
 				}
 			}
 		}
+	}
+}
+
+template <typename T>
+void simulator<T>::trace_forward_convex(collision<T> & col,
+                                        const segment<T> & seg,
+                                        const solid<T> * s2,
+                                        const vec3<T> & lp2,
+                                        const hop::convex_solid<T> & inflated_cs,
+                                        const vec3<T> & sh1_offset) {
+	segment<T> tmp;
+	tmp.set(seg);
+	sub(tmp.origin, s2->get_position());
+	sub(tmp.origin, lp2);
+	add(tmp.origin, sh1_offset);
+	trace_convex_solid(col, tmp, inflated_cs);
+	if (col.time < tr::one()) {
+		// Normalize col.point to s1's center at impact.
+		vec3<T> travel;
+		mul(travel, seg.direction, col.time);
+		add(col.point, seg.origin, travel);
+	}
+}
+
+template <typename T>
+void simulator<T>::trace_inverted_convex(collision<T> & col,
+                                         const segment<T> & seg,
+                                         const solid<T> * s1,
+                                         const solid<T> * s2,
+                                         const vec3<T> & lp_delta,
+                                         const hop::convex_solid<T> & inflated_cs,
+                                         const vec3<T> & sh2_offset) {
+	segment<T> tmp;
+	mul(tmp.direction, seg.direction, -tr::one());
+	tmp.origin.set(s2->position_);
+	sub(tmp.origin, s1->get_position());
+	add(tmp.origin, lp_delta);
+	add(tmp.origin, sh2_offset);
+	collision<T> icol;
+	icol.time = tr::one();
+	trace_convex_solid(icol, tmp, inflated_cs);
+	if (icol.time < tr::one()) {
+		col.time = icol.time;
+		col.normal.set(icol.normal);
+		neg(col.normal);
+		// Normalize col.point to s1's center at impact.
+		vec3<T> travel;
+		mul(travel, seg.direction, icol.time);
+		add(col.point, seg.origin, travel);
 	}
 }
 

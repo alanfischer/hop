@@ -58,19 +58,23 @@ template <typename T> inline void mul(mat3<T> & r, const mat3<T> & m1, const mat
 	}
 }
 
-// r = m * v
+// r = m * v. Safe to call with &r == &v.
 template <typename T> inline void mul(vec3<T> & r, const mat3<T> & m, const vec3<T> & v) {
-	// Assumes &r != &v.
-	r.x = m.data[0 + 0 * 3] * v.x + m.data[0 + 1 * 3] * v.y + m.data[0 + 2 * 3] * v.z;
-	r.y = m.data[1 + 0 * 3] * v.x + m.data[1 + 1 * 3] * v.y + m.data[1 + 2 * 3] * v.z;
-	r.z = m.data[2 + 0 * 3] * v.x + m.data[2 + 1 * 3] * v.y + m.data[2 + 2 * 3] * v.z;
+	T vx = v.x, vy = v.y, vz = v.z;  // snapshot — r and v may alias
+	r.x = m.data[0 + 0 * 3] * vx + m.data[0 + 1 * 3] * vy + m.data[0 + 2 * 3] * vz;
+	r.y = m.data[1 + 0 * 3] * vx + m.data[1 + 1 * 3] * vy + m.data[1 + 2 * 3] * vz;
+	r.z = m.data[2 + 0 * 3] * vx + m.data[2 + 1 * 3] * vy + m.data[2 + 2 * 3] * vz;
 }
 
-// r = transpose(m)
+// r = transpose(m). Safe to call with &r == &m.
 template <typename T> inline void transpose(mat3<T> & r, const mat3<T> & m) {
-	r.data[0] = m.data[0]; r.data[3] = m.data[1]; r.data[6] = m.data[2];
-	r.data[1] = m.data[3]; r.data[4] = m.data[4]; r.data[7] = m.data[5];
-	r.data[2] = m.data[6]; r.data[5] = m.data[7]; r.data[8] = m.data[8];
+	// Swap via a local since r and m may alias.
+	T d0 = m.data[0], d1 = m.data[1], d2 = m.data[2];
+	T d3 = m.data[3], d4 = m.data[4], d5 = m.data[5];
+	T d6 = m.data[6], d7 = m.data[7], d8 = m.data[8];
+	r.data[0] = d0; r.data[3] = d1; r.data[6] = d2;
+	r.data[1] = d3; r.data[4] = d4; r.data[7] = d5;
+	r.data[2] = d6; r.data[5] = d7; r.data[8] = d8;
 }
 
 template <typename T> inline T determinant(const mat3<T> & m) {
@@ -79,22 +83,27 @@ template <typename T> inline T determinant(const mat3<T> & m) {
 	      -  m.data[6] * m.data[1] * m.data[5] + m.data[6] * m.data[2] * m.data[4];
 }
 
-// r = inverse(m). Returns false if singular.
+// r = inverse(m). Returns false if singular. Safe to call with &r == &m.
 template <typename T> inline bool invert(mat3<T> & r, const mat3<T> & m) {
 	using tr = scalar_traits<T>;
 	T det = determinant(m);
 	if (det == T {})
 		return false;
 	T inv_det = tr::one() / det;
-	r.data[0] = -(m.data[4] * m.data[8] - m.data[7] * m.data[5]) * inv_det;
-	r.data[1] =  (m.data[1] * m.data[8] - m.data[7] * m.data[2]) * inv_det;
-	r.data[2] = -(m.data[1] * m.data[5] - m.data[4] * m.data[2]) * inv_det;
-	r.data[3] =  (m.data[3] * m.data[8] - m.data[6] * m.data[5]) * inv_det;
-	r.data[4] = -(m.data[0] * m.data[8] - m.data[6] * m.data[2]) * inv_det;
-	r.data[5] =  (m.data[0] * m.data[5] - m.data[3] * m.data[2]) * inv_det;
-	r.data[6] = -(m.data[3] * m.data[7] - m.data[6] * m.data[4]) * inv_det;
-	r.data[7] =  (m.data[0] * m.data[7] - m.data[6] * m.data[1]) * inv_det;
-	r.data[8] = -(m.data[0] * m.data[4] - m.data[3] * m.data[1]) * inv_det;
+	// Snapshot m into locals — r and m may alias, and each output cell reads
+	// multiple input cells.
+	T m0 = m.data[0], m1 = m.data[1], m2 = m.data[2];
+	T m3 = m.data[3], m4 = m.data[4], m5 = m.data[5];
+	T m6 = m.data[6], m7 = m.data[7], m8 = m.data[8];
+	r.data[0] = -(m4 * m8 - m7 * m5) * inv_det;
+	r.data[1] =  (m1 * m8 - m7 * m2) * inv_det;
+	r.data[2] = -(m1 * m5 - m4 * m2) * inv_det;
+	r.data[3] =  (m3 * m8 - m6 * m5) * inv_det;
+	r.data[4] = -(m0 * m8 - m6 * m2) * inv_det;
+	r.data[5] =  (m0 * m5 - m3 * m2) * inv_det;
+	r.data[6] = -(m3 * m7 - m6 * m4) * inv_det;
+	r.data[7] =  (m0 * m7 - m6 * m1) * inv_det;
+	r.data[8] = -(m0 * m4 - m3 * m1) * inv_det;
 	return true;
 }
 

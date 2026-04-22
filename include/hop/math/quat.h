@@ -51,15 +51,48 @@ template <typename T> struct quat {
 
 template <typename T> quat<T> operator*(T s, const quat<T> & q) { return { q.x * s, q.y * s, q.z * s, q.w * s }; }
 
-// r = q1 * q2  (Hamilton product, right-to-left rotation composition)
+// Function-form element-wise arithmetic — mirrors vec3/aa_box/sphere/capsule
+// so callers aren't forced to switch styles when working with quats.
+// Hamilton product is `mul(r, q1, q2)` below (NOT element-wise).
+
+template <typename T> inline void neg(quat<T> & q) {
+	q.x = -q.x; q.y = -q.y; q.z = -q.z; q.w = -q.w;
+}
+template <typename T> inline void neg(quat<T> & r, const quat<T> & q) {
+	r.x = -q.x; r.y = -q.y; r.z = -q.z; r.w = -q.w;
+}
+
+template <typename T> inline void add(quat<T> & r, const quat<T> & a, const quat<T> & b) {
+	r.x = a.x + b.x; r.y = a.y + b.y; r.z = a.z + b.z; r.w = a.w + b.w;
+}
+template <typename T> inline void add(quat<T> & r, const quat<T> & q) {
+	r.x += q.x; r.y += q.y; r.z += q.z; r.w += q.w;
+}
+
+template <typename T> inline void sub(quat<T> & r, const quat<T> & a, const quat<T> & b) {
+	r.x = a.x - b.x; r.y = a.y - b.y; r.z = a.z - b.z; r.w = a.w - b.w;
+}
+template <typename T> inline void sub(quat<T> & r, const quat<T> & q) {
+	r.x -= q.x; r.y -= q.y; r.z -= q.z; r.w -= q.w;
+}
+
+template <typename T> inline void mul(quat<T> & r, const quat<T> & q, T s) {
+	r.x = q.x * s; r.y = q.y * s; r.z = q.z * s; r.w = q.w * s;
+}
+template <typename T> inline void mul(quat<T> & r, T s) {
+	r.x *= s; r.y *= s; r.z *= s; r.w *= s;
+}
+
+// r = q1 * q2  (Hamilton product, right-to-left rotation composition).
+// Pre: &r != &q1 && &r != &q2. Use post_mul for in-place (r = r * q2).
 template <typename T> inline void mul(quat<T> & r, const quat<T> & q1, const quat<T> & q2) {
-	// Assumes &r != &q1 and &r != &q2.
 	r.x =  q1.x * q2.w + q1.y * q2.z - q1.z * q2.y + q1.w * q2.x;
 	r.y = -q1.x * q2.z + q1.y * q2.w + q1.z * q2.x + q1.w * q2.y;
 	r.z =  q1.x * q2.y - q1.y * q2.x + q1.z * q2.w + q1.w * q2.z;
 	r.w = -q1.x * q2.x - q1.y * q2.y - q1.z * q2.z + q1.w * q2.w;
 }
 
+// In-place Hamilton product: q1 := q1 * q2.
 template <typename T> inline void post_mul(quat<T> & q1, const quat<T> & q2) {
 	T x =  q1.x * q2.w + q1.y * q2.z - q1.z * q2.y + q1.w * q2.x;
 	T y = -q1.x * q2.z + q1.y * q2.w + q1.z * q2.x + q1.w * q2.y;
@@ -68,9 +101,9 @@ template <typename T> inline void post_mul(quat<T> & q1, const quat<T> & q2) {
 	q1.x = x; q1.y = y; q1.z = z; q1.w = w;
 }
 
-// r = q rotating v  (i.e., q * v * q^-1 for unit q)
+// r = q rotating v. Assumes q is a unit quat — for non-unit q the result is
+// scaled by |q|^2. Safe to call with &r == &v.
 template <typename T> inline void mul(vec3<T> & r, const quat<T> & q, const vec3<T> & v) {
-	// Assumes &r != &v.
 	T x =  q.y * v.z - q.z * v.y + q.w * v.x;
 	T y = -q.x * v.z + q.z * v.x + q.w * v.y;
 	T z =  q.x * v.y - q.y * v.x + q.w * v.z;
