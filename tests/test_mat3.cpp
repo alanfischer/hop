@@ -55,6 +55,12 @@ template <typename T> static void test_transpose(const char * label) {
 	// transpose of transpose == original
 	for (int i = 0; i < 9; ++i)
 		assert(t2.data[i] == m.data[i]);
+	// In-place: transpose(m, m) must match a separate transpose.
+	mat3<T> in_place;
+	in_place.set(m);
+	transpose(in_place, in_place);
+	for (int i = 0; i < 9; ++i)
+		assert(in_place.data[i] == t1.data[i]);
 	printf("OK\n");
 }
 
@@ -109,6 +115,13 @@ template <typename T> static void test_invert(const char * label, float tol) {
 	for (int i = 0; i < 3; ++i)
 		for (int j = 0; j < 3; ++j)
 			assert(approx(prod.at(i, j), i == j ? tr::one() : T {}, tol));
+	// In-place: invert(r, r) must match a separate invert.
+	mat3<T> in_place;
+	in_place.set(r);
+	ok = invert(in_place, in_place);
+	assert(ok);
+	for (int i = 0; i < 9; ++i)
+		assert(approx(in_place.data[i], inv.data[i], tol));
 	printf("OK\n");
 }
 

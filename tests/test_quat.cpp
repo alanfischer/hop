@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <hop/fixed16.h>
 #include <hop/math/mat3.h>
 #include <hop/math/quat.h>
@@ -197,8 +198,10 @@ template <typename T> static void test_integration_pattern(const char * label) {
 // rotation), the quaternion should be back at identity — any residual is pure
 // numerical drift. Prints peak drift so we can see how much fixed16 wanders.
 template <typename T> static void test_rotation_drift(const char * label) {
-	printf("  rotation_drift[%s]:\n", label);
+	printf("  rotation_drift[%s]: ", label);
 	using tr = scalar_traits<T>;
+	// Per-rev detail is noisy during ordinary CI; enable with HOP_VERBOSE=1.
+	bool verbose = std::getenv("HOP_VERBOSE") != nullptr;
 	quat<T> q;  // identity
 	T dt = tr::from_milli(10);
 	vec3<T> omega { T {}, T {}, tr::two_pi() };  // 1 rev/s around Z
@@ -209,6 +212,7 @@ template <typename T> static void test_rotation_drift(const char * label) {
 
 	int steps_per_rev = 100;
 	int total_revs = 10;
+	if (verbose) printf("\n");
 	for (int rev = 0; rev < total_revs; ++rev) {
 		for (int i = 0; i < steps_per_rev; ++i) {
 			quat<T> omega_q { omega.x, omega.y, omega.z, T {} };
@@ -239,11 +243,13 @@ template <typename T> static void test_rotation_drift(const char * label) {
 		peak_angle_err = std::max(peak_angle_err, angle_err);
 		peak_xy_err = std::max(peak_xy_err, xy_err);
 
-		printf("    rev %2d: |q|-1=%.2e, angle=%.3f rad (%.2f°), v_err=%.2e\n",
-		       rev + 1, length_err, angle_err, angle_err * 180.0f / 3.14159265f, xy_err);
+		if (verbose) {
+			printf("    rev %2d: |q|-1=%.2e, angle=%.3f rad (%.2f°), v_err=%.2e\n",
+			       rev + 1, length_err, angle_err, angle_err * 180.0f / 3.14159265f, xy_err);
+		}
 	}
-	printf("    peak: |q|-1=%.2e, angle=%.3f rad (%.2f°), v_err=%.2e\n",
-	       peak_length_err, peak_angle_err, peak_angle_err * 180.0f / 3.14159265f, peak_xy_err);
+	printf("peak |q|-1=%.2e, angle=%.2f°, v_err=%.2e ",
+	       peak_length_err, peak_angle_err * 180.0f / 3.14159265f, peak_xy_err);
 
 	// Regression guard: observed behavior on 2026-04-22 with forward-Euler
 	// integration. These are headroom-padded, not tight — if we change the
@@ -263,6 +269,7 @@ template <typename T> static void test_rotation_drift(const char * label) {
 		assert(peak_angle_err < 0.05f);      // rad (~3°)
 		assert(peak_xy_err < 0.05f);
 	}
+	printf("OK\n");
 }
 
 // Composition: (q1 * q2) * v == q1 * (q2 * v)
