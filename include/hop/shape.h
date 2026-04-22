@@ -40,7 +40,19 @@ public:
 		type_ = shape_type::box;
 		sphere_ = {};
 		capsule_ = {};
+		local_position_.reset();
 	}
+
+	// Local position: offset of this shape within its owning solid's frame.
+	// Default is zero — shape sits at the solid's origin.
+	// Note: get_bound() and support() are intrinsic (shape's own frame);
+	// callers apply local_position themselves when composing into the solid.
+	void set_local_position(const vec3<T> & p) {
+		local_position_ = p;
+		if (solid_)
+			solid_->update_local_bound();
+	}
+	const vec3<T> & get_local_position() const { return local_position_; }
 
 	void set_box(const aa_box<T> & box) {
 		type_ = shape_type::box;
@@ -148,6 +160,7 @@ private:
 	hop::capsule<T> capsule_;
 	hop::convex_solid<T> convex_solid_;
 	hop::traceable<T> * traceable_ = nullptr;
+	vec3<T> local_position_;
 	solid<T> * solid_ = nullptr;
 
 	friend class solid<T>;

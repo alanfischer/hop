@@ -201,11 +201,30 @@ template <typename T> void run() {
 	capsule2_solid->set_velocity(hop::vec3<T>(tr::from_int(-1), tr::from_int(2), tr::from_int(3)));
 	sim.add_solid(capsule2_solid);
 
+	// Compound dumbbell: two spheres on a single solid, offset in +x and -x via
+	// local_position. Demonstrates compound colliders (Phase 2: shape local_position).
+	auto dumbbell_solid = std::make_shared<hop::solid<T>>();
+	dumbbell_solid->set_mass(tr::one());
+	dumbbell_solid->set_coefficient_of_restitution(cor);
+	dumbbell_solid->set_coefficient_of_restitution_override(true);
+	dumbbell_solid->set_coefficient_of_static_friction(fric_zero);
+	dumbbell_solid->set_coefficient_of_dynamic_friction(fric_zero);
+	auto db_left = std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350)));
+	db_left->set_local_position(hop::vec3<T>(-tr::from_milli(700), zero, zero));
+	dumbbell_solid->add_shape(db_left);
+	auto db_right = std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350)));
+	db_right->set_local_position(hop::vec3<T>(tr::from_milli(700), zero, zero));
+	dumbbell_solid->add_shape(db_right);
+	dumbbell_solid->set_position(hop::vec3<T>(-tr::from_int(1), -tr::from_int(1), tr::from_int(4)));
+	dumbbell_solid->set_velocity(hop::vec3<T>(tr::from_int(2), tr::from_int(1), -tr::one()));
+	sim.add_solid(dumbbell_solid);
+
 	// Collision sparks
 	box_solid->set_collision_callback(spark_on_collision<T>);
 	sphere_solid->set_collision_callback(spark_on_collision<T>);
 	capsule_solid->set_collision_callback(spark_on_collision<T>);
 	capsule2_solid->set_collision_callback(spark_on_collision<T>);
+	dumbbell_solid->set_collision_callback(spark_on_collision<T>);
 
 	// Raylib window
 	int win_w = capture_dir ? 400 : 800;
@@ -276,6 +295,21 @@ template <typename T> void run() {
 		Vector3 cp2_top = to_raylib(cap2_end);
 		DrawCapsule(cp2_bot, cp2_top, 0.3f, 8, 8, ORANGE);
 		DrawCapsuleWires(cp2_bot, cp2_top, 0.3f, 8, 8, { 200, 100, 0, 255 });
+
+		// Dumbbell compound: draw each sphere at solid.position + shape.local_position
+		auto & db_pos = dumbbell_solid->get_position();
+		hop::vec3<T> db_l_world = db_pos;
+		db_l_world.x = db_l_world.x - tr::from_milli(700);
+		hop::vec3<T> db_r_world = db_pos;
+		db_r_world.x = db_r_world.x + tr::from_milli(700);
+		Vector3 dbl = to_raylib(db_l_world);
+		Vector3 dbr = to_raylib(db_r_world);
+		DrawSphere(dbl, 0.35f, PURPLE);
+		DrawSphereWires(dbl, 0.35f, 8, 8, DARKPURPLE);
+		DrawSphere(dbr, 0.35f, PURPLE);
+		DrawSphereWires(dbr, 0.35f, 8, 8, DARKPURPLE);
+		// Connecting rod (visual only — no collision geometry)
+		DrawLine3D(dbl, dbr, { 180, 120, 200, 255 });
 
 		// Sparks
 		update_and_draw_sparks(frame_dt);

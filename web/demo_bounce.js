@@ -75,6 +75,22 @@ async function main() {
 	cap2.setPosition(1, 1, 2);
 	cap2.setVelocity(-1, 2, 3);
 
+	// Compound dumbbell: two spheres on one solid, offset via shape local_position.
+	// Demonstrates compound colliders (Phase 2: shape local_position).
+	const dumbbell = sim.addSolid();
+	dumbbell.setMass(1);
+	dumbbell.setCoefficientOfRestitution(COR);
+	dumbbell.setCoefficientOfRestitutionOverride(true);
+	dumbbell.setFriction(0, 0);
+	const dbLeft = Module.HopShape.sphere(0.35);
+	dbLeft.setLocalPosition(-0.7, 0, 0);
+	dumbbell.addShape(dbLeft);
+	const dbRight = Module.HopShape.sphere(0.35);
+	dbRight.setLocalPosition(0.7, 0, 0);
+	dumbbell.addShape(dbRight);
+	dumbbell.setPosition(-1, -1, 4);
+	dumbbell.setVelocity(2, 1, -1);
+
 	// --- Collision sparks ---
 	const sparks = [];
 
@@ -98,10 +114,11 @@ async function main() {
 		}
 	}
 
-	box.setCollisionListener(onCollision);
-	sphere.setCollisionListener(onCollision);
-	cap.setCollisionListener(onCollision);
-	cap2.setCollisionListener(onCollision);
+	box.setCollisionCallback(onCollision);
+	sphere.setCollisionCallback(onCollision);
+	cap.setCollisionCallback(onCollision);
+	cap2.setCollisionCallback(onCollision);
+	dumbbell.setCollisionCallback(onCollision);
 
 	// --- Three.js setup ---
 	const scene = new THREE.Scene();
@@ -161,6 +178,18 @@ async function main() {
 	// Hop X maps to Three.js X, so rotate capsule from Y-axis to X-axis: rotate 90° around Z
 	cap2Mesh.rotation.z = -Math.PI / 2;
 	scene.add(cap2Mesh);
+
+	// Dumbbell meshes — two spheres + a connecting rod (visual only)
+	const dumbbellMat = new THREE.MeshStandardMaterial({ color: 0xa060c0 });
+	const dbLeftMesh = new THREE.Mesh(new THREE.SphereGeometry(0.35, 20, 12), dumbbellMat);
+	const dbRightMesh = new THREE.Mesh(new THREE.SphereGeometry(0.35, 20, 12), dumbbellMat);
+	scene.add(dbLeftMesh);
+	scene.add(dbRightMesh);
+	const dbRodGeo = new THREE.BufferGeometry().setFromPoints([
+		new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)
+	]);
+	const dbRod = new THREE.Line(dbRodGeo, new THREE.LineBasicMaterial({ color: 0xb478c8 }));
+	scene.add(dbRod);
 
 	// Spark particles (pre-allocate buffer, render as points)
 	const MAX_SPARKS = 256;
@@ -229,6 +258,20 @@ async function main() {
 		const c2p = cap2.getPosition();
 		cap2Mesh.position.set(...hopToThree({x: c2p.x + 1, y: c2p.y, z: c2p.z}));
 
+		// Dumbbell: each sphere at solid.position + shape.local_position (hop frame)
+		const dbp = dumbbell.getPosition();
+		const dbL = {x: dbp.x - 0.7, y: dbp.y, z: dbp.z};
+		const dbR = {x: dbp.x + 0.7, y: dbp.y, z: dbp.z};
+		dbLeftMesh.position.set(...hopToThree(dbL));
+		dbRightMesh.position.set(...hopToThree(dbR));
+		// Connecting rod
+		const dbRodPositions = dbRod.geometry.attributes.position.array;
+		const dbLt = hopToThree(dbL);
+		const dbRt = hopToThree(dbR);
+		dbRodPositions[0] = dbLt[0]; dbRodPositions[1] = dbLt[1]; dbRodPositions[2] = dbLt[2];
+		dbRodPositions[3] = dbRt[0]; dbRodPositions[4] = dbRt[1]; dbRodPositions[5] = dbRt[2];
+		dbRod.geometry.attributes.position.needsUpdate = true;
+
 		// Update sparks
 		const dt = 1 / 60;
 		for (let i = sparks.length - 1; i >= 0; i--) {
@@ -286,7 +329,8 @@ async function main() {
 				`<span style="color:#cc3333">box:      z=${box.getPosition().z.toFixed(2)}</span>\n` +
 				`<span style="color:#3366cc">sphere:   z=${sphere.getPosition().z.toFixed(2)}</span>\n` +
 				`<span style="color:#33aa44">capsule:  z=${cap.getPosition().z.toFixed(2)}</span>\n` +
-				`<span style="color:#dd8833">capsule2: z=${cap2.getPosition().z.toFixed(2)}</span>`;
+				`<span style="color:#dd8833">capsule2: z=${cap2.getPosition().z.toFixed(2)}</span>\n` +
+				`<span style="color:#a060c0">dumbbell: z=${dumbbell.getPosition().z.toFixed(2)}</span>`;
 		}
 
 		renderer.render(scene, camera);
