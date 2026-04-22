@@ -45,6 +45,8 @@ public:
 
 	// Local position: offset of this shape within its owning solid's frame.
 	// Default is zero — shape sits at the solid's origin.
+	// Note: get_bound() and support() are intrinsic (shape's own frame);
+	// callers apply local_position themselves when composing into the solid.
 	void set_local_position(const vec3<T> & p) {
 		local_position_ = p;
 		if (solid_)
@@ -149,7 +151,6 @@ public:
 			traceable_->get_bound(box);
 			break;
 		}
-		box += local_position_;
 	}
 
 private:
