@@ -1,3 +1,6 @@
+# Tests rely on assert() — keep it live regardless of CMAKE_BUILD_TYPE.
+add_compile_options(-UNDEBUG)
+
 add_executable(test_fixed16 test_fixed16.cpp)
 target_link_libraries(test_fixed16 PRIVATE hop)
 add_test(NAME test_fixed16 COMMAND test_fixed16)
@@ -29,3 +32,11 @@ add_test(NAME test_support COMMAND test_support)
 add_executable(test_compound test_compound.cpp)
 target_link_libraries(test_compound PRIVATE hop)
 add_test(NAME test_compound COMMAND test_compound)
+
+add_executable(test_mat3 test_mat3.cpp)
+target_link_libraries(test_mat3 PRIVATE hop)
+add_test(NAME test_mat3 COMMAND test_mat3)
+
+add_executable(test_quat test_quat.cpp)
+target_link_libraries(test_quat PRIVATE hop)
+add_test(NAME test_quat COMMAND test_quat)

@@ -8,7 +8,6 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <hop/hop.h>
 
 using namespace hop;
@@ -389,9 +388,7 @@ template <typename T> static void test_capsule_vs_convex_preserves_collider(cons
 	mover->set_velocity({ tr::from_int(5), T {}, T {} });
 
 	std::shared_ptr<solid<T>> seen_collider;
-	int callback_count = 0;
 	mover->set_collision_callback([&](const collision<T> & c) {
-		++callback_count;
 		if (!seen_collider)
 			seen_collider = c.collider;
 	});
@@ -399,16 +396,8 @@ template <typename T> static void test_capsule_vs_convex_preserves_collider(cons
 
 	for (int i = 0; i < 200; ++i) sim.update(10, simulator<T>::scope_report_collisions);
 
-	// Release-safe checks: assert is a no-op under NDEBUG, so verify manually.
-	if (callback_count == 0) {
-		printf("FAIL: no callback fired (c.collider likely wiped to null)\n");
-		std::exit(1);
-	}
-	if (seen_collider.get() != target.get()) {
-		printf("FAIL: callback saw collider=%p, expected target=%p\n",
-		       (void *)seen_collider.get(), (void *)target.get());
-		std::exit(1);
-	}
+	assert(seen_collider);  // callback fired (collider was not wiped to null)
+	assert(seen_collider.get() == target.get());
 	printf("OK\n");
 }
 

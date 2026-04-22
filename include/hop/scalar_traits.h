@@ -50,6 +50,8 @@ template <> struct scalar_traits<float> {
 	static float sqrt(float v) { return std::sqrt(v); }
 	static float sin(float v) { return std::sin(v); }
 	static float cos(float v) { return std::cos(v); }
+	static float asin(float v) { return std::asin(v); }
+	static float acos(float v) { return std::acos(v); }
 	static float atan2(float y, float x) { return std::atan2(y, x); }
 
 	static bool is_real(float v) { return !std::isnan(v) && !std::isinf(v); }
@@ -188,6 +190,37 @@ template <> struct scalar_traits<fixed16> {
 		result = static_cast<int32_t>((static_cast<int64_t>(result) * sqr) >> 16);
 		result += one_raw;
 		return fixed16::from_raw(result * sign);
+	}
+
+	// Polynomial asin (from toadlet mathfixed)
+	static fixed16 asin(fixed16 f) {
+		constexpr int32_t one_raw = 65536;
+		constexpr int32_t half_pi_raw = 102943;
+		int32_t f_root = sqrt(fixed16::from_raw(one_raw - f.raw)).raw;
+		int32_t result = -1228;
+		result = static_cast<int32_t>((static_cast<int64_t>(result) * f.raw) >> 16);
+		result += 4866;
+		result = static_cast<int32_t>((static_cast<int64_t>(result) * f.raw) >> 16);
+		result -= 13901;
+		result = static_cast<int32_t>((static_cast<int64_t>(result) * f.raw) >> 16);
+		result += 102939;
+		result = half_pi_raw - static_cast<int32_t>((static_cast<int64_t>(f_root) * result) >> 16);
+		return fixed16::from_raw(result);
+	}
+
+	// Polynomial acos (from toadlet mathfixed)
+	static fixed16 acos(fixed16 f) {
+		constexpr int32_t one_raw = 65536;
+		int32_t f_root = sqrt(fixed16::from_raw(one_raw - f.raw)).raw;
+		int32_t result = -1228;
+		result = static_cast<int32_t>((static_cast<int64_t>(result) * f.raw) >> 16);
+		result += 4866;
+		result = static_cast<int32_t>((static_cast<int64_t>(result) * f.raw) >> 16);
+		result -= 13901;
+		result = static_cast<int32_t>((static_cast<int64_t>(result) * f.raw) >> 16);
+		result += 102939;
+		result = static_cast<int32_t>((static_cast<int64_t>(f_root) * result) >> 16);
+		return fixed16::from_raw(result);
 	}
 
 	// Polynomial atan2 (from toadlet mathfixed)
