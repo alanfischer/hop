@@ -186,10 +186,11 @@ template <typename T> static void test_dumbbell_collides_both_sides(const char *
 	ballL->set_velocity({ tr::from_int(3), T {}, T {} });
 	sim.add_solid(ballL);
 
-	for (int i = 0; i < 60; ++i) sim.update(10);
+	// Ball starts 2m from contact; at 3 m/s needs ~670ms. 100 steps of 10ms gives margin.
+	for (int i = 0; i < 100; ++i) sim.update(10);
 	float vxL = tr::to_float(ballL->get_velocity().x);
 	printf("vxL=%.2f ", vxL);
-	assert(vxL < T {}); // bounced back
+	assert(vxL < 0.0f); // bounced back
 
 	// Test 2: ball approaches from right side, should hit the right sphere at x≈2.5
 	simulator<T> sim2;
@@ -215,10 +216,10 @@ template <typename T> static void test_dumbbell_collides_both_sides(const char *
 	ballR->set_velocity({ -tr::from_int(3), T {}, T {} });
 	sim2.add_solid(ballR);
 
-	for (int i = 0; i < 60; ++i) sim2.update(10);
+	for (int i = 0; i < 100; ++i) sim2.update(10);
 	float vxR = tr::to_float(ballR->get_velocity().x);
 	printf("vxR=%.2f ", vxR);
-	assert(vxR > T {}); // bounced back
+	assert(vxR > 0.0f); // bounced back
 	printf("OK\n");
 }
 
@@ -340,7 +341,8 @@ template <typename T> static void test_impact_with_local_position(const char * l
 
 	sim.add_solid(s);
 
-	for (int i = 0; i < 400; ++i) sim.update(10);
+	// scope_report_collisions is required for set_collision_callback to fire.
+	for (int i = 0; i < 400; ++i) sim.update(10, simulator<T>::scope_report_collisions);
 
 	assert(got_impact);
 	float iz = tr::to_float(last_impact.z);
