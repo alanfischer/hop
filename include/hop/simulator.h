@@ -1037,9 +1037,9 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				col_top.time = one;
 				trace_convex_solid(col_top, tmp2, cs);
 
-				// Pick earliest hit. Copy fields individually rather than
-				// struct-assigning col — col.collider was set at the top of
-				// test_solid and struct-assign would clobber it to null.
+				// Merge fields from the earlier hit without touching col.collider
+				// (set at the top of test_solid) or col.scope (accumulated across
+				// shape-pair iterations).
 				const collision<T> & hit = (col_bottom.time < col_top.time) ? col_bottom : col_top;
 				col.time = hit.time;
 				col.normal.set(hit.normal);
