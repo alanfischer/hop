@@ -53,8 +53,6 @@ template <> struct scalar_traits<float> {
 	static float asin(float v) { return std::asin(v); }
 	static float acos(float v) { return std::acos(v); }
 	static float atan2(float y, float x) { return std::atan2(y, x); }
-	static float floor(float v) { return std::floor(v); }
-	static float ceil(float v) { return std::ceil(v); }
 
 	static bool is_real(float v) { return !std::isnan(v) && !std::isinf(v); }
 
@@ -224,12 +222,6 @@ template <> struct scalar_traits<fixed16> {
 		result = static_cast<int32_t>((static_cast<int64_t>(f_root) * result) >> 16);
 		return fixed16::from_raw(result);
 	}
-
-	// Truncate toward -infinity (floor)
-	static constexpr fixed16 floor(fixed16 v) { return fixed16::from_raw((v.raw >> 16) << 16); }
-
-	// Round up to integer boundary (ceil)
-	static constexpr fixed16 ceil(fixed16 v) { return fixed16::from_raw(((v.raw + 0xFFFF) >> 16) << 16); }
 
 	// Polynomial atan2 (from toadlet mathfixed)
 	static fixed16 atan2(fixed16 y, fixed16 x) {

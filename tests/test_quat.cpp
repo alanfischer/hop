@@ -155,6 +155,35 @@ template <typename T> static void test_slerp_midpoint(const char * label, float 
 	printf("OK\n");
 }
 
+// Integration pattern: q_new = normalize(q + 0.5 * ω_quat * q * dt) applies a
+// small rotation over time. After integrating 100 small steps of a constant
+// angular velocity (0, 0, pi) for 1s total, we should end up ~180° rotated
+// around Z: rotating (1,0,0) should give (-1, 0, 0) within fixed-point tolerance.
+template <typename T> static void test_integration_pattern(const char * label, float tol) {
+	printf("  integration_pattern[%s]: ", label);
+	using tr = scalar_traits<T>;
+	quat<T> q;  // identity
+	T dt = tr::from_milli(10);  // 10ms steps
+	int steps = 100;             // 1 second total
+	vec3<T> omega { T {}, T {}, tr::pi() };  // pi rad/s around Z => full pi rotation in 1s
+	for (int i = 0; i < steps; ++i) {
+		quat<T> omega_q { omega.x, omega.y, omega.z, T {} };
+		quat<T> omega_times_q;
+		mul(omega_times_q, omega_q, q);
+		quat<T> dq = omega_times_q * (tr::half() * dt);
+		q += dq;
+		normalize(q);
+	}
+	vec3<T> v { tr::one(), T {}, T {} };
+	vec3<T> r;
+	mul(r, q, v);
+	// After pi rad rotation around Z, (1,0,0) -> (-1, 0, 0)
+	assert(approx(r.x, -tr::one(), tol));
+	assert(approx(r.y, T {}, tol));
+	assert(approx(r.z, T {}, tol));
+	printf("OK\n");
+}
+
 // Composition: (q1 * q2) * v == q1 * (q2 * v)
 template <typename T> static void test_composition(const char * label, float tol) {
 	printf("  composition[%s]: ", label);
@@ -189,6 +218,7 @@ template <typename T> static void run_all_tests(const char * label, float tol) {
 	test_normalize<T>(label, tol);
 	test_slerp_endpoints<T>(label, tol);
 	test_slerp_midpoint<T>(label, tol);
+	test_integration_pattern<T>(label, tol);
 	test_composition<T>(label, tol);
 }
 

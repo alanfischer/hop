@@ -37,7 +37,19 @@ template <typename T> struct quat {
 
 	T & operator[](int i) { return *((&x) + i); }
 	T operator[](int i) const { return *((&x) + i); }
+
+	// Element-wise arithmetic — used for time integration (q + dq*dt)
+	quat operator+(const quat & q) const { return { x + q.x, y + q.y, z + q.z, w + q.w }; }
+	quat operator-(const quat & q) const { return { x - q.x, y - q.y, z - q.z, w - q.w }; }
+	quat operator-() const { return { -x, -y, -z, -w }; }
+	quat operator*(T s) const { return { x * s, y * s, z * s, w * s }; }
+
+	void operator+=(const quat & q) { x += q.x; y += q.y; z += q.z; w += q.w; }
+	void operator-=(const quat & q) { x -= q.x; y -= q.y; z -= q.z; w -= q.w; }
+	void operator*=(T s) { x *= s; y *= s; z *= s; w *= s; }
 };
+
+template <typename T> quat<T> operator*(T s, const quat<T> & q) { return { q.x * s, q.y * s, q.z * s, q.w * s }; }
 
 // r = q1 * q2  (Hamilton product, right-to-left rotation composition)
 template <typename T> inline void mul(quat<T> & r, const quat<T> & q1, const quat<T> & q2) {
