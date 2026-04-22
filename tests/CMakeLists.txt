@@ -29,3 +29,11 @@ add_test(NAME test_support COMMAND test_support)
 add_executable(test_compound test_compound.cpp)
 target_link_libraries(test_compound PRIVATE hop)
 add_test(NAME test_compound COMMAND test_compound)
+
+add_executable(test_matrix3x3 test_matrix3x3.cpp)
+target_link_libraries(test_matrix3x3 PRIVATE hop)
+add_test(NAME test_matrix3x3 COMMAND test_matrix3x3)
+
+add_executable(test_quaternion test_quaternion.cpp)
+target_link_libraries(test_quaternion PRIVATE hop)
+add_test(NAME test_quaternion COMMAND test_quaternion)
