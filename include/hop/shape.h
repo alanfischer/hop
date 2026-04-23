@@ -115,35 +115,21 @@ public:
 				epsilon = T(0.0001);
 
 			box.reset();
-			auto & planes = convex_solid_.planes;
-			int sz = static_cast<int>(planes.size());
 			bool first_vertex = true;
-			for (int i = 0; i < sz - 2; ++i) {
-				for (int j = i + 1; j < sz - 1; ++j) {
-					for (int k = j + 1; k < sz; ++k) {
-						vec3<T> r;
-						if (get_intersection_of_three_planes(r, planes[i], planes[j], planes[k], epsilon)) {
-							bool legal = true;
-							for (int l = 0; l < sz; ++l) {
-								if (l != i && l != j && l != k) {
-									if ((dot(planes[l].normal, r) - planes[l].distance) > epsilon) {
-										legal = false;
-										break;
-									}
-								}
-							}
-							if (legal) {
-								if (first_vertex) {
-									box.mins = r;
-									box.maxs = r;
-									first_vertex = false;
-								} else {
-									box.merge(r);
-								}
-							}
-						}
-					}
+			auto consider = [&](const vec3<T> & r) {
+				if (first_vertex) {
+					box.mins = r;
+					box.maxs = r;
+					first_vertex = false;
+				} else {
+					box.merge(r);
 				}
+			};
+			if (!convex_solid_.vertices.empty()) {
+				for (auto & v : convex_solid_.vertices)
+					consider(v);
+			} else {
+				for_each_convex_solid_vertex(convex_solid_, epsilon, consider);
 			}
 			break;
 		}

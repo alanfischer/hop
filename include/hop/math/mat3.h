@@ -78,16 +78,17 @@ template <typename T> inline void transpose(mat3<T> & r, const mat3<T> & m) {
 }
 
 template <typename T> inline T determinant(const mat3<T> & m) {
-	return  -m.data[0] * m.data[4] * m.data[8] + m.data[0] * m.data[7] * m.data[5]
-	      +  m.data[3] * m.data[1] * m.data[8] - m.data[3] * m.data[2] * m.data[7]
-	      -  m.data[6] * m.data[1] * m.data[5] + m.data[6] * m.data[2] * m.data[4];
+	return  m.data[0] * m.data[4] * m.data[8] - m.data[0] * m.data[7] * m.data[5]
+	      - m.data[3] * m.data[1] * m.data[8] + m.data[3] * m.data[2] * m.data[7]
+	      + m.data[6] * m.data[1] * m.data[5] - m.data[6] * m.data[2] * m.data[4];
 }
 
-// r = inverse(m). Returns false if singular. Safe to call with &r == &m.
-template <typename T> inline bool invert(mat3<T> & r, const mat3<T> & m) {
+// r = inverse(m). Returns false (and leaves r unchanged) if near-singular.
+// Safe to call with &r == &m.
+template <typename T> inline bool invert(mat3<T> & r, const mat3<T> & m, T epsilon) {
 	using tr = scalar_traits<T>;
 	T det = determinant(m);
-	if (det == T {})
+	if (tr::abs(det) <= epsilon)
 		return false;
 	T inv_det = tr::one() / det;
 	// Snapshot m into locals — r and m may alias, and each output cell reads
@@ -95,15 +96,15 @@ template <typename T> inline bool invert(mat3<T> & r, const mat3<T> & m) {
 	T m0 = m.data[0], m1 = m.data[1], m2 = m.data[2];
 	T m3 = m.data[3], m4 = m.data[4], m5 = m.data[5];
 	T m6 = m.data[6], m7 = m.data[7], m8 = m.data[8];
-	r.data[0] = -(m4 * m8 - m7 * m5) * inv_det;
-	r.data[1] =  (m1 * m8 - m7 * m2) * inv_det;
-	r.data[2] = -(m1 * m5 - m4 * m2) * inv_det;
-	r.data[3] =  (m3 * m8 - m6 * m5) * inv_det;
-	r.data[4] = -(m0 * m8 - m6 * m2) * inv_det;
-	r.data[5] =  (m0 * m5 - m3 * m2) * inv_det;
-	r.data[6] = -(m3 * m7 - m6 * m4) * inv_det;
-	r.data[7] =  (m0 * m7 - m6 * m1) * inv_det;
-	r.data[8] = -(m0 * m4 - m3 * m1) * inv_det;
+	r.data[0] =  (m4 * m8 - m7 * m5) * inv_det;
+	r.data[1] = -(m1 * m8 - m7 * m2) * inv_det;
+	r.data[2] =  (m1 * m5 - m4 * m2) * inv_det;
+	r.data[3] = -(m3 * m8 - m6 * m5) * inv_det;
+	r.data[4] =  (m0 * m8 - m6 * m2) * inv_det;
+	r.data[5] = -(m0 * m5 - m3 * m2) * inv_det;
+	r.data[6] =  (m3 * m7 - m6 * m4) * inv_det;
+	r.data[7] = -(m0 * m7 - m6 * m1) * inv_det;
+	r.data[8] =  (m0 * m4 - m3 * m1) * inv_det;
 	return true;
 }
 

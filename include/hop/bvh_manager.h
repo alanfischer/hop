@@ -23,6 +23,10 @@ namespace hop {
 //
 // Call rebuild() after adding/removing static solids, or it will
 // rebuild lazily on the next query.
+//
+// If a "static" solid's world_bound changes — e.g., the caller moves it
+// or reshapes it — call mark_dirty() to schedule a rebuild. Moving static
+// solids is supported but the BVH will only re-index on the next query.
 
 template <typename T> class bvh_manager : public manager<T> {
 public:
@@ -47,6 +51,10 @@ public:
 			dynamic_solids_.erase(it_d);
 		}
 	}
+
+	// Mark the BVH stale. Call after a static solid's position or shape
+	// changes; the next query will rebuild.
+	void mark_dirty() { dirty_ = true; }
 
 	void rebuild() {
 		std::vector<std::pair<aa_box<T>, solid<T> *>> entries;

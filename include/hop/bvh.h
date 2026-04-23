@@ -58,8 +58,7 @@ public:
 		if (nodes_.empty())
 			return;
 		T best_t = tr::one();
-		vec3<T> inv_dir = safe_inv_dir(direction);
-		query_ray_recursive(0, origin, inv_dir, best_t, cb);
+		query_ray_recursive(0, origin, direction, best_t, cb);
 	}
 
 	const std::vector<node> & get_nodes() const { return nodes_; }
@@ -142,49 +141,54 @@ private:
 	// We use a dedicated slab test rather than hop's find_intersection(segment, aa_box)
 	// because we only need a boolean (no hit point/normal), making this faster for
 	// BVH traversal where we test many nodes but only care about pruning.
-	static bool ray_hits_aabb(const vec3<T> & origin, const vec3<T> & inv_dir, const aa_box<T> & box, T best_t) {
+	//
+	// Zero direction components are handled without a sentinel reciprocal: a
+	// "big" 1/d would overflow the fixed16 raw-multiply for modest distances.
+	// Instead, axes with zero direction contribute a pure containment check.
+	static bool ray_hits_aabb(const vec3<T> & origin, const vec3<T> & direction, const aa_box<T> & box, T best_t) {
 		T zero_val {};
+		T tmin = zero_val;
+		T tmax = best_t;
 
-		T t1 = (box.mins.x - origin.x) * inv_dir.x;
-		T t2 = (box.maxs.x - origin.x) * inv_dir.x;
-		T tmin = tr::min_val(t1, t2);
-		T tmax = tr::max_val(t1, t2);
-
-		t1 = (box.mins.y - origin.y) * inv_dir.y;
-		t2 = (box.maxs.y - origin.y) * inv_dir.y;
-		tmin = tr::max_val(tmin, tr::min_val(t1, t2));
-		tmax = tr::min_val(tmax, tr::max_val(t1, t2));
-
-		t1 = (box.mins.z - origin.z) * inv_dir.z;
-		t2 = (box.maxs.z - origin.z) * inv_dir.z;
-		tmin = tr::max_val(tmin, tr::min_val(t1, t2));
-		tmax = tr::min_val(tmax, tr::max_val(t1, t2));
-
-		return tmax >= tr::max_val(tmin, zero_val) && tmin < best_t;
-	}
-
-	static vec3<T> safe_inv_dir(const vec3<T> & direction) {
-		T zero_val {};
-		// Use a large-but-safe reciprocal for zero components.
-		// For fixed16, from_int(10000) = 10000 << 16 which fits int32.
-		// For float, 1e7 is fine.
-		T big;
-		if constexpr (std::is_same_v<T, float>) {
-			big = 1e7f;
-		} else {
-			big = tr::from_int(10000);
+		if (direction.x != zero_val) {
+			T inv = tr::one() / direction.x;
+			T t1 = (box.mins.x - origin.x) * inv;
+			T t2 = (box.maxs.x - origin.x) * inv;
+			tmin = tr::max_val(tmin, tr::min_val(t1, t2));
+			tmax = tr::min_val(tmax, tr::max_val(t1, t2));
+		} else if (origin.x < box.mins.x || origin.x > box.maxs.x) {
+			return false;
 		}
-		return vec3<T>(direction.x != zero_val ? tr::one() / direction.x : big,
-		               direction.y != zero_val ? tr::one() / direction.y : big,
-		               direction.z != zero_val ? tr::one() / direction.z : big);
+
+		if (direction.y != zero_val) {
+			T inv = tr::one() / direction.y;
+			T t1 = (box.mins.y - origin.y) * inv;
+			T t2 = (box.maxs.y - origin.y) * inv;
+			tmin = tr::max_val(tmin, tr::min_val(t1, t2));
+			tmax = tr::min_val(tmax, tr::max_val(t1, t2));
+		} else if (origin.y < box.mins.y || origin.y > box.maxs.y) {
+			return false;
+		}
+
+		if (direction.z != zero_val) {
+			T inv = tr::one() / direction.z;
+			T t1 = (box.mins.z - origin.z) * inv;
+			T t2 = (box.maxs.z - origin.z) * inv;
+			tmin = tr::max_val(tmin, tr::min_val(t1, t2));
+			tmax = tr::min_val(tmax, tr::max_val(t1, t2));
+		} else if (origin.z < box.mins.z || origin.z > box.maxs.z) {
+			return false;
+		}
+
+		return tmax >= tmin && tmin < best_t;
 	}
 
 	template <typename Callback>
 	void query_ray_recursive(
-	    int idx, const vec3<T> & origin, const vec3<T> & inv_dir, T & best_t, Callback && cb) const {
+	    int idx, const vec3<T> & origin, const vec3<T> & direction, T & best_t, Callback && cb) const {
 		const auto & n = nodes_[idx];
 
-		if (!ray_hits_aabb(origin, inv_dir, n.box, best_t))
+		if (!ray_hits_aabb(origin, direction, n.box, best_t))
 			return;
 
 		if (n.is_leaf()) {
@@ -192,9 +196,9 @@ private:
 			return;
 		}
 		if (n.left >= 0)
-			query_ray_recursive(n.left, origin, inv_dir, best_t, cb);
+			query_ray_recursive(n.left, origin, direction, best_t, cb);
 		if (n.right >= 0)
-			query_ray_recursive(n.right, origin, inv_dir, best_t, cb);
+			query_ray_recursive(n.right, origin, direction, best_t, cb);
 	}
 };
 

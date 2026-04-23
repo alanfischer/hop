@@ -134,6 +134,52 @@ static void test_bvh_ray_query() {
 	printf("  bvh ray query: OK\n");
 }
 
+// Regression: zero-direction axes must not be treated as "ray hits everything".
+// Under a sentinel 1/0 ≈ big, fixed16 multiplied through (mins - origin) × big
+// overflows int32 silently and produces garbage t-ranges. The slab test must
+// fall back to a containment check on the zero-direction axis instead.
+template <typename T>
+static void test_bvh_ray_query_parallel_axis() {
+	using tr = scalar_traits<T>;
+	bvh<T, int> tree;
+
+	// Two boxes well-separated on X. A ray parallel to Y starting past both
+	// on X must miss both, not hit them through overflow garbage.
+	std::vector<std::pair<aa_box<T>, int>> entries;
+	T half = tr::half();
+	for (int i : {0, 1}) {
+		T cx = tr::from_int(i * 2);  // x=0 and x=2
+		aa_box<T> box(vec3<T>(cx - half, -half, -half), vec3<T>(cx + half, half, half));
+		entries.push_back({box, i});
+	}
+	tree.build(entries);
+
+	int hits = 0;
+	// Ray starts at x=10 (far outside both boxes) and moves in +Y only.
+	// Direction has zero x and z components.
+	tree.query_ray(vec3<T>(tr::from_int(10), T{}, T{}), vec3<T>(T{}, tr::from_int(5), T{}),
+		[&](int, T &) { hits++; });
+	assert(hits == 0);
+
+	// Same origin and a zero-direction-on-x ray that does pass through the
+	// box at x=2 should NOT hit it either (x=10 is still outside the x slab).
+	hits = 0;
+	tree.query_ray(vec3<T>(tr::from_int(10), T{}, T{}), vec3<T>(T{}, T{}, tr::from_int(5)),
+		[&](int, T &) { hits++; });
+	assert(hits == 0);
+
+	// Control: ray parallel to Y starting inside the x slab of the x=0 box
+	// MUST hit it (and only it).
+	hits = 0;
+	int last = -1;
+	tree.query_ray(vec3<T>(T{}, -tr::from_int(5), T{}), vec3<T>(T{}, tr::from_int(20), T{}),
+		[&](int item, T & best_t) { hits++; last = item; best_t = tr::one(); });
+	assert(hits == 1);
+	assert(last == 0);
+
+	printf("  bvh ray query parallel axis: OK\n");
+}
+
 // ============================================================
 // BVH Manager tests
 // ============================================================
@@ -365,12 +411,14 @@ int main() {
 	test_bvh_single_item<float>();
 	test_bvh_many_items<float>();
 	test_bvh_ray_query<float>();
+	test_bvh_ray_query_parallel_axis<float>();
 
 	printf("test_bvh (fixed16):\n");
 	test_bvh_empty<fixed16>();
 	test_bvh_single_item<fixed16>();
 	test_bvh_many_items<fixed16>();
 	test_bvh_ray_query<fixed16>();
+	test_bvh_ray_query_parallel_axis<fixed16>();
 
 	printf("test_bvh_manager (float):\n");
 	test_bvh_manager_basic<float>();

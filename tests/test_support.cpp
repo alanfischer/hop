@@ -116,10 +116,43 @@ template <typename T> static void test_shape_dispatch(const char * label) {
 	printf("OK\n");
 }
 
+// Cached-vertex path: after rebuild_vertices(), support() must give the same
+// answer as the on-the-fly enumeration, on the same set of probe directions.
+template <typename T> static void test_convex_solid_cached_vertices(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  convex_solid_cached_vertices[%s]: ", label);
+	auto uncached = make_unit_cube<T>();
+	auto cached = make_unit_cube<T>();
+	rebuild_vertices(cached);
+	assert(!cached.vertices.empty());
+	// A unit cube has 8 corners.
+	assert(cached.vertices.size() == 8);
+
+	const vec3<T> probes[] = {
+		{ tr::one(), T {}, T {} },
+		{ -tr::one(), T {}, T {} },
+		{ T {}, tr::one(), T {} },
+		{ T {}, T {}, tr::one() },
+		{ tr::one(), tr::one(), tr::one() },
+		{ -tr::one(), tr::one(), -tr::one() },
+		{ tr::half(), -tr::one(), tr::half() },
+	};
+	for (const auto & d : probes) {
+		vec3<T> r_uncached, r_cached;
+		support(r_uncached, uncached, d);
+		support(r_cached, cached, d);
+		assert(r_uncached.x == r_cached.x);
+		assert(r_uncached.y == r_cached.y);
+		assert(r_uncached.z == r_cached.z);
+	}
+	printf("OK\n");
+}
+
 template <typename T> static void run_all_tests(const char * label) {
 	test_convex_solid_support_axis<T>(label);
 	test_convex_solid_support_diagonal<T>(label);
 	test_shape_dispatch<T>(label);
+	test_convex_solid_cached_vertices<T>(label);
 }
 
 int main() {

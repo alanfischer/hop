@@ -107,8 +107,13 @@ template <typename T> static void test_invert(const char * label, float tol) {
 	vec3<T> axis { T {}, tr::one(), T {} };
 	mat3<T> r;
 	set_mat3_from_axis_angle(r, axis, tr::half_pi());
+	T eps;
+	if constexpr (std::is_same_v<T, fixed16>)
+		eps = fixed16::from_raw(1);
+	else
+		eps = T(1e-6);
 	mat3<T> inv;
-	bool ok = invert(inv, r);
+	bool ok = invert(inv, r, eps);
 	assert(ok);
 	mat3<T> prod;
 	mul(prod, r, inv);
@@ -118,10 +123,33 @@ template <typename T> static void test_invert(const char * label, float tol) {
 	// In-place: invert(r, r) must match a separate invert.
 	mat3<T> in_place;
 	in_place.set(r);
-	ok = invert(in_place, in_place);
+	ok = invert(in_place, in_place, eps);
 	assert(ok);
 	for (int i = 0; i < 9; ++i)
 		assert(approx(in_place.data[i], inv.data[i], tol));
+	printf("OK\n");
+}
+
+template <typename T> static void test_invert_singular(const char * label) {
+	printf("  invert_singular[%s]: ", label);
+	using tr = scalar_traits<T>;
+	mat3<T> singular;
+	// All zeros — clearly singular.
+	for (int i = 0; i < 9; ++i)
+		singular.data[i] = T {};
+	mat3<T> inv;
+	inv.reset();  // identity — invert should leave this untouched on failure
+	T eps;
+	if constexpr (std::is_same_v<T, fixed16>)
+		eps = fixed16::from_raw(1);
+	else
+		eps = T(1e-6);
+	bool ok = invert(inv, singular, eps);
+	assert(!ok);
+	// r must be unchanged (still identity) on failure
+	for (int i = 0; i < 3; ++i)
+		for (int j = 0; j < 3; ++j)
+			assert(inv.at(i, j) == (i == j ? tr::one() : T {}));
 	printf("OK\n");
 }
 
@@ -133,6 +161,7 @@ template <typename T> static void run_all_tests(const char * label, float tol) {
 	test_axis_angle_rotation<T>(label, tol);
 	test_rotation_is_orthonormal<T>(label, tol);
 	test_invert<T>(label, tol);
+	test_invert_singular<T>(label);
 }
 
 int main() {

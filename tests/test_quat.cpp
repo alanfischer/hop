@@ -272,6 +272,57 @@ template <typename T> static void test_rotation_drift(const char * label) {
 	printf("OK\n");
 }
 
+// Axis-angle round-trip: build quat from axis+angle, extract via
+// get_axis_angle_from_quat, check both match. Near identity (small angle) the
+// old acos(w)*2 path lost precision; this guards the atan2 replacement.
+template <typename T> static void test_axis_angle_from_quat(const char * label, float tol) {
+	printf("  axis_angle_from_quat[%s]: ", label);
+	using tr = scalar_traits<T>;
+	T eps;
+	if constexpr (std::is_same_v<T, fixed16>)
+		eps = fixed16::from_raw(4);
+	else
+		eps = T(1e-6);
+
+	// 90° about +Z
+	{
+		vec3<T> axis_in { T {}, T {}, tr::one() };
+		quat<T> q;
+		set_quat_from_axis_angle(q, axis_in, tr::half_pi());
+		vec3<T> axis_out;
+		T angle = get_axis_angle_from_quat(axis_out, q, eps);
+		assert(approx(angle, tr::half_pi(), tol));
+		assert(approx_vec(axis_out, axis_in, tol));
+	}
+
+	// Identity → angle ≈ 0, axis falls back to (1,0,0).
+	{
+		quat<T> q;  // identity
+		vec3<T> axis_out;
+		T angle = get_axis_angle_from_quat(axis_out, q, eps);
+		assert(approx(angle, T {}, tol));
+		assert(axis_out.x == tr::one() && axis_out.y == T {} && axis_out.z == T {});
+	}
+
+	// Small-angle rotation around +Y. Under acos(w)*2 the angle collapses to 0
+	// well before atan2 does, so pick a rotation tiny enough to expose the old
+	// regime: 1/100th of half_pi ≈ 0.0157 rad ≈ 0.9°.
+	{
+		vec3<T> axis_in { T {}, tr::one(), T {} };
+		T small_angle = tr::half_pi() / tr::from_int(100);
+		quat<T> q;
+		set_quat_from_axis_angle(q, axis_in, small_angle);
+		vec3<T> axis_out;
+		T angle = get_axis_angle_from_quat(axis_out, q, eps);
+		float tol_small = std::is_same_v<T, fixed16> ? 5e-3f : 1e-4f;
+		assert(approx(angle, small_angle, tol_small));
+		// Axis should still point (approximately) along +Y.
+		assert(approx_vec(axis_out, axis_in, std::is_same_v<T, fixed16> ? 0.1f : 1e-3f));
+	}
+
+	printf("OK\n");
+}
+
 // Composition: (q1 * q2) * v == q1 * (q2 * v)
 template <typename T> static void test_composition(const char * label, float tol) {
 	printf("  composition[%s]: ", label);
@@ -308,6 +359,7 @@ template <typename T> static void run_all_tests(const char * label, float tol) {
 	test_slerp_midpoint<T>(label, tol);
 	test_integration_pattern<T>(label);
 	test_rotation_drift<T>(label);
+	test_axis_angle_from_quat<T>(label, tol);
 	test_composition<T>(label, tol);
 }
 

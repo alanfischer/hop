@@ -173,24 +173,33 @@ inline void set_quat_from_axis_angle(quat<T> & r, const vec3<T> & axis, T angle)
 	r.w = tr::cos(half_angle);
 }
 
-// Extract axis + angle from a unit quat. Returns angle in radians.
+// Extract axis + angle from a unit quat. Returns angle in radians ∈ [0, π].
 // `axis` is written with the unit axis of rotation (or (1,0,0) if undefined).
+//
+// Uses angle = 2 * asin(|q.xyz|) rather than 2 * acos(q.w) so the small-rotation
+// case (q.w ≈ 1) stays accurate: float acos near 1 has poor conditioning,
+// whereas asin(x) ≈ x for small x. |q.xyz| doubles as sin(angle/2), so no
+// second trig call is needed for the axis normalization.
+//
+// Canonicalizes q.w ≥ 0 internally (since -q represents the same rotation).
 template <typename T>
 inline T get_axis_angle_from_quat(vec3<T> & axis, const quat<T> & q, T epsilon) {
 	using tr = scalar_traits<T>;
-	T angle = tr::acos(q.w) * tr::two();
-	T sin_half = tr::sin(angle * tr::half());
-	if (tr::abs(sin_half) > epsilon) {
+	T qx = q.x, qy = q.y, qz = q.z, qw = q.w;
+	if (qw < T {}) {
+		qx = -qx; qy = -qy; qz = -qz; qw = -qw;
+	}
+	T sin_half = tr::sqrt(qx * qx + qy * qy + qz * qz);
+	// Clamp against rounding: a unit quat has sin_half ≤ 1, but fixed16
+	// accumulation can nudge it slightly over.
+	if (sin_half > tr::one())
+		sin_half = tr::one();
+	T angle = tr::asin(sin_half) * tr::two();
+	if (sin_half > epsilon) {
 		T inv = tr::one() / sin_half;
-		axis.x = q.x * inv;
-		axis.y = q.y * inv;
-		axis.z = q.z * inv;
-		// Renormalize to guard against accumulated error.
-		T len_sq = axis.x * axis.x + axis.y * axis.y + axis.z * axis.z;
-		if (len_sq > epsilon * epsilon) {
-			T inv_l = tr::one() / tr::sqrt(len_sq);
-			axis.x *= inv_l; axis.y *= inv_l; axis.z *= inv_l;
-		}
+		axis.x = qx * inv;
+		axis.y = qy * inv;
+		axis.z = qz * inv;
 	} else {
 		axis.x = tr::one(); axis.y = T {}; axis.z = T {};
 	}
