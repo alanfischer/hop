@@ -63,6 +63,7 @@ template <> struct scalar_traits<float> {
 	static float mul(float a, float b) { return a * b; }
 	static float div(float a, float b) { return a / b; }
 	static float madd(float a, float b, float c) { return a * b + c; }
+	static float square(float v) { return v * v; }
 
 	// Epsilon
 	static void make_epsilon(epsilon_state<float> & s, float epsilon) {
@@ -255,6 +256,7 @@ template <> struct scalar_traits<fixed16> {
 	static constexpr fixed16 mul(fixed16 a, fixed16 b) { return a * b; }
 	static constexpr fixed16 div(fixed16 a, fixed16 b) { return a / b; }
 	static constexpr fixed16 madd(fixed16 a, fixed16 b, fixed16 c) { return a * b + c; }
+	static constexpr fixed16 square(fixed16 v) { return v * v; }
 
 	// Epsilon (fixed uses bit-shift)
 	static void make_epsilon(epsilon_state<fixed16> & s, int epsilon_bits) {

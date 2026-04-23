@@ -70,4 +70,41 @@ template <typename T> struct aa_box {
 	}
 };
 
+// Translate overloads (function form, mirrors vec3/sphere/capsule)
+template <typename T> inline void add(aa_box<T> & r, const aa_box<T> & b, const vec3<T> & p) {
+	r.mins.x = b.mins.x + p.x;
+	r.mins.y = b.mins.y + p.y;
+	r.mins.z = b.mins.z + p.z;
+	r.maxs.x = b.maxs.x + p.x;
+	r.maxs.y = b.maxs.y + p.y;
+	r.maxs.z = b.maxs.z + p.z;
+}
+
+template <typename T> inline void add(aa_box<T> & b, const vec3<T> & p) {
+	b.mins.x += p.x;
+	b.mins.y += p.y;
+	b.mins.z += p.z;
+	b.maxs.x += p.x;
+	b.maxs.y += p.y;
+	b.maxs.z += p.z;
+}
+
+template <typename T> inline void sub(aa_box<T> & r, const aa_box<T> & b, const vec3<T> & p) {
+	r.mins.x = b.mins.x - p.x;
+	r.mins.y = b.mins.y - p.y;
+	r.mins.z = b.mins.z - p.z;
+	r.maxs.x = b.maxs.x - p.x;
+	r.maxs.y = b.maxs.y - p.y;
+	r.maxs.z = b.maxs.z - p.z;
+}
+
+template <typename T> inline void sub(aa_box<T> & b, const vec3<T> & p) {
+	b.mins.x -= p.x;
+	b.mins.y -= p.y;
+	b.mins.z -= p.z;
+	b.maxs.x -= p.x;
+	b.maxs.y -= p.y;
+	b.maxs.z -= p.z;
+}
+
 } // namespace hop

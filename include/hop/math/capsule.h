@@ -42,4 +42,33 @@ template <typename T> struct capsule {
 	void operator-=(const vec3<T> & v) { origin -= v; }
 };
 
+// Translate overloads (function form, mirrors vec3/aa_box/sphere)
+template <typename T> inline void add(capsule<T> & r, const capsule<T> & c, const vec3<T> & p) {
+	r.origin.x = c.origin.x + p.x;
+	r.origin.y = c.origin.y + p.y;
+	r.origin.z = c.origin.z + p.z;
+	r.direction = c.direction;
+	r.radius = c.radius;
+}
+
+template <typename T> inline void add(capsule<T> & c, const vec3<T> & p) {
+	c.origin.x += p.x;
+	c.origin.y += p.y;
+	c.origin.z += p.z;
+}
+
+template <typename T> inline void sub(capsule<T> & r, const capsule<T> & c, const vec3<T> & p) {
+	r.origin.x = c.origin.x - p.x;
+	r.origin.y = c.origin.y - p.y;
+	r.origin.z = c.origin.z - p.z;
+	r.direction = c.direction;
+	r.radius = c.radius;
+}
+
+template <typename T> inline void sub(capsule<T> & c, const vec3<T> & p) {
+	c.origin.x -= p.x;
+	c.origin.y -= p.y;
+	c.origin.z -= p.z;
+}
+
 } // namespace hop
