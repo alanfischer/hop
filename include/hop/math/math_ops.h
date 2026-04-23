@@ -355,44 +355,73 @@ template <typename T> inline void support(vec3<T> & result, const capsule<T> & c
 	add(result, nd);
 }
 
-template <typename T> inline void support(vec3<T> & result, const convex_solid<T> & cs, const vec3<T> & d) {
-	using tr = scalar_traits<T>;
+// Enumerate every plane triple-intersection that lies inside all other half-
+// spaces. Shared by convex_solid support/get_bound and by rebuild_vertices.
+// Callback receives each vertex (by value); return false to stop early.
+template <typename T, typename Callback>
+inline void for_each_convex_solid_vertex(const convex_solid<T> & cs, T epsilon, Callback && cb) {
+	auto & planes = cs.planes;
+	int sz = static_cast<int>(planes.size());
+	for (int i = 0; i < sz - 2; ++i) {
+		for (int j = i + 1; j < sz - 1; ++j) {
+			for (int k = j + 1; k < sz; ++k) {
+				vec3<T> r;
+				if (!get_intersection_of_three_planes(r, planes[i], planes[j], planes[k], epsilon))
+					continue;
+				bool legal = true;
+				for (int l = 0; l < sz; ++l) {
+					if (l != i && l != j && l != k) {
+						if ((dot(planes[l].normal, r) - planes[l].distance) > epsilon) {
+							legal = false;
+							break;
+						}
+					}
+				}
+				if (legal)
+					cb(r);
+			}
+		}
+	}
+}
+
+// Populate cs.vertices by enumerating the plane intersections. Call this
+// once after plane setup; support() and get_bound() then run in O(V) instead
+// of the O(n^4) triple-plane loop.
+template <typename T> inline void rebuild_vertices(convex_solid<T> & cs) {
 	T epsilon;
 	if constexpr (std::is_same_v<T, fixed16>)
 		epsilon = fixed16::from_raw(1 << 4);
 	else
 		epsilon = T(0.0001);
 
-	auto & planes = cs.planes;
-	int sz = static_cast<int>(planes.size());
+	cs.vertices.clear();
+	for_each_convex_solid_vertex(cs, epsilon, [&](const vec3<T> & v) { cs.vertices.push_back(v); });
+}
+
+template <typename T> inline void support(vec3<T> & result, const convex_solid<T> & cs, const vec3<T> & d) {
+	T epsilon;
+	if constexpr (std::is_same_v<T, fixed16>)
+		epsilon = fixed16::from_raw(1 << 4);
+	else
+		epsilon = T(0.0001);
+
 	bool first = true;
 	T best_dot {};
 
-	for (int i = 0; i < sz - 2; ++i) {
-		for (int j = i + 1; j < sz - 1; ++j) {
-			for (int k = j + 1; k < sz; ++k) {
-				vec3<T> r;
-				if (get_intersection_of_three_planes(r, planes[i], planes[j], planes[k], epsilon)) {
-					bool legal = true;
-					for (int l = 0; l < sz; ++l) {
-						if (l != i && l != j && l != k) {
-							if ((dot(planes[l].normal, r) - planes[l].distance) > epsilon) {
-								legal = false;
-								break;
-							}
-						}
-					}
-					if (legal) {
-						T dp = dot(r, d);
-						if (first || dp > best_dot) {
-							result = r;
-							best_dot = dp;
-							first = false;
-						}
-					}
-				}
-			}
+	auto consider = [&](const vec3<T> & r) {
+		T dp = dot(r, d);
+		if (first || dp > best_dot) {
+			result = r;
+			best_dot = dp;
+			first = false;
 		}
+	};
+
+	if (!cs.vertices.empty()) {
+		for (auto & v : cs.vertices)
+			consider(v);
+	} else {
+		for_each_convex_solid_vertex(cs, epsilon, consider);
 	}
 
 	if (first)
