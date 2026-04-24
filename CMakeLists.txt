@@ -23,6 +23,14 @@ if(HOP_BUILD_EXAMPLES)
     target_link_libraries(demo_bounce PRIVATE hop raylib)
 endif()
 
+# Benchmarks — informational, not part of ctest.
+option(HOP_BUILD_BENCHMARKS "Build hop benchmarks" OFF)
+if(HOP_BUILD_BENCHMARKS)
+    add_executable(hop_bench bench/main.cpp)
+    target_link_libraries(hop_bench PRIVATE hop)
+    target_compile_options(hop_bench PRIVATE -O2)
+endif()
+
 # WebAssembly bindings (build with emcmake)
 option(HOP_BUILD_WEB "Build WebAssembly bindings" OFF)
 if(HOP_BUILD_WEB)
