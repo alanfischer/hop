@@ -13,9 +13,11 @@ Supports both `float` and 16.16 `fixed16` scalar types via template parameteriza
 
 ## Design Philosophy
 
-Hop is a **translation-only** physics engine — solids have position and linear velocity but no rotation. There is no angular velocity, no torque, no inertia tensor, and no orientation state. All collision shapes (boxes, spheres, capsules) remain axis-aligned at all times.
+Hop is currently a **translation-only** physics engine — solids have position and linear velocity but no rotation. There is no angular velocity, no torque, no inertia tensor, and no orientation state. All collision shapes (boxes, spheres, capsules) remain axis-aligned at all times.
 
 This is intentional. Hop was designed for the [Toadlet](https://github.com/alanfischer/toadlet) game engine where gameplay objects needed fast, predictable collision response without the complexity of a full rigid-body solver. The tradeoff is straightforward: you get continuous swept-collision detection, deterministic fixed-point support, and zero-allocation simulation in exchange for not handling rotational dynamics. For many game scenarios — characters, projectiles, pickups, triggers, vehicles on terrain — translation-only physics is sufficient and far simpler to reason about.
+
+Rotational support is a work in progress — see `docs/rotation_plan.md` for the roadmap. The `mat3` and `quat` math primitives have landed; the simulator itself has not yet adopted them.
 
 ## Features
 
@@ -30,7 +32,7 @@ This is intentional. Hop was designed for the [Toadlet](https://github.com/alanf
 - **Fixed-point arithmetic** — `fixed16` type with polynomial sin/cos/atan2, Newton-Raphson sqrt, and branchless min/max/abs
 - **JavaScript bindings** — WebAssembly build via Emscripten/embind for browser-based physics
 - **Zero external dependencies** — only the C++ standard library
-- **Zero-allocation hot paths** — all temporaries are pre-allocated as cache members on the simulator
+- **Zero-allocation hot paths** — the simulator runs a full tick without heap allocation; scratch state is stack-resident
 
 ## Overlap / Intersection Queries
 
@@ -178,7 +180,9 @@ include/hop/
     segment.h            # line segment
     plane.h              # half-space plane
     convex_solid.h       # convex polyhedron
-    math_ops.h           # vector operations (dot, cross, normalize, ...)
+    mat3.h               # 3×3 matrix
+    quat.h               # quaternion
+    support.h            # support functions + convex-solid vertex enumeration
     intersect.h          # intersection tests
     bounding.h           # bounding box computation
     project.h            # point/segment projection
