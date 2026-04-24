@@ -75,19 +75,36 @@ public:
 
 	// ---- manager<T> interface ----
 
-	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) override {
-		if (dirty_)
-			rebuild();
+	// Below this static-count, skip the BVH and scan inline — a tree traversal
+	// of 10-15 nodes loses to iterating ~20 AABBs in a flat array (virtual
+	// dispatch + pointer chasing costs more than the saved comparisons).
+	// Measured break-even is around 10-15 statics; 20 leaves headroom.
+	static constexpr int linear_scan_threshold = 20;
 
+	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) override {
 		int count = 0;
 
-		// Query BVH for static solids
-		bvh_.query_aabb(box, [&](solid<T> * s) {
-			if (count < max_solids) {
-				solids[count] = s;
-				count++;
+		if (static_cast<int>(static_solids_.size()) >= linear_scan_threshold) {
+			if (dirty_)
+				rebuild();
+			bvh_.query_aabb(box, [&](solid<T> * s) {
+				if (count < max_solids) {
+					solids[count] = s;
+					count++;
+				}
+			});
+		} else {
+			for (auto * s : static_solids_) {
+				if (count >= max_solids)
+					break;
+				if (s->get_num_shapes() == 0)
+					continue;
+				if (test_intersection(box, s->get_world_bound())) {
+					solids[count] = s;
+					count++;
+				}
 			}
-		});
+		}
 
 		// Linear scan for dynamic solids
 		for (auto * s : dynamic_solids_) {
