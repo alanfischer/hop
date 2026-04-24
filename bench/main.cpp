@@ -149,6 +149,94 @@ template <typename T> static void bench_full_tick(const char * label) {
 }
 
 // ----------------------------------------------------------------------------
+// Scenario 3: stress — N dynamic spheres packed tightly in a small room.
+// Exercises the broad phase (O(n²) linear fallback vs. bvh_manager) and the
+// collision loop, since neighbor overlap is the normal state. Sweep N to see
+// how tick cost scales, and run each N with and without BVH broad-phase.
+// ----------------------------------------------------------------------------
+
+template <typename T> static void setup_stress_scene(simulator<T> & sim, int n) {
+	using tr = scalar_traits<T>;
+	sim.set_gravity({ T {}, T {}, -tr::from_milli(9810) });
+
+	// Small room so spheres stay packed.
+	T r = tr::from_int(5);
+	T t = tr::half();
+	auto add_wall = [&](const vec3<T> & center, const vec3<T> & half_extent) {
+		auto s = std::make_shared<solid<T>>();
+		s->set_infinite_mass();
+		s->set_position(center);
+		s->add_shape(std::make_shared<shape<T>>(aa_box<T>{ -half_extent.x, -half_extent.y, -half_extent.z,
+		                                                  half_extent.x, half_extent.y, half_extent.z }));
+		sim.add_solid(s);
+	};
+	add_wall({ T {}, T {}, -r }, { r, r, t });
+	add_wall({ T {}, T {},  r }, { r, r, t });
+	add_wall({ -r, T {}, T {} }, { t, r, r });
+	add_wall({  r, T {}, T {} }, { t, r, r });
+	add_wall({ T {}, -r, T {} }, { r, t, r });
+	add_wall({ T {},  r, T {} }, { r, t, r });
+
+	// Grid of small spheres, radius 0.3 at 1-unit spacing — guaranteed overlap
+	// as they settle under gravity.
+	int side = 1;
+	while (side * side * side < n) ++side;
+	T half = tr::half();
+	int placed = 0;
+	for (int ix = 0; ix < side && placed < n; ++ix)
+	for (int iy = 0; iy < side && placed < n; ++iy)
+	for (int iz = 0; iz < side && placed < n; ++iz) {
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		T x = tr::from_int(ix) - tr::from_int(side) * half;
+		T y = tr::from_int(iy) - tr::from_int(side) * half;
+		T z = tr::from_int(iz) - tr::from_int(side) * half;
+		s->set_position({ x, y, z });
+		// Small asymmetric initial velocity so they jostle.
+		s->set_velocity({ tr::from_int((placed & 1) ? 1 : -1),
+		                  tr::from_int((placed & 2) ? 1 : -1),
+		                  T {} });
+		s->add_shape(std::make_shared<shape<T>>(sphere<T>{ vec3<T>{}, tr::from_milli(300) }));
+		sim.add_solid(s);
+		++placed;
+	}
+}
+
+template <typename T> static void bench_stress(const char * label) {
+	printf("[stress %s]\n", label);
+
+	// Tune iterations so each sweep runs in ~1s even at the largest N.
+	struct config { int n; int iters; };
+	config configs[] = { { 50, 2000 }, { 100, 1000 }, { 200, 500 } };
+
+	for (auto c : configs) {
+		// Linear broad-phase (simulator's default O(n) fallback per active solid).
+		{
+			auto sim = std::make_shared<simulator<T>>();
+			setup_stress_scene(*sim, c.n);
+			char name[64];
+			std::snprintf(name, sizeof(name), "N=%d linear", c.n);
+			bench::go(name, c.iters, [&] { sim->update(10); });
+		}
+		// BVH broad-phase.
+		{
+			auto sim = std::make_shared<simulator<T>>();
+			bvh_manager<T> mgr;
+			sim->set_manager(&mgr);
+			setup_stress_scene(*sim, c.n);
+			// Register only the walls as static; dynamic spheres stay in the flat
+			// list. The first 6 solids added are the walls — this matches the
+			// order setup_stress_scene uses.
+			for (int i = 0; i < sim->get_num_solids(); ++i)
+				mgr.add_solid(sim->get_solid(i), i < 6);
+			char name[64];
+			std::snprintf(name, sizeof(name), "N=%d bvh", c.n);
+			bench::go(name, c.iters, [&] { sim->update(10); });
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
 
 int main() {
 	printf("hop bench\n");
@@ -159,6 +247,9 @@ int main() {
 
 	bench_full_tick<float>("float");
 	bench_full_tick<fixed16>("fixed16");
+
+	bench_stress<float>("float");
+	bench_stress<fixed16>("fixed16");
 
 	printf("\ndone\n");
 	return 0;
