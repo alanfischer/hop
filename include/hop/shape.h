@@ -2,7 +2,7 @@
 
 #include <hop/math/bounding.h>
 #include <hop/math/convex_solid.h>
-#include <hop/math/math_ops.h>
+#include <hop/math/support.h>
 #include <hop/traceable.h>
 #include <memory>
 

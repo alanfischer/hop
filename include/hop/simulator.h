@@ -6,7 +6,7 @@
 #include <hop/manager.h>
 #include <hop/math/bounding.h>
 #include <hop/math/intersect.h>
-#include <hop/math/math_ops.h>
+#include <hop/math/support.h>
 #include <hop/math/project.h>
 #include <hop/solid.h>
 #include <stdexcept>

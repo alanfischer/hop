@@ -12,7 +12,7 @@
 #include <hop/math/capsule.h>
 #include <hop/math/convex_solid.h>
 #include <hop/math/intersect.h>
-#include <hop/math/math_ops.h>
+#include <hop/math/support.h>
 #include <hop/math/plane.h>
 #include <hop/math/project.h>
 #include <hop/math/segment.h>
