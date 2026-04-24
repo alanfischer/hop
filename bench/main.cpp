@@ -227,10 +227,56 @@ template <typename T> static void bench_stress(const char * label) {
 }
 
 // ----------------------------------------------------------------------------
+// Scenario 4: compound narrow-phase.
+// Two solids each with N sphere subshapes, swept toward each other. Every
+// test_solid call iterates N×N shape pairs — a direct measurement of the
+// shape-iteration hot path under load. If shape size (168 B) is cache-bound,
+// more shapes per solid should hurt disproportionately.
+// ----------------------------------------------------------------------------
+
+template <typename T> static void bench_compound_narrow(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("[compound_narrow %s]\n", label);
+
+	auto sim = std::make_shared<simulator<T>>();
+
+	auto build_compound = [&](int n_shapes, const vec3<T> & pos) {
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_position(pos);
+		for (int k = 0; k < n_shapes; ++k) {
+			auto sh = std::make_shared<shape<T>>(sphere<T>{ vec3<T>{}, tr::from_milli(100) });
+			vec3<T> lp = { tr::from_milli(250) * tr::from_int(k), T {}, T {} };
+			sh->set_local_position(lp);
+			s->add_shape(sh);
+		}
+		sim->add_solid(s);
+		return s;
+	};
+
+	segment<T> seg;
+	seg.set_start_dir(vec3<T>{}, vec3<T>{ tr::from_int(5), T {}, T {} });
+
+	for (int n : { 1, 4, 8, 16, 32 }) {
+		auto s1 = build_compound(n, vec3<T>{});
+		auto s2 = build_compound(n, vec3<T>{ tr::from_int(4), T {}, T {} });
+		char name[64];
+		std::snprintf(name, sizeof(name), "compound vs compound, %d×%d shapes", n, n);
+		bench::go(name, 10000, [&] {
+			collision<T> r;
+			sim->test_solid(r, s1.get(), seg, s2.get());
+		});
+	}
+}
+
+// ----------------------------------------------------------------------------
 
 int main() {
 	printf("hop bench\n");
 	printf("---------\n");
+	printf("sizeof(shape<float>) = %zu bytes\n", sizeof(shape<float>));
+	printf("sizeof(simulator<float>) = %zu bytes\n", sizeof(simulator<float>));
+	printf("\n");
 
 	bench_narrow_phase<float>("float");
 	bench_narrow_phase<fixed16>("fixed16");
@@ -240,6 +286,9 @@ int main() {
 
 	bench_stress<float>("float");
 	bench_stress<fixed16>("fixed16");
+
+	bench_compound_narrow<float>("float");
+	bench_compound_narrow<fixed16>("fixed16");
 
 	printf("\ndone\n");
 	return 0;
