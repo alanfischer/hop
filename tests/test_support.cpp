@@ -116,17 +116,21 @@ template <typename T> static void test_shape_dispatch(const char * label) {
 	printf("OK\n");
 }
 
-// Cached-vertex path: after rebuild_vertices(), support() must give the same
-// answer as the on-the-fly enumeration, on the same set of probe directions.
-template <typename T> static void test_convex_solid_cached_vertices(const char * label) {
+// Auto-cache path: a fresh convex_solid has no vertices, but calling support()
+// on it must populate the cache and produce the same answers as one whose
+// cache was pre-built via rebuild_vertices().
+template <typename T> static void test_convex_solid_auto_cache(const char * label) {
 	using tr = scalar_traits<T>;
-	printf("  convex_solid_cached_vertices[%s]: ", label);
-	auto uncached = make_unit_cube<T>();
-	auto cached = make_unit_cube<T>();
-	rebuild_vertices(cached);
-	assert(!cached.vertices.empty());
-	// A unit cube has 8 corners.
-	assert(cached.vertices.size() == 8);
+	printf("  convex_solid_auto_cache[%s]: ", label);
+
+	// A fresh cube — cache starts empty.
+	auto lazy = make_unit_cube<T>();
+	assert(lazy.vertices.empty());
+
+	// A cube with vertices pre-built.
+	auto eager = make_unit_cube<T>();
+	rebuild_vertices(eager);
+	assert(eager.vertices.size() == 8);
 
 	const vec3<T> probes[] = {
 		{ tr::one(), T {}, T {} },
@@ -138,13 +142,15 @@ template <typename T> static void test_convex_solid_cached_vertices(const char *
 		{ tr::half(), -tr::one(), tr::half() },
 	};
 	for (const auto & d : probes) {
-		vec3<T> r_uncached, r_cached;
-		support(r_uncached, uncached, d);
-		support(r_cached, cached, d);
-		assert(r_uncached.x == r_cached.x);
-		assert(r_uncached.y == r_cached.y);
-		assert(r_uncached.z == r_cached.z);
+		vec3<T> r_lazy, r_eager;
+		support(r_lazy, lazy, d);  // first call on `lazy` populates the cache
+		support(r_eager, eager, d);
+		assert(r_lazy.x == r_eager.x);
+		assert(r_lazy.y == r_eager.y);
+		assert(r_lazy.z == r_eager.z);
 	}
+	// Cache must have been populated by the first support() call.
+	assert(lazy.vertices.size() == 8);
 	printf("OK\n");
 }
 
@@ -152,7 +158,7 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_convex_solid_support_axis<T>(label);
 	test_convex_solid_support_diagonal<T>(label);
 	test_shape_dispatch<T>(label);
-	test_convex_solid_cached_vertices<T>(label);
+	test_convex_solid_auto_cache<T>(label);
 }
 
 int main() {

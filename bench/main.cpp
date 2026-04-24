@@ -45,11 +45,8 @@ template <typename T> static void bench_narrow_phase(const char * label) {
 	auto sph_shape = std::make_shared<shape<T>>(sphere<T>{ vec3<T>{}, tr::one() });
 	auto box_shape = std::make_shared<shape<T>>(aa_box<T>{ tr::one() });
 	auto cap_shape = std::make_shared<shape<T>>(capsule<T>{ vec3<T>{}, { T {}, tr::one(), T {} }, tr::half() });
-	auto cs_uncached = make_unit_cube_convex<T>();
-	auto cs_cached = make_unit_cube_convex<T>();
-	rebuild_vertices(cs_cached);
-	auto convex_un_shape = std::make_shared<shape<T>>(cs_uncached);
-	auto convex_ca_shape = std::make_shared<shape<T>>(cs_cached);
+	auto cs = make_unit_cube_convex<T>();
+	auto convex_shape = std::make_shared<shape<T>>(cs);
 
 	// A pre-built pair: solid1 at origin, solid2 offset +4 on X. Sweep +5 X.
 	struct pair { std::shared_ptr<solid<T>> s1, s2; };
@@ -87,15 +84,8 @@ template <typename T> static void bench_narrow_phase(const char * label) {
 		});
 	}
 	{
-		auto p = make_pair(convex_un_shape, convex_un_shape);
-		bench::go("convex vs convex (uncached)", 10000, [&] {
-			collision<T> r;
-			sim->test_solid(r, p.s1.get(), seg, p.s2.get());
-		});
-	}
-	{
-		auto p = make_pair(convex_ca_shape, convex_ca_shape);
-		bench::go("convex vs convex (cached vertices)", 10000, [&] {
+		auto p = make_pair(convex_shape, convex_shape);
+		bench::go("convex vs convex", 10000, [&] {
 			collision<T> r;
 			sim->test_solid(r, p.s1.get(), seg, p.s2.get());
 		});

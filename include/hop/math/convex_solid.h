@@ -7,17 +7,15 @@
 namespace hop {
 
 // Convex polyhedron defined by its bounding half-spaces. `planes` is the
-// authoritative representation. `vertices` is an optional cache of the plane
+// authoritative representation. `vertices` is a cache of the plane
 // intersections that lie inside every other half-space; support() and
-// bounding-box queries use it when present and fall back to on-the-fly
-// enumeration when empty.
+// bounding-box queries populate it on first use.
 //
-// Populate by calling rebuild_vertices() (in math_ops.h) after setting planes.
-// Mutating `planes` directly invalidates the cache — the user should re-run
-// rebuild_vertices() or clear() it.
+// If you mutate `planes` directly after the cache has been populated, clear
+// `vertices` (or call rebuild_vertices()) — the cache is not auto-invalidated.
 template <typename T> struct convex_solid {
 	std::vector<plane<T>> planes;
-	std::vector<vec3<T>> vertices;
+	mutable std::vector<vec3<T>> vertices;
 
 	convex_solid() = default;
 

@@ -108,29 +108,14 @@ public:
 			find_bounding_box(box, capsule_);
 			break;
 		case shape_type::convex_solid: {
-			T epsilon;
-			if constexpr (std::is_same_v<T, fixed16>)
-				epsilon = fixed16::from_raw(1 << 4);
-			else
-				epsilon = T(0.0001);
-
+			ensure_vertices(convex_solid_);
 			box.reset();
-			bool first_vertex = true;
-			auto consider = [&](const vec3<T> & r) {
-				if (first_vertex) {
-					box.mins = r;
-					box.maxs = r;
-					first_vertex = false;
-				} else {
-					box.merge(r);
-				}
-			};
-			if (!convex_solid_.vertices.empty()) {
-				for (auto & v : convex_solid_.vertices)
-					consider(v);
-			} else {
-				for_each_convex_solid_vertex(convex_solid_, epsilon, consider);
-			}
+			if (convex_solid_.vertices.empty())
+				break;
+			box.mins = convex_solid_.vertices[0];
+			box.maxs = convex_solid_.vertices[0];
+			for (size_t i = 1; i < convex_solid_.vertices.size(); ++i)
+				box.merge(convex_solid_.vertices[i]);
 			break;
 		}
 		case shape_type::traceable:
