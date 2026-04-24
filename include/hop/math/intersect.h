@@ -10,7 +10,7 @@ template <typename T> inline bool test_inside(const plane<T> & p, const vec3<T> 
 }
 
 template <typename T> inline bool test_inside(const sphere<T> & s, const vec3<T> & point) {
-	return length_squared(point, s.origin) <= square(s.radius);
+	return length_squared(point, s.origin) <= scalar_traits<T>::square(s.radius);
 }
 
 template <typename T> inline bool test_inside(const aa_box<T> & box, const vec3<T> & point) {
@@ -58,7 +58,7 @@ inline T find_intersection(const segment<T> & seg, const sphere<T> & sph, vec3<T
 		return tr::one();
 
 	T b = dot(diff, sd);
-	T c = length_squared(diff) - square(sph.radius);
+	T c = length_squared(diff) - tr::square(sph.radius);
 	T time1 = tr::one();
 
 	T discr = b * b - a * c;
