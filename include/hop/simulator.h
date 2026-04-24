@@ -6,7 +6,7 @@
 #include <hop/manager.h>
 #include <hop/math/bounding.h>
 #include <hop/math/intersect.h>
-#include <hop/math/math_ops.h>
+#include <hop/math/support.h>
 #include <hop/math/project.h>
 #include <hop/solid.h>
 #include <stdexcept>
@@ -367,56 +367,6 @@ private:
 	int deactivate_count_ = 0;
 	manager<T> * manager_ = nullptr;
 
-	// Cache temporaries
-	vec3<T> cache_update_old_position_;
-	vec3<T> cache_update_new_position_;
-	vec3<T> cache_update_old_velocity_;
-	vec3<T> cache_update_velocity_;
-	vec3<T> cache_update_temp_;
-	vec3<T> cache_update_t_;
-	vec3<T> cache_update_left_over_;
-	vec3<T> cache_update_dx1_;
-	vec3<T> cache_update_dx2_;
-	vec3<T> cache_update_dv1_;
-	vec3<T> cache_update_dv2_;
-	segment<T> cache_update_path_;
-	aa_box<T> cache_update_box_;
-	collision<T> cache_update_c_;
-	vec3<T> cache_trace_segment_end_point_;
-	aa_box<T> cache_trace_segment_total_;
-	collision<T> cache_trace_segment_collision_;
-	collision<T> cache_trace_solid_collision_;
-	collision<T> cache_test_solid_collision_;
-	aa_box<T> cache_test_solid_box_;
-	aa_box<T> cache_test_solid_box1_;
-	vec3<T> cache_test_solid_origin_;
-	hop::sphere<T> cache_test_solid_sphere_;
-	hop::capsule<T> cache_test_solid_capsule_;
-	vec3<T> cache_test_solid_direction_;
-	collision<T> cache_test_segment_collision_;
-	aa_box<T> cache_test_segment_box_;
-	hop::sphere<T> cache_test_segment_sphere_;
-	hop::capsule<T> cache_test_segment_capsule_;
-	vec3<T> cache_trace_sphere_n_;
-	vec3<T> cache_trace_capsule_p1_;
-	vec3<T> cache_trace_capsule_p2_;
-	segment<T> cache_trace_capsule_s_;
-	hop::sphere<T> cache_trace_capsule_sphere_;
-	collision<T> cache_trace_cc_col_;
-	hop::capsule<T> cache_trace_cc_cap_;
-	vec3<T> cache_friction_link_vr_;
-	vec3<T> cache_friction_link_ff_;
-	vec3<T> cache_friction_link_fs_;
-	vec3<T> cache_friction_link_norm_vr_;
-	vec3<T> cache_collision_friction_vtan_;
-	vec3<T> cache_collision_friction_dir_;
-	vec3<T> cache_constraint_link_tx_;
-	vec3<T> cache_constraint_link_tv_;
-	vec3<T> cache_update_acceleration_friction_force_;
-	vec3<T> cache_update_acceleration_constraint_force_;
-	vec3<T> cache_update_acceleration_fluid_force_;
-	vec3<T> cache_integration_step_tx_;
-	vec3<T> cache_integration_step_tv_;
 };
 
 // ============================================================================
@@ -424,22 +374,19 @@ private:
 // ============================================================================
 
 template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int dt, T fdt) {
-	auto & old_pos = cache_update_old_position_;
-	auto & new_pos = cache_update_new_position_;
-	auto & old_vel = cache_update_old_velocity_;
-	auto & vel = cache_update_velocity_;
-	auto & temp = cache_update_temp_;
-	auto & t = cache_update_t_;
-	auto & left_over = cache_update_left_over_;
-	auto & dx1 = cache_update_dx1_;
-	auto & dx2 = cache_update_dx2_;
-	auto & dv1 = cache_update_dv1_;
-	auto & dv2 = cache_update_dv2_;
-	auto & path = cache_update_path_;
+	vec3<T> old_pos;
+	vec3<T> new_pos;
+	vec3<T> old_vel;
+	vec3<T> vel;
+	vec3<T> temp;
+	vec3<T> t;
+	vec3<T> left_over;
+	vec3<T> dx1, dx2, dv1, dv2;
+	segment<T> path;
 	T cor {}, impulse {}, one_over_mass {}, one_over_hit_mass {};
 	int loop = 0;
 	solid<T> * hit_solid = nullptr;
-	auto & c = cache_update_c_.reset();
+	collision<T> c;
 
 	const vec3<T> zero_vec;
 	const T one = tr::one();
@@ -542,7 +489,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 				m = temp.z;
 			m = m + epsilon_;
 
-			auto & box = cache_update_box_.set(solid_ptr->local_bound_);
+			aa_box<T> box;
+			box.set(solid_ptr->local_bound_);
 			add(box, new_pos);
 			box.mins.x -= m;
 			box.mins.y -= m;
@@ -774,9 +722,10 @@ void simulator<T>::trace_segment(collision<T> & result,
                                  const segment<T> & seg,
                                  int collide_with_bits,
                                  solid<T> * ignore) {
-	auto & ep = cache_trace_segment_end_point_;
+	vec3<T> ep;
 	seg.get_end_point(ep);
-	auto & total = cache_trace_segment_total_.set(seg.origin, seg.origin);
+	aa_box<T> total;
+	total.set(seg.origin, seg.origin);
 	total.merge(ep);
 	num_spacial_collection_ =
 	    find_solids_in_aa_box(total, spacial_collection_.data(), static_cast<int>(spacial_collection_.size()));
@@ -785,9 +734,10 @@ void simulator<T>::trace_segment(collision<T> & result,
 
 template <typename T>
 void simulator<T>::trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits) {
-	auto & end = cache_test_solid_origin_;
+	vec3<T> end;
 	seg.get_end_point(end);
-	auto & box = cache_test_solid_box_.set(seg.origin, seg.origin);
+	aa_box<T> box;
+	box.set(seg.origin, seg.origin);
 	box.merge(end);
 	add(box.mins, s->local_bound_.mins);
 	add(box.maxs, s->local_bound_.maxs);
@@ -797,7 +747,7 @@ void simulator<T>::trace_solid(collision<T> & result, solid<T> * s, const segmen
 }
 
 template <typename T> void simulator<T>::test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s) {
-	auto & col = cache_test_segment_collision_.reset();
+	collision<T> col;
 	col.collider = s->shared_from_this();
 	const T one = tr::one();
 
@@ -810,21 +760,24 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 		const vec3<T> & lp = sh->get_local_position();
 		switch (sh->type_) {
 		case shape_type::box: {
-			auto & box = cache_test_segment_box_.set(sh->box_);
+			aa_box<T> box;
+			box.set(sh->box_);
 			add(box, s->position_);
 			add(box, lp);
 			trace_aa_box(col, seg, box);
 			break;
 		}
 		case shape_type::sphere: {
-			auto & sph = cache_test_segment_sphere_.set(sh->sphere_);
+			hop::sphere<T> sph;
+			sph.set(sh->sphere_);
 			add(sph, s->position_);
 			add(sph, lp);
 			trace_sphere(col, seg, sph);
 			break;
 		}
 		case shape_type::capsule: {
-			auto & cap = cache_test_segment_capsule_.set(sh->capsule_);
+			hop::capsule<T> cap;
+			cap.set(sh->capsule_);
 			add(cap, s->position_);
 			add(cap, lp);
 			trace_capsule(col, seg, cap);
@@ -878,7 +831,7 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 
 template <typename T>
 void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2) {
-	auto & col = cache_test_solid_collision_.reset();
+	collision<T> col;
 	col.collider = s2->shared_from_this();
 	const T one = tr::one();
 	T zero_val {};
@@ -921,14 +874,16 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// AABox vs *
 			else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::box) {
-				auto & box = cache_test_solid_box_.set(sh2->box_);
+				aa_box<T> box;
+				box.set(sh2->box_);
 				add(box, s2->position_);
 				add(box, lp_delta);
 				sub(box.maxs, sh1->box_.mins);
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::sphere) {
-				auto & box = cache_test_solid_box_.set(sh2->sphere_.radius);
+				aa_box<T> box;
+				box.set(sh2->sphere_.radius);
 				add(box, sh2->sphere_.origin);
 				add(box, s2->position_);
 				add(box, lp_delta);
@@ -936,7 +891,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::capsule) {
-				auto & box = cache_test_solid_box_;
+				aa_box<T> box;
 				sh2->get_bound(box);
 				add(box, s2->position_);
 				add(box, lp_delta);
@@ -966,28 +921,33 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// Sphere vs *
 			else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::box) {
-				auto & box1 = cache_test_solid_box1_.set(sh1->sphere_.radius);
+				aa_box<T> box1;
+				box1.set(sh1->sphere_.radius);
 				add(box1, sh1->sphere_.origin);
-				auto & box = cache_test_solid_box_.set(sh2->box_);
+				aa_box<T> box;
+				box.set(sh2->box_);
 				add(box, s2->position_);
 				add(box, lp_delta);
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::sphere) {
-				auto & origin = cache_test_solid_origin_.set(s2->position_);
+				vec3<T> origin;
+				origin.set(s2->position_);
 				add(origin, lp_delta);
 				sub(origin, sh1->sphere_.origin);
 				add(origin, sh2->sphere_.origin);
-				auto & sph = cache_test_solid_sphere_.set(origin, sh2->sphere_.radius + sh1->sphere_.radius);
+				hop::sphere<T> sph;
+				sph.set(origin, sh2->sphere_.radius + sh1->sphere_.radius);
 				trace_sphere(col, seg, sph);
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::capsule) {
-				auto & origin = cache_test_solid_origin_.set(s2->position_);
+				vec3<T> origin;
+				origin.set(s2->position_);
 				add(origin, lp_delta);
 				sub(origin, sh1->sphere_.origin);
 				add(origin, sh2->capsule_.origin);
-				auto & cap = cache_test_solid_capsule_.set(
-				    origin, sh2->capsule_.direction, sh2->capsule_.radius + sh1->sphere_.radius);
+				hop::capsule<T> cap;
+				cap.set(origin, sh2->capsule_.direction, sh2->capsule_.radius + sh1->sphere_.radius);
 				trace_capsule(col, seg, cap);
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::convex_solid) {
 				hop::convex_solid<T> cs;
@@ -1000,22 +960,26 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// Capsule vs *
 			else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::box) {
-				auto & box1 = cache_test_solid_box1_;
+				aa_box<T> box1;
 				sh1->get_bound(box1);
-				auto & box = cache_test_solid_box_.set(sh2->box_);
+				aa_box<T> box;
+				box.set(sh2->box_);
 				add(box, s2->position_);
 				add(box, lp_delta);
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::sphere) {
-				auto & origin = cache_test_solid_origin_.set(s2->position_);
+				vec3<T> origin;
+				origin.set(s2->position_);
 				add(origin, lp_delta);
 				sub(origin, sh1->capsule_.origin);
 				add(origin, sh2->sphere_.origin);
-				auto & dir = cache_test_solid_direction_.set(sh1->capsule_.direction);
+				vec3<T> dir;
+				dir.set(sh1->capsule_.direction);
 				neg(dir);
-				auto & cap = cache_test_solid_capsule_.set(origin, dir, sh1->capsule_.radius + sh2->sphere_.radius);
+				hop::capsule<T> cap;
+				cap.set(origin, dir, sh1->capsule_.radius + sh2->sphere_.radius);
 				trace_capsule(col, seg, cap);
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::convex_solid) {
 				// Inflate sh2's planes by sh1's capsule radius, then trace sh1's
@@ -1043,7 +1007,8 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				if (col.time < one)
 					col.point.set(hit.point);
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::capsule) {
-				auto & base = cache_test_solid_origin_.set(s2->position_);
+				vec3<T> base;
+				base.set(s2->position_);
 				add(base, lp_delta);
 				sub(base, sh1->capsule_.origin);
 				add(base, sh2->capsule_.origin);
@@ -1160,7 +1125,7 @@ void simulator<T>::trace_segment_with_current_spacials(collision<T> & result,
 	result.time = tr::one();
 	result.scope = 0;
 
-	auto & col = cache_trace_segment_collision_.reset();
+	collision<T> col;
 	for (int i = 0; i < num_spacial_collection_; ++i) {
 		auto * s2 = spacial_collection_[i];
 		if (s2 != ignore && (collide_with_bits & s2->collision_scope_) != 0) {
@@ -1211,7 +1176,7 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 	if (collide_with_bits == 0)
 		return;
 
-	auto & col = cache_trace_solid_collision_.reset();
+	collision<T> col;
 	for (int i = 0; i < num_spacial_collection_; ++i) {
 		auto * s2 = spacial_collection_[i];
 		if (s != s2 && (collide_with_bits & s2->collision_scope_) != 0 && s->should_collide(s2) &&
@@ -1317,7 +1282,8 @@ template <typename T>
 void simulator<T>::trace_sphere(collision<T> & c, const segment<T> & seg, const hop::sphere<T> & sph) {
 	const T one = tr::one();
 	if (test_inside(sph, seg.origin)) {
-		auto & n = cache_trace_sphere_n_.set(seg.origin);
+		vec3<T> n;
+		n.set(seg.origin);
 		sub(n, sph.origin);
 		if (!normalize_carefully(n, epsilon_)) {
 			// Origin exactly at sphere center — use negative direction as normal
@@ -1338,13 +1304,13 @@ void simulator<T>::trace_sphere(collision<T> & c, const segment<T> & seg, const 
 
 template <typename T>
 void simulator<T>::trace_capsule(collision<T> & c, const segment<T> & seg, const hop::capsule<T> & cap) {
-	auto & p1 = cache_trace_capsule_p1_.reset();
-	auto & p2 = cache_trace_capsule_p2_.reset();
-	auto & s = cache_trace_capsule_s_;
+	vec3<T> p1, p2;
+	segment<T> s;
 	s.origin.set(cap.origin);
 	s.direction.set(cap.direction);
 	project(p1, p2, s, seg, epsilon_);
-	auto & sph = cache_trace_capsule_sphere_.set(p1, cap.radius);
+	hop::sphere<T> sph;
+	sph.set(p1, cap.radius);
 	trace_sphere(c, seg, sph);
 }
 
@@ -1364,9 +1330,9 @@ void simulator<T>::trace_capsule_capsule(
 	c.time = one;
 
 	// Edge 1: V0->V1 = capsule(base, D2, R) — sh1-start vs sh2-spine
-	auto & edge_cap = cache_trace_cc_cap_.set(base, D2, radius);
-	auto & edge_col = cache_trace_cc_col_;
-	edge_col.reset();
+	hop::capsule<T> edge_cap;
+	edge_cap.set(base, D2, radius);
+	collision<T> edge_col;
 	trace_capsule(edge_col, seg, edge_cap);
 	if (edge_col.time < c.time) {
 		c.time = edge_col.time;
@@ -1619,8 +1585,8 @@ void simulator<T>::collision_friction(
 	if (abs_impulse <= zero_val)
 		return;
 
-	auto & vtan = cache_collision_friction_vtan_;
-	auto & dir = cache_collision_friction_dir_;
+	vec3<T> vtan;
+	vec3<T> dir;
 
 	// Tangential relative velocity (post-restitution)
 	if (hit) {
@@ -1656,10 +1622,10 @@ void simulator<T>::friction_link(vec3<T> & result,
 	T zero_val {};
 	if (s->mass_ > zero_val && hit->mass_ != zero_val &&
 	    (s->coefficient_of_static_friction_ > zero_val || s->coefficient_of_dynamic_friction_ > zero_val)) {
-		auto & vr = cache_friction_link_vr_;
-		auto & ff = cache_friction_link_ff_;
-		auto & fs = cache_friction_link_fs_;
-		auto & norm_vr = cache_friction_link_norm_vr_;
+		vec3<T> vr;
+		vec3<T> ff;
+		vec3<T> fs;
+		vec3<T> norm_vr;
 
 		T fn = (dot(gravity_, hit_normal) * s->coefficient_of_gravity_) * s->mass_ + dot(applied_force, hit_normal);
 
@@ -1696,8 +1662,8 @@ void simulator<T>::constraint_link(vec3<T> & result,
                                    solid<T> * s,
                                    const vec3<T> & solid_pos,
                                    const vec3<T> & solid_vel) {
-	auto & tx = cache_constraint_link_tx_;
-	auto & tv = cache_constraint_link_tv_;
+	vec3<T> tx;
+	vec3<T> tv;
 	result.reset();
 
 	for (auto * c : s->constraints_) {
@@ -1733,9 +1699,9 @@ void simulator<T>::constraint_link(vec3<T> & result,
 
 template <typename T>
 void simulator<T>::update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T fdt) {
-	auto & friction_force = cache_update_acceleration_friction_force_;
-	auto & constraint_force = cache_update_acceleration_constraint_force_;
-	auto & fluid_force = cache_update_acceleration_fluid_force_;
+	vec3<T> friction_force;
+	vec3<T> constraint_force;
+	vec3<T> fluid_force;
 	T zero_val {};
 
 	mul(result, gravity_, s->coefficient_of_gravity_);
@@ -1768,8 +1734,8 @@ void simulator<T>::integration_step(solid<T> * s,
                                     T fdt,
                                     vec3<T> & result_x,
                                     vec3<T> & result_v) {
-	auto & tx = cache_integration_step_tx_;
-	auto & tv = cache_integration_step_tv_;
+	vec3<T> tx;
+	vec3<T> tv;
 	mul(tx, dx, fdt);
 	add(tx, x);
 	mul(tv, dv, fdt);

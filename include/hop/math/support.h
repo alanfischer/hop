@@ -87,9 +87,9 @@ inline void for_each_convex_solid_vertex(const convex_solid<T> & cs, T epsilon, 
 	}
 }
 
-// Populate cs.vertices by enumerating the plane intersections. Call this
-// once after plane setup; support() and get_bound() then run in O(V) instead
-// of the O(n^4) triple-plane loop.
+// Populate cs.vertices by enumerating the plane intersections. Normally called
+// implicitly by ensure_vertices() on first support()/get_bound(); exposed for
+// users who want to pay the O(n^4) enumeration up front (e.g. at load time).
 template <typename T> inline void rebuild_vertices(convex_solid<T> & cs) {
 	T epsilon;
 	if constexpr (std::is_same_v<T, fixed16>)
@@ -101,34 +101,35 @@ template <typename T> inline void rebuild_vertices(convex_solid<T> & cs) {
 	for_each_convex_solid_vertex(cs, epsilon, [&](const vec3<T> & v) { cs.vertices.push_back(v); });
 }
 
-template <typename T> inline void support(vec3<T> & result, const convex_solid<T> & cs, const vec3<T> & d) {
+// Lazy cache population. cs.vertices is mutable so this is callable from a
+// const reference — first support()/get_bound() pays the enumeration, every
+// subsequent call iterates the cached vector.
+template <typename T> inline void ensure_vertices(const convex_solid<T> & cs) {
+	if (!cs.vertices.empty() || cs.planes.empty())
+		return;
 	T epsilon;
 	if constexpr (std::is_same_v<T, fixed16>)
 		epsilon = fixed16::from_raw(1 << 4);
 	else
 		epsilon = T(0.0001);
+	for_each_convex_solid_vertex(cs, epsilon, [&](const vec3<T> & v) { cs.vertices.push_back(v); });
+}
 
-	bool first = true;
-	T best_dot {};
-
-	auto consider = [&](const vec3<T> & r) {
-		T dp = dot(r, d);
-		if (first || dp > best_dot) {
-			result = r;
-			best_dot = dp;
-			first = false;
-		}
-	};
-
-	if (!cs.vertices.empty()) {
-		for (auto & v : cs.vertices)
-			consider(v);
-	} else {
-		for_each_convex_solid_vertex(cs, epsilon, consider);
-	}
-
-	if (first)
+template <typename T> inline void support(vec3<T> & result, const convex_solid<T> & cs, const vec3<T> & d) {
+	ensure_vertices(cs);
+	if (cs.vertices.empty()) {
 		result.reset();
+		return;
+	}
+	result = cs.vertices[0];
+	T best_dot = dot(result, d);
+	for (size_t i = 1; i < cs.vertices.size(); ++i) {
+		T dp = dot(cs.vertices[i], d);
+		if (dp > best_dot) {
+			result = cs.vertices[i];
+			best_dot = dp;
+		}
+	}
 }
 
 } // namespace hop
