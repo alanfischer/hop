@@ -1,6 +1,9 @@
 #pragma once
 
 #include <hop/collision.h>
+#include <hop/math/segment.h>
+
+#include <vector>
 
 namespace hop {
 
@@ -19,6 +22,13 @@ public:
 	virtual void intra_update(solid<T> * s, int dt, T fdt) = 0;
 	virtual bool collision_response(solid<T> * s, vec3<T> & position, vec3<T> & remainder, collision<T> & col) = 0;
 	virtual void post_update(solid<T> * s, int dt, T fdt) = 0;
+
+	// Optional: a per-tick iteration order for the simulator's update loop.
+	// Returning non-null commits to including every solid the simulator should
+	// update — solids in the simulator but absent from this list will be
+	// skipped. Pointers must stay valid until the next manager mutation
+	// (add/remove/rebuild). Default null = simulator uses its own solids_ order.
+	virtual const std::vector<solid<T> *> * get_iteration_order() const { return nullptr; }
 };
 
 } // namespace hop

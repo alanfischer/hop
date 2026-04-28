@@ -405,6 +405,86 @@ static void test_bvh_manager_trace_solid() {
 // Main
 // ============================================================
 
+// Build a tree, "move" the items by replacing their AABBs, refit, then
+// check queries against the moved positions return the right items.
+template <typename T>
+static void test_bvh_refit() {
+	using tr = scalar_traits<T>;
+	bvh<T, int> tree;
+
+	// 8 unit cubes laid out along +X at integer offsets.
+	std::vector<std::pair<aa_box<T>, int>> entries;
+	for (int i = 0; i < 8; ++i) {
+		T x0 = tr::from_int(i);
+		T x1 = tr::from_int(i) + tr::one();
+		entries.push_back({ aa_box<T>(vec3<T>(x0, T{}, T{}), vec3<T>(x1, tr::one(), tr::one())), i });
+	}
+	tree.build(entries);
+
+	// Translate every item by +Y by 10 units. Refit should propagate the
+	// new boxes to internal nodes — a query at the original Y range hits
+	// nothing, and a query at the translated Y range hits everything.
+	std::vector<aa_box<T>> moved;
+	for (int i = 0; i < 8; ++i) {
+		T x0 = tr::from_int(i);
+		T x1 = tr::from_int(i) + tr::one();
+		T y0 = tr::from_int(10);
+		T y1 = tr::from_int(11);
+		moved.push_back(aa_box<T>(vec3<T>(x0, y0, T{}), vec3<T>(x1, y1, tr::one())));
+	}
+	tree.refit([&](int item) { return moved[item]; });
+
+	// Original location: should be empty now.
+	int hits = 0;
+	tree.query_aabb(aa_box<T>(vec3<T>(T{}, T{}, T{}),
+	                          vec3<T>(tr::from_int(8), tr::one(), tr::one())),
+		[&](int) { hits++; });
+	assert(hits == 0);
+
+	// Translated location: should hit all 8.
+	std::set<int> seen;
+	tree.query_aabb(aa_box<T>(vec3<T>(T{}, tr::from_int(10), T{}),
+	                          vec3<T>(tr::from_int(8), tr::from_int(11), tr::one())),
+		[&](int item) { seen.insert(item); });
+	assert(seen.size() == 8);
+
+	printf("  bvh refit: OK\n");
+}
+
+// collect_leaves should return every item exactly once. The order should be
+// spatial-cluster (left-to-right by the BVH split axes) — verify by building
+// items along +X and confirming the X-coordinates come back monotonically.
+template <typename T> static void test_bvh_collect_leaves() {
+	using tr = scalar_traits<T>;
+	bvh<T, int> tree;
+
+	// 16 unit cubes at integer offsets along +X.
+	std::vector<std::pair<aa_box<T>, int>> entries;
+	for (int i = 0; i < 16; ++i) {
+		T x0 = tr::from_int(i);
+		T x1 = tr::from_int(i) + tr::one();
+		entries.push_back({ aa_box<T>(vec3<T>(x0, T{}, T{}), vec3<T>(x1, tr::one(), tr::one())), i });
+	}
+	tree.build(entries);
+
+	std::vector<int> leaves;
+	tree.collect_leaves(leaves);
+	assert(static_cast<int>(leaves.size()) == 16);
+	std::set<int> unique(leaves.begin(), leaves.end());
+	assert(unique.size() == 16);
+	// Boxes laid out along +X should come back in increasing X order.
+	for (size_t i = 1; i < leaves.size(); ++i)
+		assert(leaves[i - 1] < leaves[i]);
+
+	// Empty tree: empty output, no crash.
+	bvh<T, int> empty_tree;
+	std::vector<int> empty_leaves;
+	empty_tree.collect_leaves(empty_leaves);
+	assert(empty_leaves.empty());
+
+	printf("  bvh collect_leaves: OK\n");
+}
+
 int main() {
 	printf("test_bvh (float):\n");
 	test_bvh_empty<float>();
@@ -412,6 +492,8 @@ int main() {
 	test_bvh_many_items<float>();
 	test_bvh_ray_query<float>();
 	test_bvh_ray_query_parallel_axis<float>();
+	test_bvh_refit<float>();
+	test_bvh_collect_leaves<float>();
 
 	printf("test_bvh (fixed16):\n");
 	test_bvh_empty<fixed16>();
@@ -419,6 +501,8 @@ int main() {
 	test_bvh_many_items<fixed16>();
 	test_bvh_ray_query<fixed16>();
 	test_bvh_ray_query_parallel_axis<fixed16>();
+	test_bvh_refit<fixed16>();
+	test_bvh_collect_leaves<fixed16>();
 
 	printf("test_bvh_manager (float):\n");
 	test_bvh_manager_basic<float>();

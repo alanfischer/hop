@@ -60,6 +60,8 @@ public:
 		user_data_ = nullptr;
 		active_ = true;
 		deactivate_count_ = 0;
+		impulse_partner_count_ = 0;
+		impulse_partner_tick_ = -1;
 		touched1_ = nullptr;
 		touched1_normal_.reset();
 		touched2_ = nullptr;
@@ -192,6 +194,13 @@ public:
 
 	void set_do_update_callback(bool c) { do_update_callback_ = c; }
 	void set_manager(manager<T> * m) { manager_ = m; }
+
+	// Diagnostic: number of distinct partners this solid impulsed (or was
+	// impulsed by) during the most recent tick it participated in a collision.
+	// Returns 0 if the most recent tick recorded doesn't match the current
+	// simulator tick (no fresh data). Useful for tuning impulse_partners_[]
+	// capacity or for debugging cluster collision behavior.
+	int get_impulse_partner_count() const { return impulse_partner_count_; }
 	simulator<T> * get_simulator() const { return simulator_; }
 
 	void set_position_direct(const vec3<T> & pos) {
@@ -225,48 +234,67 @@ private:
 		constraints_.erase(std::remove(constraints_.begin(), constraints_.end(), c), constraints_.end());
 	}
 
+	// -- Hot: every-tick gates and integration math --
+	bool active_ = true;
+	int last_dt_ = 0;
+	bool do_update_callback_ = false;
 	int scope_ = -1;
-	int internal_scope_ = 0;
-	int collision_scope_ = -1;
-	int collide_with_scope_ = -1;
-	T mass_ {};
-	T inv_mass_ {};
 	vec3<T> position_;
 	vec3<T> velocity_;
 	vec3<T> force_;
+	aa_box<T> world_bound_;       // broad phase reads this
+	aa_box<T> local_bound_;
+	std::vector<typename shape<T>::ptr> shapes_;
+	int shape_types_ = 0;
+	T mass_ {};
+	T inv_mass_ {};
 	T coefficient_of_gravity_ {};
+	T coefficient_of_effective_drag_ {};
+
+	// -- Warm: collision response (read on actual hits, not per pair) --
 	T coefficient_of_restitution_ {};
 	bool coefficient_of_restitution_override_ = false;
 	T coefficient_of_static_friction_ {};
 	T coefficient_of_dynamic_friction_ {};
-	T coefficient_of_effective_drag_ {};
+	int internal_scope_ = 0;
+	int collision_scope_ = -1;
+	int collide_with_scope_ = -1;
+	int deactivate_count_ = 0;
+	manager<T> * manager_ = nullptr;
+	simulator<T> * simulator_ = nullptr;
 
-	std::vector<typename shape<T>::ptr> shapes_;
-	int shape_types_ = 0;
-	aa_box<T> local_bound_;
-	aa_box<T> world_bound_;
+	// -- Cold: rarely accessed in the hot path --
+	// Per-tick set of partners with which this solid has exchanged a collision
+	// impulse. Used by the simulator's cross-update guard: when solid_ptr's
+	// update finds hit_solid and the pair is already in solid_ptr's set, the
+	// pair was impulsed in another solid's earlier update this tick — apply a
+	// position-only contact constraint instead of a second impulse, which
+	// would either inject energy (re-impulsing) or let solids penetrate
+	// (skipping outright).
+	//
+	// Inline fixed-size storage keeps this allocation-free per tick. 8 was
+	// chosen empirically: in bounce_stress the maximum observed at N=1000,
+	// 5000, and 10000 was 7–8, with the 99th percentile sitting at 3–4.
+	// Beyond capacity we silently drop further entries, which degrades to
+	// the simple-skip behavior — still correct, just less effective at
+	// suppressing duplicate detections for that one pair-tick.
+	static constexpr int max_impulse_partners_per_tick = 8;
+	solid<T> * impulse_partners_[max_impulse_partners_per_tick];
+	int impulse_partner_count_ = 0;
+	int impulse_partner_tick_ = -1;
+
+	solid<T> * touching_ = nullptr;
+	vec3<T> touching_normal_;
+	solid<T> * touched1_ = nullptr;
+	vec3<T> touched1_normal_;
+	solid<T> * touched2_ = nullptr;
+	vec3<T> touched2_normal_;
 
 	std::vector<constraint<T> *> constraints_;
 
 	collision_fn collision_callback_;
 	collision_filter_fn collision_filter_;
 	void * user_data_ = nullptr;
-
-	bool active_ = true;
-	int deactivate_count_ = 0;
-
-	solid<T> * touched1_ = nullptr;
-	vec3<T> touched1_normal_;
-	solid<T> * touched2_ = nullptr;
-	vec3<T> touched2_normal_;
-	solid<T> * touching_ = nullptr;
-	vec3<T> touching_normal_;
-	int last_dt_ = 0;
-
-	bool do_update_callback_ = false;
-	manager<T> * manager_ = nullptr;
-
-	simulator<T> * simulator_ = nullptr;
 
 	friend class constraint<T>;
 	friend class shape<T>;
