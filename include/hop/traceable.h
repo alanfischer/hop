@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hop/collision.h>
+#include <hop/math/segment.h>
 
 namespace hop {
 

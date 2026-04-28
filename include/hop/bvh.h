@@ -51,6 +51,18 @@ public:
 		query_aabb_recursive(0, box, cb);
 	}
 
+	// Update node AABBs from the items at the leaves without changing tree
+	// topology. `get_box(item)` returns the current AABB for a leaf's item;
+	// internal nodes become the union of their children. Cheaper than build()
+	// when items move but the partitioning doesn't need to change. Topology
+	// quality degrades over time as items drift away from their original
+	// clusters — call build() periodically to recover.
+	template <typename GetBox> void refit(GetBox && get_box) {
+		if (nodes_.empty())
+			return;
+		refit_recursive(0, get_box);
+	}
+
 	// Find items along a ray (segment). The callback receives (item, best_t)
 	// and should update best_t if it finds a closer hit, enabling early pruning.
 	template <typename Callback>
@@ -59,6 +71,16 @@ public:
 			return;
 		T best_t = tr::one();
 		query_ray_recursive(0, origin, direction, best_t, cb);
+	}
+
+	// Append leaf items to `out` in spatial-cluster order. build_recursive emits
+	// nodes pre-order DFS, so a linear scan of nodes_ yields leaves in the same
+	// left-to-right order the median split produced — adjacent leaves are
+	// spatially adjacent. Useful for driving update loops in cache-friendly order.
+	template <typename Out> void collect_leaves(Out & out) const {
+		for (const auto & n : nodes_)
+			if (n.is_leaf())
+				out.push_back(n.item);
 	}
 
 	const std::vector<node> & get_nodes() const { return nodes_; }
@@ -120,6 +142,27 @@ private:
 		nodes_[idx].right = right;
 
 		return idx;
+	}
+
+	template <typename GetBox> void refit_recursive(int idx, GetBox && get_box) {
+		auto & n = nodes_[idx];
+		if (n.is_leaf()) {
+			n.box = get_box(n.item);
+			return;
+		}
+		if (n.left >= 0)
+			refit_recursive(n.left, get_box);
+		if (n.right >= 0)
+			refit_recursive(n.right, get_box);
+		// Internal nodes always have both children in build_recursive, but be
+		// defensive in case a future builder produces a stub node.
+		if (n.left >= 0) {
+			n.box = nodes_[n.left].box;
+			if (n.right >= 0)
+				n.box.merge(nodes_[n.right].box);
+		} else if (n.right >= 0) {
+			n.box = nodes_[n.right].box;
+		}
 	}
 
 	template <typename Callback> void query_aabb_recursive(int idx, const aa_box<T> & box, Callback && cb) const {

@@ -5,6 +5,7 @@
 #include <hop/math/support.h>
 #include <hop/traceable.h>
 #include <memory>
+#include <utility>
 
 namespace hop {
 
@@ -24,22 +25,31 @@ public:
 	using ptr = std::shared_ptr<shape<T>>;
 	using tr = scalar_traits<T>;
 
-	shape() = default;
+	shape() : type_(shape_type::box), box_{} {}
 	explicit shape(const aa_box<T> & box) : type_(shape_type::box), box_(box) {}
 	explicit shape(const hop::sphere<T> & s) : type_(shape_type::sphere), sphere_(s) {}
 	explicit shape(const hop::capsule<T> & c) : type_(shape_type::capsule), capsule_(c) {}
-	explicit shape(const hop::convex_solid<T> & cs) : type_(shape_type::convex_solid), convex_solid_(cs) {}
+	explicit shape(const hop::convex_solid<T> & cs)
+	    : type_(shape_type::convex_solid),
+	      box_{},
+	      convex_solid_(std::make_unique<hop::convex_solid<T>>(cs)) {}
 	explicit shape(hop::traceable<T> * t) : type_(shape_type::traceable), traceable_(t) {}
+
+	// shape owns convex_solid_ via unique_ptr — non-copyable, move-only.
+	shape(const shape &) = delete;
+	shape & operator=(const shape &) = delete;
+	shape(shape &&) = default;
+	shape & operator=(shape &&) = default;
 
 	void reset_shape() {
 		if (solid_) {
 			solid_->remove_shape(this->shared_from_this());
 			solid_ = nullptr;
 		}
-		box_ = {};
 		type_ = shape_type::box;
-		sphere_ = {};
-		capsule_ = {};
+		box_ = {};
+		convex_solid_.reset();
+		traceable_ = nullptr;
 		local_position_.reset();
 	}
 
@@ -57,6 +67,7 @@ public:
 	void set_box(const aa_box<T> & box) {
 		type_ = shape_type::box;
 		box_ = box;
+		convex_solid_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
@@ -65,6 +76,7 @@ public:
 	void set_sphere(const hop::sphere<T> & s) {
 		type_ = shape_type::sphere;
 		sphere_ = s;
+		convex_solid_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
@@ -73,6 +85,7 @@ public:
 	void set_capsule(const hop::capsule<T> & c) {
 		type_ = shape_type::capsule;
 		capsule_ = c;
+		convex_solid_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
@@ -80,15 +93,19 @@ public:
 
 	void set_convex_solid(const hop::convex_solid<T> & cs) {
 		type_ = shape_type::convex_solid;
-		convex_solid_ = cs;
+		if (convex_solid_)
+			*convex_solid_ = cs;
+		else
+			convex_solid_ = std::make_unique<hop::convex_solid<T>>(cs);
 		if (solid_)
 			solid_->update_local_bound();
 	}
-	const hop::convex_solid<T> & get_convex_solid() const { return convex_solid_; }
+	const hop::convex_solid<T> & get_convex_solid() const { return *convex_solid_; }
 
 	void set_traceable(hop::traceable<T> * t) {
 		type_ = shape_type::traceable;
 		traceable_ = t;
+		convex_solid_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
@@ -108,14 +125,14 @@ public:
 			find_bounding_box(box, capsule_);
 			break;
 		case shape_type::convex_solid: {
-			ensure_vertices(convex_solid_);
+			ensure_vertices(*convex_solid_);
 			box.reset();
-			if (convex_solid_.vertices.empty())
+			if (convex_solid_->vertices.empty())
 				break;
-			box.mins = convex_solid_.vertices[0];
-			box.maxs = convex_solid_.vertices[0];
-			for (size_t i = 1; i < convex_solid_.vertices.size(); ++i)
-				box.merge(convex_solid_.vertices[i]);
+			box.mins = convex_solid_->vertices[0];
+			box.maxs = convex_solid_->vertices[0];
+			for (size_t i = 1; i < convex_solid_->vertices.size(); ++i)
+				box.merge(convex_solid_->vertices[i]);
 			break;
 		}
 		case shape_type::traceable:
@@ -125,14 +142,26 @@ public:
 	}
 
 private:
+	// Small per-shape metadata first, then variant payload. type_ tells the
+	// rest of the engine which member of the union below is active.
 	shape_type type_ = shape_type::box;
-	aa_box<T> box_;
-	hop::sphere<T> sphere_;
-	hop::capsule<T> capsule_;
-	hop::convex_solid<T> convex_solid_;
-	hop::traceable<T> * traceable_ = nullptr;
 	vec3<T> local_position_;
 	solid<T> * solid_ = nullptr;
+
+	// Variant payload. The trivially-destructible variants (box / sphere /
+	// capsule) plus the externally-owned traceable* share one anonymous-union
+	// slot — type_ selects which member is live. convex_solid_ has heap-owned
+	// vectors and can't safely live in a union, so it sits behind a unique_ptr
+	// allocated lazily when type_ becomes shape_type::convex_solid (and freed
+	// when transitioning back to a trivial variant). Saves ~70 B per shape vs.
+	// the previous layout where every variant carried full inline storage.
+	union {
+		aa_box<T>           box_;
+		hop::sphere<T>      sphere_;
+		hop::capsule<T>     capsule_;
+		hop::traceable<T> * traceable_;
+	};
+	std::unique_ptr<hop::convex_solid<T>> convex_solid_;
 
 	friend class solid<T>;
 	friend class simulator<T>;

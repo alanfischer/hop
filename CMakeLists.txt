@@ -21,6 +21,8 @@ if(HOP_BUILD_EXAMPLES)
     find_package(raylib REQUIRED)
     add_executable(demo_bounce examples/demo_bounce.cpp)
     target_link_libraries(demo_bounce PRIVATE hop raylib)
+    add_executable(demo_stress examples/demo_stress.cpp)
+    target_link_libraries(demo_stress PRIVATE hop raylib)
 endif()
 
 # Benchmarks — informational, not part of ctest.

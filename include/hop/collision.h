@@ -1,11 +1,16 @@
 #pragma once
 
 #include <hop/math/support.h>
-#include <memory>
+#include <utility>
 
 namespace hop {
 
 template <typename T> class solid;
+
+// `collider` / `collidee` are non-owning. The simulator owns its solids
+// (via shared_ptr in simulator::solids_) and clears these pointers during
+// remove_solid() so they never dangle past a tick. Callbacks may copy them
+// freely; just don't cache one across a remove_solid() call.
 
 template <typename T> struct collision {
 	using tr = scalar_traits<T>;
@@ -15,8 +20,8 @@ template <typename T> struct collision {
 	vec3<T> impact;
 	vec3<T> normal;
 	vec3<T> velocity;
-	std::shared_ptr<solid<T>> collider;
-	std::shared_ptr<solid<T>> collidee;
+	solid<T> * collider = nullptr;
+	solid<T> * collidee = nullptr;
 	int scope = 0;
 
 	collision & set(const collision & c) {
@@ -44,7 +49,7 @@ template <typename T> struct collision {
 	}
 
 	void invert() {
-		collider.swap(collidee);
+		std::swap(collider, collidee);
 		neg(normal);
 		neg(velocity);
 	}

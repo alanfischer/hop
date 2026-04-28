@@ -1,5 +1,6 @@
 #pragma once
 
+#include <hop/math/segment.h>
 #include <hop/math/support.h>
 
 namespace hop {

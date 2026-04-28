@@ -275,6 +275,7 @@ int main() {
 	printf("hop bench\n");
 	printf("---------\n");
 	printf("sizeof(shape<float>) = %zu bytes\n", sizeof(shape<float>));
+	printf("sizeof(solid<float>) = %zu bytes\n", sizeof(solid<float>));
 	printf("sizeof(simulator<float>) = %zu bytes\n", sizeof(simulator<float>));
 	printf("\n");
 

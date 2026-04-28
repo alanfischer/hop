@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <hop/collision.h>
 #include <hop/constraint.h>
 #include <hop/manager.h>
@@ -119,9 +120,9 @@ public:
 		if (reporting_collisions_) {
 			for (int i = 0; i < num_collisions_; ++i) {
 				auto & c = collisions_[i];
-				if (c.collider.get() == s.get())
+				if (c.collider == s.get())
 					c.collider = nullptr;
-				if (c.collidee.get() == s.get())
+				if (c.collidee == s.get())
 					c.collidee = nullptr;
 			}
 		}
@@ -152,12 +153,22 @@ public:
 	void update(int dt, int scope = 0, solid<T> * target = nullptr) {
 		T fdt = tr::from_milli(dt);
 		num_collisions_ = 0;
+		++current_tick_;
 		if (manager_)
 			manager_->pre_update(dt, fdt);
 
-		int num = (target != nullptr) ? 1 : static_cast<int>(solids_.size());
+		// Manager may suggest a spatial-locality iteration order. Contract:
+		// when non-null, it must contain every solid the simulator should
+		// update — anything in solids_ but absent from the order is skipped.
+		const std::vector<solid<T> *> * order =
+		    (target == nullptr && manager_) ? manager_->get_iteration_order() : nullptr;
+		assert(!order || order->size() == solids_.size());
+
+		int num = (target != nullptr) ? 1
+		          : (order ? static_cast<int>(order->size()) : static_cast<int>(solids_.size()));
 		for (int i = 0; i < num; ++i) {
-			solid<T> * s = (num > 1 || target == nullptr) ? solids_[i].get() : target;
+			solid<T> * s = (target != nullptr) ? target
+			               : (order ? (*order)[i] : solids_[i].get());
 
 			if (!s->active_ || (scope != 0 && (s->scope_ & scope) == 0))
 				continue;
@@ -366,6 +377,7 @@ private:
 	T deactivate_speed_ {};
 	int deactivate_count_ = 0;
 	manager<T> * manager_ = nullptr;
+	int current_tick_ = 0;  // increments per update(); used to guard cross-update double-impulse
 
 };
 
@@ -528,10 +540,10 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 			sub(left_over, new_pos, old_pos);
 
 			// Store collision for reporting
-			if (c.collider.get() != solid_ptr->touching_ &&
+			if (c.collider != solid_ptr->touching_ &&
 			    (solid_ptr->collision_callback_ != nullptr ||
 			     (c.collider && c.collider->collision_callback_ != nullptr))) {
-				c.collidee = solid_ptr->shared_from_this();
+				c.collidee = solid_ptr;
 				if (c.collider) {
 					sub(c.velocity, solid_ptr->velocity_, c.collider->velocity_);
 				} else {
@@ -542,7 +554,41 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 					num_collisions_++;
 				}
 			}
-			hit_solid = c.collider.get();
+			hit_solid = c.collider;
+
+			// Cross-update guard. Check per-pair: have solid_ptr and hit_solid
+			// already exchanged a collision impulse this tick (in some other
+			// solid's earlier update)? If so, re-impulsing them here would
+			// double-count and inject energy. But we can't simply skip — the
+			// integrated new_pos may have solid_ptr overlapping hit_solid,
+			// and unchecked overlap accumulates over ticks until bodies
+			// phase through each other (e.g. a 20-ball stack collapsing to a
+			// blob). Apply a position-only contact constraint instead:
+			// remove solid_ptr's velocity component along the contact normal
+			// (no penetration through the partner) and snap position to the
+			// contact surface. Energy strictly decreases (we only damp, never
+			// boost). The earlier impulse from the partner's update gave both
+			// sides their proper post-collision velocities; this constraint
+			// just enforces the geometric "you can't pass through" invariant.
+			if (hit_solid && solid_ptr->impulse_partner_tick_ == current_tick_) {
+				bool already_impulsed = false;
+				for (int k = 0; k < solid_ptr->impulse_partner_count_; ++k) {
+					if (solid_ptr->impulse_partners_[k] == hit_solid) {
+						already_impulsed = true;
+						break;
+					}
+				}
+				if (already_impulsed) {
+					T v_along_n = dot(solid_ptr->velocity_, c.normal);
+					if (v_along_n < T{}) {
+						vec3<T> remove;
+						mul(remove, c.normal, v_along_n);
+						sub(solid_ptr->velocity_, remove);
+					}
+					new_pos.set(old_pos);  // stop at contact surface
+					break;
+				}
+			}
 
 			bool responded = false;
 			if (solid_ptr->do_update_callback_) {
@@ -606,16 +652,33 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 					hit_solid->activate();
 					sub(hit_solid->velocity_, temp);
 				}
+
+				// Record the impulsed pair so subsequent solid updates that
+				// re-detect this pair recognize it and apply only a contact
+				// constraint (not a second impulse). Recorded on both sides
+				// since either side's later update may detect the pair.
+				if (hit_solid) {
+					auto record = [&](solid<T> * a, solid<T> * b) {
+						if (a->impulse_partner_tick_ != current_tick_) {
+							a->impulse_partner_count_ = 0;
+							a->impulse_partner_tick_ = current_tick_;
+						}
+						if (a->impulse_partner_count_ < solid<T>::max_impulse_partners_per_tick)
+							a->impulse_partners_[a->impulse_partner_count_++] = b;
+					};
+					record(solid_ptr, hit_solid);
+					record(hit_solid, solid_ptr);
+				}
 			}
 
 			// Touching code
 			solid_ptr->touched2_ = solid_ptr->touched1_;
 			solid_ptr->touched2_normal_.set(solid_ptr->touched1_normal_);
-			if (solid_ptr->touched1_ == c.collider.get()) {
-				solid_ptr->touching_ = c.collider.get();
+			if (solid_ptr->touched1_ == c.collider) {
+				solid_ptr->touching_ = c.collider;
 				solid_ptr->touching_normal_.set(c.normal);
 			} else {
-				solid_ptr->touched1_ = c.collider.get();
+				solid_ptr->touched1_ = c.collider;
 				solid_ptr->touched1_normal_.set(c.normal);
 				solid_ptr->touching_ = nullptr;
 			}
@@ -748,7 +811,7 @@ void simulator<T>::trace_solid(collision<T> & result, solid<T> * s, const segmen
 
 template <typename T> void simulator<T>::test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s) {
 	collision<T> col;
-	col.collider = s->shared_from_this();
+	col.collider = s;
 	const T one = tr::one();
 
 	auto & shapes = s->shapes_;
@@ -785,7 +848,7 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 		}
 		case shape_type::convex_solid: {
 			hop::convex_solid<T> cs;
-			cs.set(sh->convex_solid_);
+			cs.set(*sh->convex_solid_);
 			segment<T> tmp;
 			tmp.set(seg);
 			sub(tmp.origin, s->position_);
@@ -832,9 +895,13 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 template <typename T>
 void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2) {
 	collision<T> col;
-	col.collider = s2->shared_from_this();
+	col.collider = s2;
 	const T one = tr::one();
 	T zero_val {};
+
+	// Squared segment length is invariant across all shape pairs in this call;
+	// hoist it for the sphere/sphere fast reject below.
+	T dir_sq = length_squared(seg.direction);
 
 	auto & shapes1 = s1->shapes_;
 	auto & shapes2 = s2->shapes_;
@@ -901,7 +968,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::convex_solid) {
 				// Conservative: inflate sh2's planes by max half-extent of sh1's aa_box.
 				hop::convex_solid<T> cs;
-				cs.set(sh2->convex_solid_);
+				cs.set(*sh2->convex_solid_);
 				vec3<T> half;
 				sub(half, sh1->box_.maxs, sh1->box_.mins);
 				mul(half, tr::half());
@@ -937,9 +1004,22 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				add(origin, lp_delta);
 				sub(origin, sh1->sphere_.origin);
 				add(origin, sh2->sphere_.origin);
-				hop::sphere<T> sph;
-				sph.set(origin, sh2->sphere_.radius + sh1->sphere_.radius);
-				trace_sphere(col, seg, sph);
+				T r_sum = sh1->sphere_.radius + sh2->sphere_.radius;
+				// Fast reject: if start-position centers are too far apart for the
+				// swept sphere to ever reach the target sphere this tick, skip the
+				// quadratic root solve. Conservative no-sqrt bound:
+				//   2·(r_sum² + |dir|²) ≥ (r_sum + |dir|)²   (AM-GM)
+				// — looser than the sqrt-form by a factor of ≤2 but free.
+				vec3<T> diff;
+				sub(diff, seg.origin, origin);
+				T limit = (r_sum * r_sum + dir_sq) * tr::two();
+				if (length_squared(diff) > limit) {
+					col.time = one;  // explicit miss; merge below leaves result untouched
+				} else {
+					hop::sphere<T> sph;
+					sph.set(origin, r_sum);
+					trace_sphere(col, seg, sph);
+				}
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::capsule) {
 				vec3<T> origin;
 				origin.set(s2->position_);
@@ -951,7 +1031,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				trace_capsule(col, seg, cap);
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::convex_solid) {
 				hop::convex_solid<T> cs;
-				cs.set(sh2->convex_solid_);
+				cs.set(*sh2->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh1->sphere_.radius;
 				vec3<T> sh1_offset;
@@ -986,7 +1066,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				// two spine endpoints as separate segments. Conservative
 				// Minkowski-sum approximation.
 				hop::convex_solid<T> cs;
-				cs.set(sh2->convex_solid_);
+				cs.set(*sh2->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh1->capsule_.radius;
 				vec3<T> bottom_offset;
@@ -1022,7 +1102,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			// Convex solid vs aa_box
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::box) {
 				hop::convex_solid<T> cs;
-				cs.set(sh1->convex_solid_);
+				cs.set(*sh1->convex_solid_);
 				vec3<T> half;
 				sub(half, sh2->box_.maxs, sh2->box_.mins);
 				mul(half, tr::half());
@@ -1041,7 +1121,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			// Convex solid vs sphere
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::sphere) {
 				hop::convex_solid<T> cs;
-				cs.set(sh1->convex_solid_);
+				cs.set(*sh1->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh2->sphere_.radius;
 				trace_inverted_convex(col, seg, s1, s2, lp_delta, cs, sh2->sphere_.origin);
@@ -1049,7 +1129,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			// Convex solid vs capsule
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::capsule) {
 				hop::convex_solid<T> cs;
-				cs.set(sh1->convex_solid_);
+				cs.set(*sh1->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh2->capsule_.radius;
 				collision<T> col_bottom;
@@ -1070,10 +1150,10 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			// Convex solid vs convex solid (exact Minkowski sum: inflate sh2's planes per sh1's support)
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::convex_solid) {
 				hop::convex_solid<T> cs;
-				cs.set(sh2->convex_solid_);
+				cs.set(*sh2->convex_solid_);
 				for (auto & p : cs.planes) {
 					vec3<T> sup;
-					support(sup, sh1->convex_solid_, p.normal);
+					support(sup, *sh1->convex_solid_, p.normal);
 					p.distance = p.distance + dot(sup, p.normal);
 				}
 				// sh1 reference point in s1's local frame = lp1 (sh1's convex origin sits there).

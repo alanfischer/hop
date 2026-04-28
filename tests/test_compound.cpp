@@ -387,7 +387,7 @@ template <typename T> static void test_capsule_vs_convex_preserves_collider(cons
 	mover->set_position({ T {}, T {}, T {} });
 	mover->set_velocity({ tr::from_int(5), T {}, T {} });
 
-	std::shared_ptr<solid<T>> seen_collider;
+	solid<T> * seen_collider = nullptr;
 	mover->set_collision_callback([&](const collision<T> & c) {
 		if (!seen_collider)
 			seen_collider = c.collider;
@@ -397,7 +397,7 @@ template <typename T> static void test_capsule_vs_convex_preserves_collider(cons
 	for (int i = 0; i < 200; ++i) sim.update(10, simulator<T>::scope_report_collisions);
 
 	assert(seen_collider);  // callback fired (collider was not wiped to null)
-	assert(seen_collider.get() == target.get());
+	assert(seen_collider == target.get());
 	printf("OK\n");
 }
 
