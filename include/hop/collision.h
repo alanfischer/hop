@@ -22,7 +22,10 @@ template <typename T> struct collision {
 	vec3<T> velocity;
 	solid<T> * collider = nullptr;
 	solid<T> * collidee = nullptr;
-	int scope = 0;
+	// OR of every statically-overlapping (t == 0) collidee's trigger_scope.
+	// Use to detect whether a trace ended up inside any tagged trigger volume.
+	// Always 0 if no static overlap occurred.
+	int trigger_scope = 0;
 
 	collision & set(const collision & c) {
 		time = c.time;
@@ -32,7 +35,7 @@ template <typename T> struct collision {
 		velocity.set(c.velocity);
 		collider = c.collider;
 		collidee = c.collidee;
-		scope = c.scope;
+		trigger_scope = c.trigger_scope;
 		return *this;
 	}
 
@@ -44,7 +47,7 @@ template <typename T> struct collision {
 		velocity.reset();
 		collider = nullptr;
 		collidee = nullptr;
-		scope = 0;
+		trigger_scope = 0;
 		return *this;
 	}
 

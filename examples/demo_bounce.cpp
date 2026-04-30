@@ -96,6 +96,12 @@ std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 
 static const char * capture_dir = nullptr;
 
+// Trigger-zone channel. Dynamic bodies clear this bit from their
+// collide_with_scope so the simulator's normal sweep ignores the zone (no
+// impulse push). Each frame we run a separate probe trace with this bit set
+// to detect which bodies are currently inside the zone.
+static constexpr int TRIGGER_BIT = 0x100;
+
 template <typename T> void run() {
 	using tr = hop::scalar_traits<T>;
 
@@ -139,6 +145,26 @@ template <typename T> void run() {
 	          hop::aa_box<T>(hop::vec3<T>(-half_size, zero, zero), hop::vec3<T>(half_size, wall_thick, size)),
 	          hop::vec3<T>(zero, half_size, zero));
 
+	// Trigger zone: a sphere bodies pass straight through. Marked with
+	// TRIGGER_BIT on both broadcast (collision_scope) and trigger_scope, with
+	// collide_with_scope = 0 so the zone never sweeps. Dynamic bodies below
+	// clear TRIGGER_BIT from their collide_with_scope, so the simulator's
+	// normal trace filter discards the zone — no impulse, no bounce.
+	auto zone = std::make_shared<hop::solid<T>>();
+	zone->set_infinite_mass();
+	zone->set_coefficient_of_gravity(T {});
+	zone->set_collision_scope(TRIGGER_BIT);
+	zone->set_collide_with_scope(0);
+	zone->set_trigger_scope(TRIGGER_BIT);
+	zone->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(1200))));
+	zone->set_position(hop::vec3<T>(zero, zero, tr::from_int(3)));
+	sim.add_solid(zone);
+
+	// Dynamic bodies pass through the zone but still bounce off everything
+	// else (walls, each other) — the inverse of TRIGGER_BIT keeps every
+	// other channel.
+	const int normal_channels = ~TRIGGER_BIT;
+
 	T cor = tr::one();
 	T fric_zero = T {};
 
@@ -149,6 +175,7 @@ template <typename T> void run() {
 	box_solid->set_coefficient_of_restitution_override(true);
 	box_solid->set_coefficient_of_static_friction(fric_zero);
 	box_solid->set_coefficient_of_dynamic_friction(fric_zero);
+	box_solid->set_collide_with_scope(normal_channels);
 	box_solid->add_shape(std::make_shared<hop::shape<T>>(hop::aa_box<T>(
 	    hop::vec3<T>(-tr::half(), -tr::half(), -tr::half()), hop::vec3<T>(tr::half(), tr::half(), tr::half()))));
 	box_solid->set_position(hop::vec3<T>(tr::from_int(1), zero, tr::from_int(4)));
@@ -162,6 +189,7 @@ template <typename T> void run() {
 	sphere_solid->set_coefficient_of_restitution_override(true);
 	sphere_solid->set_coefficient_of_static_friction(fric_zero);
 	sphere_solid->set_coefficient_of_dynamic_friction(fric_zero);
+	sphere_solid->set_collide_with_scope(normal_channels);
 	sphere_solid->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::half())));
 	sphere_solid->set_position(hop::vec3<T>(tr::from_int(-1), tr::from_int(1), tr::from_int(5)));
 	sphere_solid->set_velocity(hop::vec3<T>(tr::from_int(-1), tr::from_int(3), tr::from_int(2)));
@@ -174,6 +202,7 @@ template <typename T> void run() {
 	capsule_solid->set_coefficient_of_restitution_override(true);
 	capsule_solid->set_coefficient_of_static_friction(fric_zero);
 	capsule_solid->set_coefficient_of_dynamic_friction(fric_zero);
+	capsule_solid->set_collide_with_scope(normal_channels);
 	hop::capsule<T> cap_shape(hop::vec3<T>(), hop::vec3<T>(zero, zero, tr::from_milli(1500)), tr::from_milli(400));
 	capsule_solid->add_shape(std::make_shared<hop::shape<T>>(cap_shape));
 	capsule_solid->set_position(hop::vec3<T>(tr::from_int(2), zero, tr::from_int(4)));
@@ -195,6 +224,7 @@ template <typename T> void run() {
 	capsule2_solid->set_coefficient_of_restitution_override(true);
 	capsule2_solid->set_coefficient_of_static_friction(fric_zero);
 	capsule2_solid->set_coefficient_of_dynamic_friction(fric_zero);
+	capsule2_solid->set_collide_with_scope(normal_channels);
 	hop::capsule<T> cap2_shape(hop::vec3<T>(), hop::vec3<T>(tr::from_int(2), zero, zero), tr::from_milli(300));
 	capsule2_solid->add_shape(std::make_shared<hop::shape<T>>(cap2_shape));
 	capsule2_solid->set_position(hop::vec3<T>(tr::from_int(1), tr::from_int(1), tr::from_int(2)));
@@ -209,6 +239,7 @@ template <typename T> void run() {
 	dumbbell_solid->set_coefficient_of_restitution_override(true);
 	dumbbell_solid->set_coefficient_of_static_friction(fric_zero);
 	dumbbell_solid->set_coefficient_of_dynamic_friction(fric_zero);
+	dumbbell_solid->set_collide_with_scope(normal_channels);
 	auto db_left = std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350)));
 	db_left->set_local_position(hop::vec3<T>(-tr::from_milli(700), zero, zero));
 	dumbbell_solid->add_shape(db_left);
@@ -237,11 +268,31 @@ template <typename T> void run() {
 	const char * mode_label = std::is_same_v<T, hop::fixed16> ? "fixed16" : "float";
 	int frame_num = 0;
 
+	// Static-overlap probe: ask "is this body currently inside any solid that
+	// broadcasts on TRIGGER_BIT?" by tracing a zero-direction segment with the
+	// trigger channel as the only listened-for bit. The trace ignores walls
+	// and other dynamic bodies because their collision_scope doesn't include
+	// TRIGGER_BIT (default -1 does, but we don't care — those solids have
+	// trigger_scope = 0 so they contribute nothing to result.trigger_scope).
+	auto in_trigger_zone = [&](const std::shared_ptr<hop::solid<T>> & body) -> bool {
+		hop::collision<T> r;
+		hop::segment<T> probe;
+		probe.set_start_dir(body->get_position(), hop::vec3<T>());
+		sim.trace_solid(r, body.get(), probe, TRIGGER_BIT);
+		return (r.trigger_scope & TRIGGER_BIT) != 0;
+	};
+
 	float elapsed = 0.0f;
 	while (!WindowShouldClose() && (duration <= 0.0f || elapsed < duration)) {
 		float frame_dt = GetFrameTime();
 		elapsed += frame_dt;
 		sim.update(16, hop::simulator<T>::scope_report_collisions);
+
+		bool box_in_zone = in_trigger_zone(box_solid);
+		bool sphere_in_zone = in_trigger_zone(sphere_solid);
+		bool capsule_in_zone = in_trigger_zone(capsule_solid);
+		bool capsule2_in_zone = in_trigger_zone(capsule2_solid);
+		bool dumbbell_in_zone = in_trigger_zone(dumbbell_solid);
 
 		// Orbiting camera looking at room center
 		cam_angle += 0.3f * GetFrameTime();
@@ -264,14 +315,24 @@ template <typename T> void run() {
 		// Semi-transparent floor
 		DrawCube({ 0.0f, -0.05f, 0.0f }, 6.0f, 0.1f, 6.0f, { 60, 60, 80, 100 });
 
+		// Trigger zone: translucent yellow sphere at room-center, radius 1.2.
+		// Bodies pass through it freely; the only effect is the per-frame
+		// trigger_scope query below.
+		Vector3 zp = to_raylib(zone->get_position());
+		DrawSphere(zp, 1.2f, { 255, 220, 80, 40 });
+		DrawSphereWires(zp, 1.2f, 8, 8, { 255, 220, 80, 200 });
+
+		// Bodies tint yellow while inside the zone (trigger_scope query).
+		Color tint_in = YELLOW;
+
 		// Box
 		Vector3 bp = to_raylib(box_solid->get_position());
-		DrawCube(bp, 1.0f, 1.0f, 1.0f, RED);
+		DrawCube(bp, 1.0f, 1.0f, 1.0f, box_in_zone ? tint_in : RED);
 		DrawCubeWires(bp, 1.0f, 1.0f, 1.0f, MAROON);
 
 		// Sphere
 		Vector3 sp = to_raylib(sphere_solid->get_position());
-		DrawSphere(sp, 0.5f, BLUE);
+		DrawSphere(sp, 0.5f, sphere_in_zone ? tint_in : BLUE);
 		DrawSphereWires(sp, 0.5f, 8, 8, DARKBLUE);
 
 		// Capsule — origin + direction in hop Z-up, convert both endpoints
@@ -280,7 +341,7 @@ template <typename T> void run() {
 		cap_top.z = cap_top.z + tr::from_milli(1500);
 		Vector3 cp_bot = to_raylib(cap_pos);
 		Vector3 cp_top = to_raylib(cap_top);
-		DrawCapsule(cp_bot, cp_top, 0.4f, 8, 8, GREEN);
+		DrawCapsule(cp_bot, cp_top, 0.4f, 8, 8, capsule_in_zone ? tint_in : GREEN);
 		DrawCapsuleWires(cp_bot, cp_top, 0.4f, 8, 8, DARKGREEN);
 
 		// Rope line from ceiling anchor to capsule
@@ -293,7 +354,7 @@ template <typename T> void run() {
 		cap2_end.x = cap2_end.x + tr::from_int(2);
 		Vector3 cp2_bot = to_raylib(cap2_pos);
 		Vector3 cp2_top = to_raylib(cap2_end);
-		DrawCapsule(cp2_bot, cp2_top, 0.3f, 8, 8, ORANGE);
+		DrawCapsule(cp2_bot, cp2_top, 0.3f, 8, 8, capsule2_in_zone ? tint_in : ORANGE);
 		DrawCapsuleWires(cp2_bot, cp2_top, 0.3f, 8, 8, { 200, 100, 0, 255 });
 
 		// Dumbbell compound: draw each sphere at solid.position + shape.local_position
@@ -304,9 +365,10 @@ template <typename T> void run() {
 		db_r_world.x = db_r_world.x + tr::from_milli(700);
 		Vector3 dbl = to_raylib(db_l_world);
 		Vector3 dbr = to_raylib(db_r_world);
-		DrawSphere(dbl, 0.35f, PURPLE);
+		Color db_color = dumbbell_in_zone ? tint_in : PURPLE;
+		DrawSphere(dbl, 0.35f, db_color);
 		DrawSphereWires(dbl, 0.35f, 8, 8, DARKPURPLE);
-		DrawSphere(dbr, 0.35f, PURPLE);
+		DrawSphere(dbr, 0.35f, db_color);
 		DrawSphereWires(dbr, 0.35f, 8, 8, DARKPURPLE);
 		// Connecting rod (visual only — no collision geometry)
 		DrawLine3D(dbl, dbr, { 180, 120, 200, 255 });

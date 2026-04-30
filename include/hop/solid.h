@@ -39,9 +39,9 @@ public:
 	void reset() {
 		destroy();
 		scope_ = -1;
-		internal_scope_ = 0;
 		collision_scope_ = -1;
 		collide_with_scope_ = -1;
+		trigger_scope_ = 0;
 		mass_ = tr::one();
 		inv_mass_ = tr::one();
 		position_.reset();
@@ -57,7 +57,6 @@ public:
 		local_bound_.reset();
 		world_bound_.reset();
 		collision_callback_ = nullptr;
-		user_data_ = nullptr;
 		active_ = true;
 		deactivate_count_ = 0;
 		impulse_partner_count_ = 0;
@@ -68,19 +67,46 @@ public:
 		touched2_normal_.reset();
 		touching_ = nullptr;
 		touching_normal_.reset();
-		do_update_callback_ = false;
 		simulator_ = nullptr;
 	}
 
-	// Scope
+	// Scope bitmasks. Four independent ints with different roles:
+	//
+	//   scope_              — per-tick activation mask. Matched against the
+	//                         `scope` argument of simulator::update(dt, scope):
+	//                         the solid is updated only if (scope_ & scope) != 0
+	//                         (or `scope` is 0, the "tick everything" default).
+	//                         Default `-1` (all bits = always tick).
+	//
+	//   collision_scope_    — channels this solid broadcasts on. When something
+	//                         else traces against this solid, the trace's
+	//                         collide_with bits must intersect this mask, or
+	//                         the pair is filtered out. Default `-1`.
+	//
+	//   collide_with_scope_ — channels this solid listens to. Set to 0 to
+	//                         disable broad-phase entirely for this solid
+	//                         (useful for sensors that only emit callbacks).
+	//                         Used as the `collide_with_bits` argument when
+	//                         the solid is the moving side of a sweep.
+	//                         Default `-1`.
+	//
+	//   trigger_scope_      — trigger / zone identification bits. When another
+	//                         solid is found to be statically overlapping this
+	//                         one (collision time t == 0), these bits are OR'd
+	//                         into the resulting collision::scope field. Lets
+	//                         callers tag a solid as a "damage zone" or "water
+	//                         volume" and read which zones their player is
+	//                         currently inside off the trace result. Works for
+	//                         primitive shapes AND traceable meshes. Default 0
+	//                         (no trigger bits — the solid is just geometry).
 	void set_scope(int s) { scope_ = s; }
 	int get_scope() const { return scope_; }
-	void set_internal_scope(int s) { internal_scope_ = s; }
-	int get_internal_scope() const { return internal_scope_; }
 	void set_collision_scope(int s) { collision_scope_ = s; }
 	int get_collision_scope() const { return collision_scope_; }
 	void set_collide_with_scope(int s) { collide_with_scope_ = s; }
 	int get_collide_with_scope() const { return collide_with_scope_; }
+	void set_trigger_scope(int s) { trigger_scope_ = s; }
+	int get_trigger_scope() const { return trigger_scope_; }
 
 	// Mass
 	void set_mass(T mass) {
@@ -165,9 +191,6 @@ public:
 	void set_collision_filter(collision_filter_fn fn) { collision_filter_ = std::move(fn); }
 	bool should_collide(solid<T> * other) const { return !collision_filter_ || collision_filter_(other); }
 
-	void set_user_data(void * d) { user_data_ = d; }
-	void * get_user_data() const { return user_data_; }
-
 	void activate() {
 		if (deactivate_count_ > 0)
 			deactivate_count_ = 0;
@@ -192,21 +215,12 @@ public:
 	}
 	bool active() const { return active_ && simulator_ != nullptr; }
 
-	void set_do_update_callback(bool c) { do_update_callback_ = c; }
-	void set_manager(manager<T> * m) { manager_ = m; }
-
 	// Diagnostic: number of distinct partners this solid impulsed (or was
 	// impulsed by) during the most recent tick it participated in a collision.
 	// Returns 0 if the most recent tick recorded doesn't match the current
 	// simulator tick (no fresh data). Useful for tuning impulse_partners_[]
 	// capacity or for debugging cluster collision behavior.
 	int get_impulse_partner_count() const { return impulse_partner_count_; }
-	simulator<T> * get_simulator() const { return simulator_; }
-
-	void set_position_direct(const vec3<T> & pos) {
-		position_.set(pos);
-		add(world_bound_, local_bound_, position_);
-	}
 
 	void update_local_bound() {
 		shape_types_ = 0;
@@ -234,10 +248,17 @@ private:
 		constraints_.erase(std::remove(constraints_.begin(), constraints_.end(), c), constraints_.end());
 	}
 
+	// Bypass activate(). The simulator calls this from update_solid every tick
+	// to commit the integrated position; activating from there would re-arm the
+	// deactivation counter on every step and prevent solids from ever sleeping.
+	void set_position_direct(const vec3<T> & pos) {
+		position_.set(pos);
+		add(world_bound_, local_bound_, position_);
+	}
+
 	// -- Hot: every-tick gates and integration math --
 	bool active_ = true;
 	int last_dt_ = 0;
-	bool do_update_callback_ = false;
 	int scope_ = -1;
 	vec3<T> position_;
 	vec3<T> velocity_;
@@ -256,11 +277,10 @@ private:
 	bool coefficient_of_restitution_override_ = false;
 	T coefficient_of_static_friction_ {};
 	T coefficient_of_dynamic_friction_ {};
-	int internal_scope_ = 0;
 	int collision_scope_ = -1;
 	int collide_with_scope_ = -1;
+	int trigger_scope_ = 0;
 	int deactivate_count_ = 0;
-	manager<T> * manager_ = nullptr;
 	simulator<T> * simulator_ = nullptr;
 
 	// -- Cold: rarely accessed in the hot path --
@@ -294,15 +314,12 @@ private:
 
 	collision_fn collision_callback_;
 	collision_filter_fn collision_filter_;
-	void * user_data_ = nullptr;
 
 	friend class constraint<T>;
 	friend class shape<T>;
 	friend class simulator<T>;
 };
 
-// set_position needs simulator — defined after simulator is available, but
-// we provide a basic version here that the simulator's updateSolid will override
 template <typename T> inline void solid<T>::set_position(const vec3<T> & pos) {
 	set_position_direct(pos);
 	activate();
