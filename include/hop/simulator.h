@@ -1226,8 +1226,7 @@ void simulator<T>::trace_segment_with_current_spacials(collision<T> & result,
                                                        const segment<T> & seg,
                                                        int collide_with_bits,
                                                        solid<T> * ignore) {
-	result.time = tr::one();
-	result.trigger_scope = 0;
+	result.reset();
 
 	collision<T> col;
 	for (int i = 0; i < num_spacial_collection_; ++i) {
@@ -1256,7 +1255,7 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
                                                      solid<T> * s,
                                                      const segment<T> & seg,
                                                      int collide_with_bits) {
-	result.time = tr::one();
+	result.reset();
 	if (collide_with_bits == 0)
 		return;
 
