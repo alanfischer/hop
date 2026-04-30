@@ -178,8 +178,11 @@ public:
 		return count;
 	}
 
-	// The simulator already traces against solids from find_solids_in_aa_box.
-	// These are for additional geometry not in the solid list (unused here).
+	// bvh_manager is broad-phase only — find_solids_in_aa_box accelerates the
+	// simulator's scan, but this manager contributes no geometry of its own.
+	// trace_segment / trace_solid stay no-ops; engine integrations that want
+	// to merge in external geometry (level BSP, heightfield, static trimesh)
+	// should subclass manager<T> directly and override these. See manager.h.
 	void trace_segment(collision<T> & result, const segment<T> & seg, int collide_with_bits) override {}
 	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits) override {}
 

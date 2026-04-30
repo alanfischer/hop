@@ -258,7 +258,6 @@ private:
 
 	// -- Hot: every-tick gates and integration math --
 	bool active_ = true;
-	int last_dt_ = 0;
 	int scope_ = -1;
 	vec3<T> position_;
 	vec3<T> velocity_;
