@@ -26,6 +26,9 @@ template <typename T> class simulator {
 public:
 	using tr = scalar_traits<T>;
 
+	// Bit OR'd into the `scope` argument of update(dt, scope) to opt into
+	// dispatching collision callbacks for this tick. Reuses the scope mask
+	// because no solid would set its scope_ to bit 30 in practice.
 	enum { scope_report_collisions = 1 << 30 };
 
 	simulator() {
@@ -38,16 +41,15 @@ public:
 
 	// Epsilon
 	void set_epsilon(T epsilon) {
-		if constexpr (std::is_same_v<T, float>) {
-			tr::make_epsilon(epsilon_state_, epsilon);
-		}
+		static_assert(std::is_same_v<T, float>, "set_epsilon only for float; use set_epsilon_bits for fixed16");
+		tr::make_epsilon(epsilon_state_, epsilon);
 		epsilon_ = epsilon_state_.epsilon;
 		half_epsilon_ = epsilon_state_.half_epsilon;
 		quarter_epsilon_ = epsilon_state_.quarter_epsilon;
 	}
 
 	void set_epsilon_bits(int bits) {
-		static_assert(std::is_same_v<T, fixed16>, "set_epsilon_bits only for fixed16");
+		static_assert(std::is_same_v<T, fixed16>, "set_epsilon_bits only for fixed16; use set_epsilon for float");
 		tr::make_epsilon(epsilon_state_, bits);
 		epsilon_ = epsilon_state_.epsilon;
 		half_epsilon_ = epsilon_state_.half_epsilon;
@@ -173,15 +175,14 @@ public:
 			if (!s->active_ || (scope != 0 && (s->scope_ & scope) == 0))
 				continue;
 
-			s->last_dt_ = dt;
-			if (s->do_update_callback_ && (s->manager_ || manager_)) {
-				(s->manager_ ? s->manager_ : manager_)->pre_update(s, dt, fdt);
+			if (manager_) {
+				manager_->pre_update(s, dt, fdt);
 			}
 
 			update_solid(s, dt, fdt);
 
-			if (s->do_update_callback_ && manager_) {
-				(s->manager_ ? s->manager_ : manager_)->post_update(s, dt, fdt);
+			if (manager_) {
+				manager_->post_update(s, dt, fdt);
 			}
 		}
 
@@ -298,6 +299,26 @@ private:
 	                                       solid<T> * s,
 	                                       const segment<T> & seg,
 	                                       int collide_with_bits);
+
+	// Fold a per-pair `col` into the running `result` for the broad-phase loops
+	// above. Earlier hits replace; equal-time hits average normals when
+	// `average_normals_` is on. trigger_scope bits OR in regardless of whether
+	// `col` is the closer hit — `result.set(col)` would overwrite trigger_scope,
+	// so we save/restore it around the merge.
+	void merge_collision(collision<T> & result, const collision<T> & col) {
+		int trigger_scope = result.trigger_scope;
+		if (col.time < tr::one()) {
+			if (col.time < result.time) {
+				result.set(col);
+			} else if (average_normals_ && result.time == col.time) {
+				add(result.normal, col.normal);
+				if (!normalize_carefully(result.normal, epsilon_))
+					result.set(col);
+			}
+		}
+		result.trigger_scope = trigger_scope | col.trigger_scope;
+	}
+
 	void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & box);
 	void trace_sphere(collision<T> & c, const segment<T> & seg, const hop::sphere<T> & sph);
 	void trace_capsule(collision<T> & c, const segment<T> & seg, const hop::capsule<T> & cap);
@@ -474,8 +495,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 	bool first = true;
 	bool skip = false;
 
-	if (solid_ptr->do_update_callback_ && (solid_ptr->manager_ || manager_)) {
-		(solid_ptr->manager_ ? solid_ptr->manager_ : manager_)->intra_update(solid_ptr, dt, fdt);
+	if (manager_) {
+		manager_->intra_update(solid_ptr, dt, fdt);
 	}
 
 	snap_to_grid_vec(old_pos);
@@ -591,9 +612,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 			}
 
 			bool responded = false;
-			if (solid_ptr->do_update_callback_) {
-				responded = (solid_ptr->manager_ ? solid_ptr->manager_ : manager_)
-				                ->collision_response(solid_ptr, old_pos, left_over, c);
+			if (manager_) {
+				responded = manager_->collision_response(solid_ptr, old_pos, left_over, c);
 			}
 
 			if (!responded) {
@@ -873,10 +893,13 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 		if (col.time < one)
 			col.impact.set(col.point);
 
+		// Trigger zones: OR collidee's trigger bits into the result on static
+		// overlap (t == 0). Lets callers tag a solid as a damage zone / volume
+		// and read which zones a trace ended up inside via result.trigger_scope.
 		if (col.time == T {})
-			col.scope |= s->internal_scope_;
+			col.trigger_scope |= s->trigger_scope_;
 
-		int scope = result.scope;
+		int trigger_scope = result.trigger_scope;
 		if (col.time < one) {
 			if (col.time < result.time) {
 				result.set(col);
@@ -888,7 +911,7 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 			modify_scope |= (col.time == T {});
 		}
 
-		result.scope = modify_scope ? (scope | col.scope) : scope;
+		result.trigger_scope = modify_scope ? (trigger_scope | col.trigger_scope) : trigger_scope;
 	}
 }
 
@@ -1080,7 +1103,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				col_top.time = one;
 				trace_forward_convex(col_top, seg, s2, lp2, cs, top_offset);
 				// Merge the earlier hit's fields without touching col.collider /
-				// col.scope (see test_solid preamble for why).
+				// col.trigger_scope (see test_solid preamble for why).
 				const collision<T> & hit = (col_bottom.time < col_top.time) ? col_bottom : col_top;
 				col.time = hit.time;
 				col.normal.set(hit.normal);
@@ -1174,14 +1197,15 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				col.impact.set(col.point);
 			}
 
-			if (sh1->type_ != shape_type::traceable && sh2->type_ != shape_type::traceable && col.time == zero_val) {
-				col.scope = s2->scope_;
-			}
-			if (col.time == zero_val) {
-				col.scope |= s2->internal_scope_;
-			}
+			// Per-pair reset of col.trigger_scope so stale bits from a previous
+			// shape pair don't leak in. Then OR collidee's trigger bits on
+			// static overlap. Works for primitive AND traceable pairs so
+			// trimesh trigger volumes report the same way as primitive ones.
+			col.trigger_scope = 0;
+			if (col.time == zero_val)
+				col.trigger_scope = s2->trigger_scope_;
 
-			int scope = result.scope;
+			int trigger_scope = result.trigger_scope;
 			if (col.time < one) {
 				if (col.time < result.time) {
 					result.set(col);
@@ -1192,7 +1216,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				}
 				modify_scope |= (col.time == zero_val);
 			}
-			result.scope = modify_scope ? (scope | col.scope) : scope;
+			result.trigger_scope = modify_scope ? (trigger_scope | col.trigger_scope) : trigger_scope;
 		}
 	}
 }
@@ -1202,8 +1226,7 @@ void simulator<T>::trace_segment_with_current_spacials(collision<T> & result,
                                                        const segment<T> & seg,
                                                        int collide_with_bits,
                                                        solid<T> * ignore) {
-	result.time = tr::one();
-	result.scope = 0;
+	result.reset();
 
 	collision<T> col;
 	for (int i = 0; i < num_spacial_collection_; ++i) {
@@ -1211,34 +1234,14 @@ void simulator<T>::trace_segment_with_current_spacials(collision<T> & result,
 		if (s2 != ignore && (collide_with_bits & s2->collision_scope_) != 0) {
 			col.time = tr::one();
 			test_segment(col, seg, s2);
-			int scope = result.scope;
-			if (col.time < tr::one()) {
-				if (col.time < result.time)
-					result.set(col);
-				else if (average_normals_ && result.time == col.time) {
-					add(result.normal, col.normal);
-					if (!normalize_carefully(result.normal, epsilon_))
-						result.set(col);
-				}
-			}
-			result.scope = scope | col.scope;
+			merge_collision(result, col);
 		}
 	}
 
 	if (manager_) {
 		col.time = tr::one();
 		manager_->trace_segment(col, seg, collide_with_bits);
-		int scope = result.scope;
-		if (col.time < tr::one()) {
-			if (col.time < result.time)
-				result.set(col);
-			else if (average_normals_ && result.time == col.time) {
-				add(result.normal, col.normal);
-				if (!normalize_carefully(result.normal, epsilon_))
-					result.set(col);
-			}
-		}
-		result.scope = scope | col.scope;
+		merge_collision(result, col);
 	}
 
 	if (result.time == tr::one()) {
@@ -1252,7 +1255,7 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
                                                      solid<T> * s,
                                                      const segment<T> & seg,
                                                      int collide_with_bits) {
-	result.time = tr::one();
+	result.reset();
 	if (collide_with_bits == 0)
 		return;
 
@@ -1263,34 +1266,14 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 		    s2->should_collide(s)) {
 			col.time = tr::one();
 			test_solid(col, s, seg, s2);
-			int scope = result.scope;
-			if (col.time < tr::one()) {
-				if (col.time < result.time)
-					result.set(col);
-				else if (average_normals_ && result.time == col.time) {
-					add(result.normal, col.normal);
-					if (!normalize_carefully(result.normal, epsilon_))
-						result.set(col);
-				}
-			}
-			result.scope = scope | col.scope;
+			merge_collision(result, col);
 		}
 	}
 
 	if (manager_) {
 		col.time = tr::one();
 		manager_->trace_solid(col, s, seg, collide_with_bits);
-		int scope = result.scope;
-		if (col.time < tr::one()) {
-			if (col.time < result.time)
-				result.set(col);
-			else if (average_normals_ && result.time == col.time) {
-				add(result.normal, col.normal);
-				if (!normalize_carefully(result.normal, epsilon_))
-					result.set(col);
-			}
-		}
-		result.scope = scope | col.scope;
+		merge_collision(result, col);
 	}
 
 	if (result.time == tr::one()) {

@@ -100,7 +100,6 @@ public:
 	T get_distance_threshold() const { return distance_threshold_; }
 
 	bool is_active() const { return simulator_ != nullptr; }
-	simulator<T> * get_simulator() const { return simulator_; }
 
 private:
 	void internal_set_simulator(simulator<T> * s) { simulator_ = s; }

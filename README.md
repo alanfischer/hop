@@ -27,7 +27,7 @@ Rotational support is a work in progress — see `docs/rotation_plan.md` for the
 - **Constraint system** with spring constants, damping, and distance thresholds
 - **Deactivation/sleeping** for inactive solids
 - **BVH spatial acceleration** — bounding volume hierarchy for broad-phase collision queries via `bvh_manager`
-- **Collision scopes** — bitmask filtering for selective collision groups
+- **Collision scopes** — bitmask filtering for selective collision groups, plus `trigger_scope` for damage-zone / sensor-volume tagging
 - **Per-solid collision filters** — custom `std::function` callback for fine-grained collision filtering
 - **Fixed-point arithmetic** — `fixed16` type with polynomial sin/cos/atan2, Newton-Raphson sqrt, and branchless min/max/abs
 - **JavaScript bindings** — WebAssembly build via Emscripten/embind for browser-based physics
@@ -92,6 +92,39 @@ Not all shape combinations are supported for solid-vs-solid collision. The matri
 Traceable-vs-Traceable is not supported. Segment traces (raycasting) work against all shape types.
 
 **No cylinder primitive**: a cylinder's flat cap meets its curved side at a sharp circular edge. Sweeping any shape against that edge requires finding the intersection with a quarter-torus, which is a degree-4 polynomial — inconsistent with the quadratic math used everywhere else in hop, and impractical in fixed-point. Use a **capsule** instead: it is geometrically equivalent for collision purposes, and its hemispherical caps turn the hard rim problem into a smooth sphere test. If flat caps are required, a `convex_solid` approximation is available.
+
+## Scope Bitmasks
+
+Each `solid` carries four independent `int` bitmasks. They serve different purposes — keeping them straight is easier with one sentence per role:
+
+| Mask | Default | Role |
+|---|---|---|
+| `scope` | `-1` | Per-tick activation. The solid is updated only when `(scope & update_arg) != 0`. |
+| `collision_scope` | `-1` | Channels this solid **broadcasts on**. A trace against me must intersect this. |
+| `collide_with_scope` | `-1` | Channels this solid **listens to**. Set to `0` to make a sensor that does broad-phase but never gets pushed. |
+| `trigger_scope` | `0` | Tag bits OR'd into `collision::trigger_scope` when something is **statically overlapping** this solid (`t == 0`). |
+
+`trigger_scope` lets you mark a solid as a damage zone, water volume, or quest area. After a swept trace, inspect `result.trigger_scope` to see which zones the moving solid ended up inside:
+
+```cpp
+auto zone = std::make_shared<solid<float>>();
+zone->set_infinite_mass();
+zone->set_trigger_scope(0x4);          // "this is damage zone bit 4"
+zone->set_collide_with_scope(0);       // pass-through — physics ignores the volume
+zone->add_shape(std::make_shared<shape<float>>(sphere<float>{{}, 2.0f}));
+sim->add_solid(zone);
+
+// Each tick, ask "which trigger zones is the player inside?"
+collision<float> r;
+segment<float> probe;
+probe.set_start_dir(player->get_position(), {});  // zero direction = static query
+sim->trace_solid(r, player.get(), probe, -1);
+if (r.trigger_scope & 0x4) {
+    // player is inside a damage zone
+}
+```
+
+Trigger bits work for primitive shapes and traceable meshes alike, so a `convex_solid` or trimesh trigger volume reports the same way as a sphere.
 
 ## Usage
 

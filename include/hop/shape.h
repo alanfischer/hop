@@ -41,18 +41,6 @@ public:
 	shape(shape &&) = default;
 	shape & operator=(shape &&) = default;
 
-	void reset_shape() {
-		if (solid_) {
-			solid_->remove_shape(this->shared_from_this());
-			solid_ = nullptr;
-		}
-		type_ = shape_type::box;
-		box_ = {};
-		convex_solid_.reset();
-		traceable_ = nullptr;
-		local_position_.reset();
-	}
-
 	// Local position: offset of this shape within its owning solid's frame.
 	// Default is zero — shape sits at the solid's origin.
 	// Note: get_bound() and support() are intrinsic (shape's own frame);
