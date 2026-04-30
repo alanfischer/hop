@@ -1,6 +1,6 @@
-// demo_stress.cpp — Stress test: many spheres bouncing in a closed room.
+// demo_stress.cpp — Stress test: box packed full of bouncing spheres.
 // Demonstrates BVH broad-phase performance under high object count.
-// +/- : add/remove 25 spheres   R : reset   Space : pause
+// Space : pause
 
 #include <chrono>
 #include <cmath>
@@ -49,12 +49,11 @@ template <typename T> static void run() {
 	constexpr int   ROOM_HALF   = 6;
 	constexpr int   ROOM_HEIGHT = 12;
 	constexpr float SPHERE_R    = 0.28f;
-	constexpr int   MAX_SPHERES = 10000;
-	constexpr int   STEP        = 100;
-	constexpr int   INIT_COUNT  = 100;
 	// Grid spacing between centers: diameter + small gap
 	constexpr float SPACING     = SPHERE_R * 2.2f;
 	constexpr int   COLS        = (int)((ROOM_HALF * 2.0f) / SPACING);
+	constexpr int   Z_LAYERS    = (int)(ROOM_HEIGHT / SPACING);
+	constexpr int   COUNT       = COLS * COLS * Z_LAYERS;
 
 	// float -> T
 	auto fi = [](int n) { return tr::from_int(n); };
@@ -96,71 +95,35 @@ template <typename T> static void run() {
 	    hop::vec3<T>(zero, half, zero));                                         // +Y
 	bvh.rebuild();
 
-	// Tweakable physics values — changed at runtime, applied to all active spheres
-	float cor  = 0.75f;
-	float fric = 0.0f;
-
-	// Pre-create all sphere solids (none added to sim yet)
+	// 3D grid filling the room interior with random velocities in all directions.
+	// No gravity means there's no floor pile-up to worry about.
 	std::vector<std::shared_ptr<hop::solid<T>>> spheres;
-	spheres.reserve(MAX_SPHERES);
-	for (int i = 0; i < MAX_SPHERES; ++i) {
+	spheres.reserve(COUNT);
+	for (int i = 0; i < COUNT; ++i) {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
 		s->set_coefficient_of_restitution_override(true);
+		s->set_coefficient_of_restitution(ff(0.75f));
 		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff(SPHERE_R))));
-		spheres.push_back(std::move(s));
-	}
 
-	int active = 0;
-
-	auto apply_physics = [&](int i) {
-		spheres[i]->set_coefficient_of_restitution(ff(cor));
-		spheres[i]->set_coefficient_of_static_friction(ff(fric));
-		spheres[i]->set_coefficient_of_dynamic_friction(ff(fric));
-	};
-
-	auto apply_to_all = [&]() {
-		for (int i = 0; i < active; ++i)
-			apply_physics(i);
-	};
-
-	// 3D grid placement throughout the room interior with random velocities in
-	// all directions. No gravity means there's no floor pile-up to worry about.
-	constexpr int Z_LAYERS = (int)((ROOM_HEIGHT - SPHERE_R * 2.0f) / SPACING);
-	auto place = [&](int i) {
 		int   layer = i / (COLS * COLS);
 		int   rem   = i % (COLS * COLS);
 		int   col   = rem % COLS;
 		int   row   = rem / COLS;
 		float x     = -(ROOM_HALF - SPACING * 0.5f) + col * SPACING;
 		float y     = -(ROOM_HALF - SPACING * 0.5f) + row * SPACING;
-		float z     = ROOM_HALF + (layer % Z_LAYERS) * SPACING - SPACING * 0.5f;
+		float z     = SPACING * 0.5f + layer * SPACING;
 		// Pseudo-random velocity in all three axes
 		float vx    = ((i * 7  + 3) % 21 - 10) * 0.5f;
 		float vy    = ((i * 13 + 5) % 21 - 10) * 0.5f;
 		float vz    = ((i * 17 + 9) % 21 - 10) * 0.5f;
-		spheres[i]->set_position(hop::vec3<T>(ff(x), ff(y), ff(z)));
-		spheres[i]->set_velocity(hop::vec3<T>(ff(vx), ff(vy), ff(vz)));
-		apply_physics(i);
-		spheres[i]->activate();
-	};
-
-	auto add_batch = [&](int n) {
-		for (int i = 0; i < n && active < MAX_SPHERES; ++i, ++active) {
-			place(active);
-			sim.add_solid(spheres[active]);
-			bvh.add_solid(spheres[active].get(), false);
-		}
-	};
-
-	auto remove_batch = [&](int n) {
-		for (int i = 0; i < n && active > 0; ++i, --active) {
-			bvh.remove_solid(spheres[active - 1].get());
-			sim.remove_solid(spheres[active - 1]);
-		}
-	};
-
-	add_batch(INIT_COUNT);
+		s->set_position(hop::vec3<T>(ff(x), ff(y), ff(z)));
+		s->set_velocity(hop::vec3<T>(ff(vx), ff(vy), ff(vz)));
+		s->activate();
+		sim.add_solid(s);
+		bvh.add_solid(s.get(), false);
+		spheres.push_back(std::move(s));
+	}
 
 	InitWindow(1280, 720, "hop — stress test");
 	SetTargetFPS(120);
@@ -174,16 +137,7 @@ template <typename T> static void run() {
 		if (dt > 0.1f)
 			dt = 0.1f;
 
-		if (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD))      add_batch(STEP);
-		if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) remove_batch(STEP);
-		if (IsKeyPressed(KEY_R)) { remove_batch(active); add_batch(INIT_COUNT); }
 		if (IsKeyPressed(KEY_SPACE)) paused = !paused;
-
-		// Restitution: [ / ]   Friction: , / .
-		if (IsKeyPressed(KEY_RIGHT_BRACKET)) { cor  = std::min(1.0f, cor  + 0.05f); apply_to_all(); }
-		if (IsKeyPressed(KEY_LEFT_BRACKET))  { cor  = std::max(0.0f, cor  - 0.05f); apply_to_all(); }
-		if (IsKeyPressed(KEY_PERIOD))        { fric = std::min(1.0f, fric + 0.05f); apply_to_all(); }
-		if (IsKeyPressed(KEY_COMMA))         { fric = std::max(0.0f, fric - 0.05f); apply_to_all(); }
 
 		if (!paused) {
 			auto t0 = std::chrono::high_resolution_clock::now();
@@ -211,9 +165,9 @@ template <typename T> static void run() {
 		DrawCubeWires({ 0.0f, H * 0.5f, 0.0f }, W, H, W, { 50, 50, 80, 255 });
 		DrawCube(     { 0.0f, -0.02f,   0.0f }, W, 0.04f, W, { 30, 30, 60, 220 });
 
-		for (int i = 0; i < active; ++i) {
-			Vector3 p     = to_rl(spheres[i]->get_position());
-			float   speed = tr::to_float(hop::length(spheres[i]->get_velocity()));
+		for (auto & s : spheres) {
+			Vector3 p     = to_rl(s->get_position());
+			float   speed = tr::to_float(hop::length(s->get_velocity()));
 			DrawSphereEx(p, SPHERE_R, 4, 6, heat_color(speed));
 		}
 
@@ -224,18 +178,15 @@ template <typename T> static void run() {
 		Color fps_color = fps >= 50 ? GREEN : fps >= 30 ? YELLOW : RED;
 		DrawText(TextFormat("FPS:     %d", fps),                       12, 12, 22, fps_color);
 		int sleeping = 0;
-		for (int i = 0; i < active; ++i) if (!spheres[i]->active()) ++sleeping;
-		DrawText(TextFormat("Objects: %d / %d  (sleep: %d)", active, MAX_SPHERES, sleeping), 12, 38, 22, WHITE);
+		for (auto & s : spheres) if (!s->active()) ++sleeping;
+		DrawText(TextFormat("Objects: %d  (sleep: %d)", COUNT, sleeping), 12, 38, 22, WHITE);
 		Color pc = phys_ms < 8.0f ? GREEN : phys_ms < 16.0f ? YELLOW : RED;
 		DrawText(TextFormat("Physics: %.1f ms", (double)phys_ms),      12, 64, 22, pc);
-		DrawText(TextFormat("Restitution: %.2f  [/]", (double)cor),    12, 92, 20, LIGHTGRAY);
-		DrawText(TextFormat("Friction:    %.2f  ,/.", (double)fric),   12, 116, 20, LIGHTGRAY);
 
 		if (paused)
 			DrawText("PAUSED", 560, 330, 48, { 255, 220, 60, 220 });
 
-		DrawText("+/- : spheres   R : reset   Space : pause   [/] : restitution   ,/. : friction",
-		         12, 700, 16, { 90, 90, 120, 255 });
+		DrawText("Space : pause", 12, 700, 16, { 90, 90, 120, 255 });
 
 		EndDrawing();
 	}
