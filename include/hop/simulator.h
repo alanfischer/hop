@@ -739,7 +739,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 	}
 
 	// Deactivation
-	if (solid_ptr->deactivate_count_ >= 0) {
+	if (deactivate_count_ > 0 && solid_ptr->deactivate_count_ >= 0) {
 		if (tr::abs(new_pos.x - solid_ptr->position_.x) < deactivate_speed_ &&
 		    tr::abs(new_pos.y - solid_ptr->position_.y) < deactivate_speed_ &&
 		    tr::abs(new_pos.z - solid_ptr->position_.z) < deactivate_speed_) {
