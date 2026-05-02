@@ -85,11 +85,6 @@ template <> struct scalar_traits<float> {
 		v = min_val(limit, v);
 		return is_real(v) ? v : 0.0f;
 	}
-
-	// Snap to grid (float version)
-	static void snap_to_grid(float & v, const epsilon_state<float> & s) {
-		v = static_cast<int64_t>((v + (s.half_epsilon * -(v < 0))) * s.one_over_epsilon) * s.epsilon;
-	}
 };
 
 // scalar_traits<fixed16>
@@ -289,11 +284,6 @@ template <> struct scalar_traits<fixed16> {
 	// Cap — branchless clamp (no NaN possible for fixed)
 	static constexpr fixed16 cap(fixed16 v, fixed16 limit) {
 		return min_val(limit, max_val(fixed16::from_raw(-limit.raw), v));
-	}
-
-	// Snap to grid (fixed version — bit-shift)
-	static void snap_to_grid(fixed16 & v, const epsilon_state<fixed16> & s) {
-		v.raw = (((v.raw + (s.half_epsilon.raw * -(v.raw < 0))) >> s.epsilon_bits) << s.epsilon_bits);
 	}
 };
 
