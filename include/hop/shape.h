@@ -27,13 +27,13 @@ public:
 
 	shape() : type_(shape_type::box), box_{} {}
 	explicit shape(const aa_box<T> & box) : type_(shape_type::box), box_(box) {}
-	explicit shape(const hop::sphere<T> & s) : type_(shape_type::sphere), sphere_(s) {}
-	explicit shape(const hop::capsule<T> & c) : type_(shape_type::capsule), capsule_(c) {}
-	explicit shape(const hop::convex_solid<T> & cs)
+	explicit shape(const sphere<T> & s) : type_(shape_type::sphere), sphere_(s) {}
+	explicit shape(const capsule<T> & c) : type_(shape_type::capsule), capsule_(c) {}
+	explicit shape(const convex_solid<T> & cs)
 	    : type_(shape_type::convex_solid),
 	      box_{},
-	      convex_solid_(std::make_unique<hop::convex_solid<T>>(cs)) {}
-	explicit shape(hop::traceable<T> * t) : type_(shape_type::traceable), traceable_(t) {}
+	      convex_solid_(std::make_unique<convex_solid<T>>(cs)) {}
+	explicit shape(traceable<T> * t) : type_(shape_type::traceable), traceable_(t) {}
 
 	// shape owns convex_solid_ via unique_ptr — non-copyable, move-only.
 	shape(const shape &) = delete;
@@ -61,43 +61,43 @@ public:
 	}
 	const aa_box<T> & get_box() const { return box_; }
 
-	void set_sphere(const hop::sphere<T> & s) {
+	void set_sphere(const sphere<T> & s) {
 		type_ = shape_type::sphere;
 		sphere_ = s;
 		convex_solid_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
-	const hop::sphere<T> & get_sphere() const { return sphere_; }
+	const sphere<T> & get_sphere() const { return sphere_; }
 
-	void set_capsule(const hop::capsule<T> & c) {
+	void set_capsule(const capsule<T> & c) {
 		type_ = shape_type::capsule;
 		capsule_ = c;
 		convex_solid_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
-	const hop::capsule<T> & get_capsule() const { return capsule_; }
+	const capsule<T> & get_capsule() const { return capsule_; }
 
-	void set_convex_solid(const hop::convex_solid<T> & cs) {
+	void set_convex_solid(const convex_solid<T> & cs) {
 		type_ = shape_type::convex_solid;
 		if (convex_solid_)
 			*convex_solid_ = cs;
 		else
-			convex_solid_ = std::make_unique<hop::convex_solid<T>>(cs);
+			convex_solid_ = std::make_unique<convex_solid<T>>(cs);
 		if (solid_)
 			solid_->update_local_bound();
 	}
-	const hop::convex_solid<T> & get_convex_solid() const { return *convex_solid_; }
+	const convex_solid<T> & get_convex_solid() const { return *convex_solid_; }
 
-	void set_traceable(hop::traceable<T> * t) {
+	void set_traceable(traceable<T> * t) {
 		type_ = shape_type::traceable;
 		traceable_ = t;
 		convex_solid_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
-	hop::traceable<T> * get_traceable() const { return traceable_; }
+	traceable<T> * get_traceable() const { return traceable_; }
 
 	shape_type get_type() const { return type_; }
 
@@ -144,12 +144,12 @@ private:
 	// when transitioning back to a trivial variant). Saves ~70 B per shape vs.
 	// the previous layout where every variant carried full inline storage.
 	union {
-		aa_box<T>           box_;
-		hop::sphere<T>      sphere_;
-		hop::capsule<T>     capsule_;
-		hop::traceable<T> * traceable_;
+		aa_box<T>      box_;
+		sphere<T>      sphere_;
+		capsule<T>     capsule_;
+		traceable<T> * traceable_;
 	};
-	std::unique_ptr<hop::convex_solid<T>> convex_solid_;
+	std::unique_ptr<convex_solid<T>> convex_solid_;
 
 	friend class solid<T>;
 	friend class simulator<T>;

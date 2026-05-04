@@ -305,15 +305,15 @@ private:
 	}
 
 	void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & box);
-	void trace_sphere(collision<T> & c, const segment<T> & seg, const hop::sphere<T> & sph);
-	void trace_capsule(collision<T> & c, const segment<T> & seg, const hop::capsule<T> & cap);
+	void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sph);
+	void trace_capsule(collision<T> & c, const segment<T> & seg, const capsule<T> & cap);
 	void trace_capsule_capsule(collision<T> & c,
 	                           const segment<T> & seg,
 	                           const vec3<T> & base,
 	                           const vec3<T> & D1,
 	                           const vec3<T> & D2,
 	                           T radius);
-	void trace_convex_solid(collision<T> & c, const segment<T> & seg, const hop::convex_solid<T> & cs);
+	void trace_convex_solid(collision<T> & c, const segment<T> & seg, const convex_solid<T> & cs);
 
 	// Dispatch helpers for test_solid's convex-vs-* branches. `inflated_cs` is
 	// the target-side convex solid with its planes already inflated by the
@@ -327,7 +327,7 @@ private:
 	                          const segment<T> & seg,
 	                          const solid<T> * s2,
 	                          const vec3<T> & lp2,
-	                          const hop::convex_solid<T> & inflated_cs,
+	                          const convex_solid<T> & inflated_cs,
 	                          const vec3<T> & sh1_offset);
 	// Inverted: sh1 is convex, sh2 is primitive. Traces sh2's reference point
 	// backwards against sh1's convex. sh2_offset is sh2's reference point in
@@ -337,7 +337,7 @@ private:
 	                           const solid<T> * s1,
 	                           const solid<T> * s2,
 	                           const vec3<T> & lp_delta,
-	                           const hop::convex_solid<T> & inflated_cs,
+	                           const convex_solid<T> & inflated_cs,
 	                           const vec3<T> & sh2_offset);
 	void friction_link(vec3<T> & result,
 	                   solid<T> * s,
@@ -830,7 +830,7 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 			break;
 		}
 		case shape_type::sphere: {
-			hop::sphere<T> sph;
+			sphere<T> sph;
 			sph.set(sh->sphere_);
 			add(sph, s->position_);
 			add(sph, lp);
@@ -838,7 +838,7 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 			break;
 		}
 		case shape_type::capsule: {
-			hop::capsule<T> cap;
+			capsule<T> cap;
 			cap.set(sh->capsule_);
 			add(cap, s->position_);
 			add(cap, lp);
@@ -846,7 +846,7 @@ template <typename T> void simulator<T>::test_segment(collision<T> & result, con
 			break;
 		}
 		case shape_type::convex_solid: {
-			hop::convex_solid<T> cs;
+			convex_solid<T> cs;
 			cs.set(*sh->convex_solid_);
 			segment<T> tmp;
 			tmp.set(seg);
@@ -969,7 +969,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::convex_solid) {
 				// Conservative: inflate sh2's planes by max half-extent of sh1's aa_box.
-				hop::convex_solid<T> cs;
+				convex_solid<T> cs;
 				cs.set(*sh2->convex_solid_);
 				vec3<T> half;
 				sub(half, sh1->box_.maxs, sh1->box_.mins);
@@ -1018,7 +1018,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				if (length_squared(diff) > limit) {
 					col.time = one;  // explicit miss; merge below leaves result untouched
 				} else {
-					hop::sphere<T> sph;
+					sphere<T> sph;
 					sph.set(origin, r_sum);
 					trace_sphere(col, seg, sph);
 				}
@@ -1028,11 +1028,11 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				add(origin, lp_delta);
 				sub(origin, sh1->sphere_.origin);
 				add(origin, sh2->capsule_.origin);
-				hop::capsule<T> cap;
+				capsule<T> cap;
 				cap.set(origin, sh2->capsule_.direction, sh2->capsule_.radius + sh1->sphere_.radius);
 				trace_capsule(col, seg, cap);
 			} else if (sh1->type_ == shape_type::sphere && sh2->type_ == shape_type::convex_solid) {
-				hop::convex_solid<T> cs;
+				convex_solid<T> cs;
 				cs.set(*sh2->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh1->sphere_.radius;
@@ -1060,14 +1060,14 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				vec3<T> dir;
 				dir.set(sh1->capsule_.direction);
 				neg(dir);
-				hop::capsule<T> cap;
+				capsule<T> cap;
 				cap.set(origin, dir, sh1->capsule_.radius + sh2->sphere_.radius);
 				trace_capsule(col, seg, cap);
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::convex_solid) {
 				// Inflate sh2's planes by sh1's capsule radius, then trace sh1's
 				// two spine endpoints as separate segments. Conservative
 				// Minkowski-sum approximation.
-				hop::convex_solid<T> cs;
+				convex_solid<T> cs;
 				cs.set(*sh2->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh1->capsule_.radius;
@@ -1103,7 +1103,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// Convex solid vs aa_box
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::box) {
-				hop::convex_solid<T> cs;
+				convex_solid<T> cs;
 				cs.set(*sh1->convex_solid_);
 				vec3<T> half;
 				sub(half, sh2->box_.maxs, sh2->box_.mins);
@@ -1122,7 +1122,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// Convex solid vs sphere
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::sphere) {
-				hop::convex_solid<T> cs;
+				convex_solid<T> cs;
 				cs.set(*sh1->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh2->sphere_.radius;
@@ -1130,7 +1130,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// Convex solid vs capsule
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::capsule) {
-				hop::convex_solid<T> cs;
+				convex_solid<T> cs;
 				cs.set(*sh1->convex_solid_);
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh2->capsule_.radius;
@@ -1151,7 +1151,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 			}
 			// Convex solid vs convex solid (exact Minkowski sum: inflate sh2's planes per sh1's support)
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::convex_solid) {
-				hop::convex_solid<T> cs;
+				convex_solid<T> cs;
 				cs.set(*sh2->convex_solid_);
 				for (auto & p : cs.planes) {
 					vec3<T> sup;
@@ -1321,7 +1321,7 @@ template <typename T> void simulator<T>::trace_aa_box(collision<T> & c, const se
 }
 
 template <typename T>
-void simulator<T>::trace_sphere(collision<T> & c, const segment<T> & seg, const hop::sphere<T> & sph) {
+void simulator<T>::trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sph) {
 	const T one = tr::one();
 	if (test_inside(sph, seg.origin)) {
 		vec3<T> n;
@@ -1345,13 +1345,13 @@ void simulator<T>::trace_sphere(collision<T> & c, const segment<T> & seg, const 
 }
 
 template <typename T>
-void simulator<T>::trace_capsule(collision<T> & c, const segment<T> & seg, const hop::capsule<T> & cap) {
+void simulator<T>::trace_capsule(collision<T> & c, const segment<T> & seg, const capsule<T> & cap) {
 	vec3<T> p1, p2;
 	segment<T> s;
 	s.origin.set(cap.origin);
 	s.direction.set(cap.direction);
 	project(p1, p2, s, seg, epsilon_);
-	hop::sphere<T> sph;
+	sphere<T> sph;
 	sph.set(p1, cap.radius);
 	trace_sphere(c, seg, sph);
 }
@@ -1372,7 +1372,7 @@ void simulator<T>::trace_capsule_capsule(
 	c.time = one;
 
 	// Edge 1: V0->V1 = capsule(base, D2, R) — sh1-start vs sh2-spine
-	hop::capsule<T> edge_cap;
+	capsule<T> edge_cap;
 	edge_cap.set(base, D2, radius);
 	collision<T> edge_col;
 	trace_capsule(edge_col, seg, edge_cap);
@@ -1511,7 +1511,7 @@ void simulator<T>::trace_capsule_capsule(
 }
 
 template <typename T>
-void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, const hop::convex_solid<T> & cs) {
+void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, const convex_solid<T> & cs) {
 	const T one = tr::one();
 	T zero_val {};
 	c.time = one;
@@ -1573,7 +1573,7 @@ void simulator<T>::trace_forward_convex(collision<T> & col,
                                         const segment<T> & seg,
                                         const solid<T> * s2,
                                         const vec3<T> & lp2,
-                                        const hop::convex_solid<T> & inflated_cs,
+                                        const convex_solid<T> & inflated_cs,
                                         const vec3<T> & sh1_offset) {
 	segment<T> tmp;
 	tmp.set(seg);
@@ -1595,7 +1595,7 @@ void simulator<T>::trace_inverted_convex(collision<T> & col,
                                          const solid<T> * s1,
                                          const solid<T> * s2,
                                          const vec3<T> & lp_delta,
-                                         const hop::convex_solid<T> & inflated_cs,
+                                         const convex_solid<T> & inflated_cs,
                                          const vec3<T> & sh2_offset) {
 	segment<T> tmp;
 	mul(tmp.direction, seg.direction, -tr::one());
