@@ -62,6 +62,7 @@ template <typename T> static void run() {
 	hop::simulator<T> sim;
 	hop::bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
+	sim.set_deactivate_count(32);
 
 	T half  = fi(ROOM_HALF);
 	T hgt   = fi(ROOM_HEIGHT);
@@ -168,7 +169,8 @@ template <typename T> static void run() {
 		for (auto & s : spheres) {
 			Vector3 p     = to_rl(s->get_position());
 			float   speed = tr::to_float(hop::length(s->get_velocity()));
-			DrawSphereEx(p, SPHERE_R, 4, 6, heat_color(speed));
+			Color   color = s->active() ? heat_color(speed) : GRAY;
+			DrawSphereEx(p, SPHERE_R, 4, 6, color);
 		}
 
 		EndMode3D();
@@ -195,6 +197,6 @@ template <typename T> static void run() {
 }
 
 int main() {
-	run<float>();
+	run<double>();
 	return 0;
 }

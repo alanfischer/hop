@@ -5,14 +5,12 @@
 
 namespace hop {
 
-// Epsilon state — differs between float (stores 1/epsilon) and fixed16 (stores bit count)
-template <typename T> struct epsilon_state;
-
-template <> struct epsilon_state<float> {
-	float epsilon = 0;
-	float half_epsilon = 0;
-	float quarter_epsilon = 0;
-	float one_over_epsilon = 0;
+// Epsilon state — differs between floating-point (stores 1/epsilon) and fixed16 (stores bit count)
+template <typename T> struct epsilon_state {
+	T epsilon = 0;
+	T half_epsilon = 0;
+	T quarter_epsilon = 0;
+	T one_over_epsilon = 0;
 };
 
 template <> struct epsilon_state<fixed16> {
@@ -294,6 +292,74 @@ template <> struct scalar_traits<fixed16> {
 	// Snap to grid (fixed version — bit-shift)
 	static void snap_to_grid(fixed16 & v, const epsilon_state<fixed16> & s) {
 		v.raw = (((v.raw + (s.half_epsilon.raw * -(v.raw < 0))) >> s.epsilon_bits) << s.epsilon_bits);
+	}
+};
+
+// scalar_traits<double>
+template <> struct scalar_traits<double> {
+	using type = double;
+
+	static constexpr double one() { return 1.0; }
+	static constexpr double zero() { return 0.0; }
+	static constexpr double half() { return 0.5; }
+	static constexpr double two() { return 2.0; }
+	static constexpr double three() { return 3.0; }
+	static constexpr double four() { return 4.0; }
+	static constexpr double quarter() { return 0.25; }
+	static constexpr double third() { return 1.0 / 3.0; }
+	static constexpr double two_thirds() { return 2.0 / 3.0; }
+	static constexpr double pi() { return 3.14159265358979323846; }
+	static constexpr double two_pi() { return pi() * 2.0; }
+	static constexpr double half_pi() { return pi() / 2.0; }
+
+	static constexpr double from_milli(int m) { return static_cast<double>(m) / 1000.0; }
+	static constexpr double from_int(int i) { return static_cast<double>(i); }
+	static constexpr int to_int(double v) { return static_cast<int>(v); }
+	static constexpr float to_float(double v) { return static_cast<float>(v); }
+
+	static double abs(double v) { return std::fabs(v); }
+	static double sqrt(double v) { return std::sqrt(v); }
+	static double sin(double v) { return std::sin(v); }
+	static double cos(double v) { return std::cos(v); }
+	static double asin(double v) { return std::asin(v); }
+	static double acos(double v) { return std::acos(v); }
+	static double atan2(double y, double x) { return std::atan2(y, x); }
+
+	static bool is_real(double v) { return !std::isnan(v) && !std::isinf(v); }
+
+	static double min_val(double a, double b) { return a < b ? a : b; }
+	static double max_val(double a, double b) { return a > b ? a : b; }
+	static double clamp(double low, double high, double v) { return min_val(high, max_val(low, v)); }
+
+	static double mul(double a, double b) { return a * b; }
+	static double div(double a, double b) { return a / b; }
+	static double madd(double a, double b, double c) { return a * b + c; }
+	static double square(double v) { return v * v; }
+
+	// Epsilon
+	static void make_epsilon(epsilon_state<double> & s, double epsilon) {
+		s.epsilon = epsilon;
+		s.one_over_epsilon = 1.0 / epsilon;
+		s.half_epsilon = epsilon * 0.5;
+		s.quarter_epsilon = epsilon * 0.25;
+	}
+
+	static double default_epsilon() { return 0.001; }
+	static double default_max_position_component() { return 100000.0; }
+	static double default_max_velocity_component() { return 1000.0; }
+	static double default_max_force_component() { return 1000.0; }
+	static double default_deactivate_speed(const epsilon_state<double> & s) { return s.epsilon * 2.0; }
+
+	// Cap — clamp + NaN guard
+	static double cap(double v, double limit) {
+		v = max_val(-limit, v);
+		v = min_val(limit, v);
+		return is_real(v) ? v : 0.0;
+	}
+
+	// Snap to grid (double version)
+	static void snap_to_grid(double & v, const epsilon_state<double> & s) {
+		v = static_cast<int64_t>((v + (s.half_epsilon * -(v < 0))) * s.one_over_epsilon) * s.epsilon;
 	}
 };
 
