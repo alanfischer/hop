@@ -2,7 +2,7 @@
 
 A standalone, header-only C++17 physics library for swept-collision simulation. Extracted from the [Toadlet](https://github.com/alanfischer/toadlet) game engine.
 
-Supports both `float` and 16.16 `fixed16` scalar types via template parameterization, allowing deterministic fixed-point physics alongside standard floating-point in the same binary.
+Supports `float`, `double`, `fixed16`, and `fixed32` scalar types via template parameterization, allowing deterministic fixed-point physics alongside standard floating-point in the same binary.
 
 ![demo_bounce — box, sphere, and capsules bouncing inside a room with collision sparks and a spring-constraint pendulum](docs/demo_bounce.gif)
 
@@ -29,7 +29,7 @@ Rotational support is a work in progress — see `docs/rotation_plan.md` for the
 - **BVH spatial acceleration** — bounding volume hierarchy for broad-phase collision queries via `bvh_manager`
 - **Collision scopes** — bitmask filtering for selective collision groups, plus `trigger_scope` for damage-zone / sensor-volume tagging
 - **Per-solid collision filters** — custom `std::function` callback for fine-grained collision filtering
-- **Fixed-point arithmetic** — `fixed16` type with polynomial sin/cos/atan2, Newton-Raphson sqrt, and branchless min/max/abs
+- **Fixed-point arithmetic** — `fixed16` & `fixed32` types with polynomial sin/cos/atan2, Newton-Raphson sqrt, and branchless min/max/abs
 - **JavaScript bindings** — WebAssembly build via Emscripten/embind for browser-based physics
 - **Zero external dependencies** — only the C++ standard library
 - **Zero-allocation hot paths** — the simulator runs a full tick without heap allocation; scratch state is stack-resident
@@ -194,7 +194,8 @@ Requires a C++17 compiler. Header-only — link against the `hop` CMake interfac
 include/hop/
   hop.h                  # umbrella header
   fixed16.h              # 16.16 fixed-point type
-  scalar_traits.h        # scalar_traits<float> and scalar_traits<fixed16>
+  fixed32.h              # 32.32 fixed-point type
+  scalar_traits.h        # scalar_traits<float>, scalar_traits<double>, scalar_traits<fixed16>, scalar_traits<fixed32>
   simulator.h            # physics simulation loop
   solid.h                # dynamic/static physics body
   shape.h                # collision geometry (box, sphere, capsule, convex)
