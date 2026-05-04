@@ -249,7 +249,8 @@ public:
 	}
 
 	bool too_small(const vec3<T> & v, T epsilon) const {
-		return v.x < epsilon && v.x > -epsilon && v.y < epsilon && v.y > -epsilon && v.z < epsilon && v.z > -epsilon;
+		T x = v.x, y = v.y, z = v.z;
+		return x < epsilon && x > -epsilon && y < epsilon && y > -epsilon && z < epsilon && z > -epsilon;
 	}
 
 	int count_active_solids() const {
