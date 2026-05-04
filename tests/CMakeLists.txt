@@ -5,6 +5,10 @@ add_executable(test_fixed16 test_fixed16.cpp)
 target_link_libraries(test_fixed16 PRIVATE hop)
 add_test(NAME test_fixed16 COMMAND test_fixed16)
 
+add_executable(test_fixed32 test_fixed32.cpp)
+target_link_libraries(test_fixed32 PRIVATE hop)
+add_test(NAME test_fixed32 COMMAND test_fixed32)
+
 add_executable(test_vec3 test_vec3.cpp)
 target_link_libraries(test_vec3 PRIVATE hop)
 add_test(NAME test_vec3 COMMAND test_vec3)

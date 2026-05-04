@@ -92,8 +92,8 @@ inline void for_each_convex_solid_vertex(const convex_solid<T> & cs, T epsilon, 
 // users who want to pay the O(n^4) enumeration up front (e.g. at load time).
 template <typename T> inline void rebuild_vertices(convex_solid<T> & cs) {
 	T epsilon;
-	if constexpr (std::is_same_v<T, fixed16>)
-		epsilon = fixed16::from_raw(1 << 4);
+	if constexpr (is_fixed_scalar_v<T>)
+		epsilon = scalar_traits<T>::from_milli(1);
 	else
 		epsilon = T(0.0001);
 
@@ -108,8 +108,8 @@ template <typename T> inline void ensure_vertices(const convex_solid<T> & cs) {
 	if (!cs.vertices.empty() || cs.planes.empty())
 		return;
 	T epsilon;
-	if constexpr (std::is_same_v<T, fixed16>)
-		epsilon = fixed16::from_raw(1 << 4);
+	if constexpr (is_fixed_scalar_v<T>)
+		epsilon = scalar_traits<T>::from_milli(1);
 	else
 		epsilon = T(0.0001);
 	for_each_convex_solid_vertex(cs, epsilon, [&](const vec3<T> & v) { cs.vertices.push_back(v); });
