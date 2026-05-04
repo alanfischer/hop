@@ -41,7 +41,7 @@ public:
 
 	// Epsilon
 	void set_epsilon(T epsilon) {
-		static_assert(std::is_same_v<T, float>, "set_epsilon only for float; use set_epsilon_bits for fixed16");
+		static_assert(!std::is_same_v<T, fixed16>, "set_epsilon not available for fixed16; use set_epsilon_bits");
 		tr::make_epsilon(epsilon_state_, epsilon);
 		epsilon_ = epsilon_state_.epsilon;
 		half_epsilon_ = epsilon_state_.half_epsilon;
