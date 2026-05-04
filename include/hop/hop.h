@@ -4,6 +4,7 @@
 // Extracted from the Toadlet Engine's hop module
 
 #include <hop/fixed16.h>
+#include <hop/fixed32.h>
 #include <hop/fwd.h>
 #include <hop/scalar_traits.h>
 

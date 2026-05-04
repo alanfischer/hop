@@ -2,10 +2,16 @@
 
 #include <cmath>
 #include <hop/fixed16.h>
+#include <hop/fixed32.h>
 
 namespace hop {
 
-// Epsilon state — differs between floating-point (stores 1/epsilon) and fixed16 (stores bit count)
+template <typename T> struct is_fixed_scalar : std::false_type {};
+template <> struct is_fixed_scalar<fixed16> : std::true_type {};
+template <> struct is_fixed_scalar<fixed32> : std::true_type {};
+template <typename T> inline constexpr bool is_fixed_scalar_v = is_fixed_scalar<T>::value;
+
+// Epsilon state — differs between floating-point (stores 1/epsilon) and fixed types (stores bit count)
 template <typename T> struct epsilon_state {
 	T epsilon = 0;
 	T half_epsilon = 0;
@@ -18,6 +24,13 @@ template <> struct epsilon_state<fixed16> {
 	fixed16 epsilon = {};
 	fixed16 half_epsilon = {};
 	fixed16 quarter_epsilon = {};
+};
+
+template <> struct epsilon_state<fixed32> {
+	int epsilon_bits = 0;
+	fixed32 epsilon = {};
+	fixed32 half_epsilon = {};
+	fixed32 quarter_epsilon = {};
 };
 
 // scalar_traits<float>
@@ -345,6 +358,206 @@ template <> struct scalar_traits<fixed16> {
 	// Cap — branchless clamp (no NaN possible for fixed)
 	static constexpr fixed16 cap(fixed16 v, fixed16 limit) {
 		return min_val(limit, max_val(fixed16::from_raw(-limit.raw), v));
+	}
+};
+
+// scalar_traits<fixed32>
+template <> struct scalar_traits<fixed32> {
+	using type = fixed32;
+
+	static constexpr fixed32 one() { return fixed32::from_raw(4294967296LL); }
+	static constexpr fixed32 zero() { return fixed32::from_raw(0); }
+	static constexpr fixed32 half() { return fixed32::from_raw(2147483648LL); }
+	static constexpr fixed32 two() { return fixed32::from_raw(8589934592LL); }
+	static constexpr fixed32 three() { return fixed32::from_raw(12884901888LL); }
+	static constexpr fixed32 four() { return fixed32::from_raw(17179869184LL); }
+	static constexpr fixed32 quarter() { return fixed32::from_raw(1073741824LL); }
+	static constexpr fixed32 third() { return fixed32::from_raw(1431655765LL); }
+	static constexpr fixed32 two_thirds() { return fixed32::from_raw(2863311530LL); }
+	static constexpr fixed32 pi() { return fixed32::from_raw(13493037705LL); }
+	static constexpr fixed32 two_pi() { return fixed32::from_raw(26986075410LL); }
+	static constexpr fixed32 half_pi() { return fixed32::from_raw(6746518852LL); }
+
+	static constexpr fixed32 from_milli(int m) { return fixed32::from_milli(m); }
+	static constexpr fixed32 from_int(int i) { return fixed32::from_int(i); }
+	static constexpr int to_int(fixed32 v) { return v.to_int(); }
+	static constexpr float to_float(fixed32 v) { return v.to_float(); }
+
+	// Bit-hack abs
+	static constexpr fixed32 abs(fixed32 v) { return fixed32::from_raw((v.raw ^ (v.raw >> 63)) - (v.raw >> 63)); }
+
+	// Newton-Raphson sqrt with bit-scan initial guess.
+	//
+	// For Q32.32 raw r (representing r / 2^32), sqrt value = sqrt(r) / 2^16,
+	// and the raw of that is sqrt(r) * 2^16. When r ≈ 2^n (n = highest set bit),
+	// sqrt(r) ≈ 2^(n/2), so sqrt_raw ≈ 2^(n/2 + 16). 4 iterations of Newton
+	// converge to <1e-9 relative error from the initial within-√2 guess.
+	static fixed32 sqrt(fixed32 v) {
+		if (v.raw <= 0)
+			return zero();
+		int64_t r = v.raw;
+		int n = 0;
+		if (r & 0xFFFFFFFF00000000LL) { n |= 32; r >>= 32; }
+		if (r & 0x00000000FFFF0000LL) { n |= 16; r >>= 16; }
+		if (r & 0x000000000000FF00LL) { n |=  8; r >>=  8; }
+		if (r & 0x00000000000000F0LL) { n |=  4; r >>=  4; }
+		if (r & 0x000000000000000CLL) { n |=  2; r >>=  2; }
+		if (r & 0x0000000000000002LL) { n |=  1; }
+		int64_t s = 1LL << ((n >> 1) + 16);
+		for (int i = 0; i < 4; ++i) {
+			s = (s + detail::shl32_div(v.raw, s)) >> 1;
+		}
+		return fixed32::from_raw(s);
+	}
+
+	// Polynomial sin — same minimax approximation as fixed16, rescaled to Q32.32.
+	static fixed32 sin(fixed32 f) {
+		constexpr int64_t two_pi_raw = 26986075410LL;
+		constexpr int64_t pi_raw = 13493037705LL;
+		constexpr int64_t half_pi_raw = 6746518852LL;
+		constexpr int64_t one_raw = 4294967296LL;
+
+		if (f.raw < 0)
+			f.raw = ((f.raw % two_pi_raw) + two_pi_raw);
+		else if (f.raw >= two_pi_raw)
+			f.raw = f.raw % two_pi_raw;
+
+		int sign = 1;
+		if (f.raw > half_pi_raw && f.raw <= pi_raw) {
+			f.raw = pi_raw - f.raw;
+		} else if (f.raw > pi_raw && f.raw <= pi_raw + half_pi_raw) {
+			f.raw = f.raw - pi_raw;
+			sign = -1;
+		} else if (f.raw > pi_raw + half_pi_raw) {
+			f.raw = two_pi_raw - f.raw;
+			sign = -1;
+		}
+
+		int64_t sqr = detail::mul_shr32(f.raw, f.raw);
+		int64_t result = 498LL << 16;
+		result = detail::mul_shr32(result, sqr);
+		result -= 10882LL << 16;
+		result = detail::mul_shr32(result, sqr);
+		result += one_raw;
+		result = detail::mul_shr32(result, f.raw);
+		return fixed32::from_raw(sign * result);
+	}
+
+	// Polynomial cos — same minimax approximation as fixed16, rescaled to Q32.32.
+	static fixed32 cos(fixed32 f) {
+		constexpr int64_t two_pi_raw = 26986075410LL;
+		constexpr int64_t pi_raw = 13493037705LL;
+		constexpr int64_t half_pi_raw = 6746518852LL;
+		constexpr int64_t one_raw = 4294967296LL;
+
+		if (f.raw < 0)
+			f.raw = ((f.raw % two_pi_raw) + two_pi_raw);
+		else if (f.raw >= two_pi_raw)
+			f.raw = f.raw % two_pi_raw;
+
+		int sign = 1;
+		if (f.raw > half_pi_raw && f.raw <= pi_raw) {
+			f.raw = pi_raw - f.raw;
+			sign = -1;
+		} else if (f.raw > pi_raw && f.raw <= pi_raw + half_pi_raw) {
+			f.raw = f.raw - pi_raw;
+			sign = -1;
+		} else if (f.raw > pi_raw + half_pi_raw) {
+			f.raw = two_pi_raw - f.raw;
+		}
+
+		int64_t sqr = detail::mul_shr32(f.raw, f.raw);
+		int64_t result = 2328LL << 16;
+		result = detail::mul_shr32(result, sqr);
+		result -= 32551LL << 16;
+		result = detail::mul_shr32(result, sqr);
+		result += one_raw;
+		return fixed32::from_raw(result * sign);
+	}
+
+	// Polynomial asin — same approximation as fixed16, rescaled to Q32.32.
+	static fixed32 asin(fixed32 f) {
+		constexpr int64_t one_raw = 4294967296LL;
+		constexpr int64_t half_pi_raw = 6746518852LL;
+		int64_t f_root = sqrt(fixed32::from_raw(one_raw - f.raw)).raw;
+		int64_t result = -(1228LL << 16);
+		result = detail::mul_shr32(result, f.raw);
+		result += 4866LL << 16;
+		result = detail::mul_shr32(result, f.raw);
+		result -= 13901LL << 16;
+		result = detail::mul_shr32(result, f.raw);
+		result += 102939LL << 16;
+		result = half_pi_raw - detail::mul_shr32(f_root, result);
+		return fixed32::from_raw(result);
+	}
+
+	// Polynomial acos — same approximation as fixed16, rescaled to Q32.32.
+	static fixed32 acos(fixed32 f) {
+		constexpr int64_t one_raw = 4294967296LL;
+		int64_t f_root = sqrt(fixed32::from_raw(one_raw - f.raw)).raw;
+		int64_t result = -(1228LL << 16);
+		result = detail::mul_shr32(result, f.raw);
+		result += 4866LL << 16;
+		result = detail::mul_shr32(result, f.raw);
+		result -= 13901LL << 16;
+		result = detail::mul_shr32(result, f.raw);
+		result += 102939LL << 16;
+		result = detail::mul_shr32(f_root, result);
+		return fixed32::from_raw(result);
+	}
+
+	// Polynomial atan2 — same approximation as fixed16, rescaled to Q32.32.
+	static fixed32 atan2(fixed32 y, fixed32 x) {
+		constexpr int64_t quarter_pi_raw = 3373259426LL;
+		constexpr int64_t three_quarter_pi_raw = 10119778279LL;
+
+		int64_t absy = ((y.raw ^ (y.raw >> 63)) - (y.raw >> 63)) + 1;
+		int64_t angle;
+		if (x.raw >= 0) {
+			int64_t r = detail::shl32_div(x.raw - absy, x.raw + absy);
+			angle = quarter_pi_raw - detail::mul_shr32(quarter_pi_raw, r);
+		} else {
+			int64_t r = detail::shl32_div(x.raw + absy, y.raw - absy);
+			angle = three_quarter_pi_raw - detail::mul_shr32(quarter_pi_raw, r);
+		}
+		return fixed32::from_raw(y.raw < 0 ? -angle : angle);
+	}
+
+	static constexpr bool is_real(fixed32) { return true; }
+
+	static constexpr fixed32 min_val(fixed32 a, fixed32 b) {
+		return fixed32::from_raw(b.raw + ((a.raw - b.raw) & -(int64_t)(a.raw < b.raw)));
+	}
+
+	static constexpr fixed32 max_val(fixed32 a, fixed32 b) {
+		return fixed32::from_raw(a.raw - ((a.raw - b.raw) & -(int64_t)(a.raw < b.raw)));
+	}
+
+	static constexpr fixed32 clamp(fixed32 low, fixed32 high, fixed32 v) { return min_val(high, max_val(low, v)); }
+
+	static constexpr fixed32 mul(fixed32 a, fixed32 b) { return a * b; }
+	static constexpr fixed32 div(fixed32 a, fixed32 b) { return a / b; }
+	static constexpr fixed32 madd(fixed32 a, fixed32 b, fixed32 c) { return a * b + c; }
+	static constexpr fixed32 square(fixed32 v) { return v * v; }
+
+	// Epsilon (fixed uses bit-shift; default gives same float epsilon as fixed16's default of 4 bits)
+	static void make_epsilon(epsilon_state<fixed32> & s, int epsilon_bits) {
+		s.epsilon_bits = epsilon_bits;
+		s.epsilon = fixed32::from_raw(1LL << epsilon_bits);
+		s.half_epsilon = fixed32::from_raw(s.epsilon.raw >> 1);
+		s.quarter_epsilon = fixed32::from_raw(s.epsilon.raw >> 2);
+	}
+
+	static int default_epsilon_bits() { return 20; }
+	static fixed32 default_max_position_component() { return fixed32::from_int(100000); }
+	static fixed32 default_max_velocity_component() { return fixed32::from_int(1000); }
+	static fixed32 default_max_force_component() { return fixed32::from_int(1000); }
+	// 2^-8 ≈ 0.0039, matching fixed16's default_deactivate_speed of from_raw(1 << 8) / 2^16
+	static fixed32 default_deactivate_speed(const epsilon_state<fixed32> &) { return fixed32::from_raw(1LL << 24); }
+
+	// Cap — branchless clamp (no NaN possible for fixed)
+	static constexpr fixed32 cap(fixed32 v, fixed32 limit) {
+		return min_val(limit, max_val(fixed32::from_raw(-limit.raw), v));
 	}
 };
 

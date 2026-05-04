@@ -197,6 +197,6 @@ template <typename T> static void run() {
 }
 
 int main() {
-	run<double>();
+	run<hop::fixed32>();
 	return 0;
 }

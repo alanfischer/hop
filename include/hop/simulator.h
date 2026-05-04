@@ -41,7 +41,7 @@ public:
 
 	// Epsilon
 	void set_epsilon(T epsilon) {
-		static_assert(!std::is_same_v<T, fixed16>, "set_epsilon not available for fixed16; use set_epsilon_bits");
+		static_assert(!is_fixed_scalar_v<T>, "set_epsilon not available for fixed types; use set_epsilon_bits");
 		tr::make_epsilon(epsilon_state_, epsilon);
 		epsilon_ = epsilon_state_.epsilon;
 		half_epsilon_ = epsilon_state_.half_epsilon;
@@ -49,7 +49,7 @@ public:
 	}
 
 	void set_epsilon_bits(int bits) {
-		static_assert(std::is_same_v<T, fixed16>, "set_epsilon_bits only for fixed16; use set_epsilon for float");
+		static_assert(is_fixed_scalar_v<T>, "set_epsilon_bits only for fixed types; use set_epsilon for float/double");
 		tr::make_epsilon(epsilon_state_, bits);
 		epsilon_ = epsilon_state_.epsilon;
 		half_epsilon_ = epsilon_state_.half_epsilon;
@@ -262,7 +262,7 @@ public:
 
 private:
 	void init_epsilon_defaults() {
-		if constexpr (std::is_same_v<T, fixed16>) {
+		if constexpr (is_fixed_scalar_v<T>) {
 			set_epsilon_bits(tr::default_epsilon_bits());
 		} else {
 			set_epsilon(tr::default_epsilon());

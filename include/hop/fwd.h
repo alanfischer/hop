@@ -5,6 +5,7 @@
 namespace hop {
 
 struct fixed16;
+struct fixed32;
 template <typename T> struct vec3;
 template <typename T> struct aa_box;
 template <typename T> struct sphere;
