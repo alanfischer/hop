@@ -62,8 +62,6 @@ public:
 	void set_integrator(integrator_type i) { integrator_ = i; }
 	integrator_type get_integrator() const { return integrator_; }
 
-	void set_snap_to_grid(bool s) { snap_to_grid_ = s; }
-	bool get_snap_to_grid() const { return snap_to_grid_; }
 	void set_average_normals(bool a) { average_normals_ = a; }
 	bool get_average_normals() const { return average_normals_; }
 
@@ -240,27 +238,13 @@ public:
 	}
 
 	void calculate_epsilon_offset(vec3<T> & result, const vec3<T> & direction, const vec3<T> & normal) const {
-		if (snap_to_grid_) {
-			result.x = (normal.x >= quarter_epsilon_) ? epsilon_ : ((normal.x <= -quarter_epsilon_) ? -epsilon_ : T {});
-			result.y = (normal.y >= quarter_epsilon_) ? epsilon_ : ((normal.y <= -quarter_epsilon_) ? -epsilon_ : T {});
-			result.z = (normal.z >= quarter_epsilon_) ? epsilon_ : ((normal.z <= -quarter_epsilon_) ? -epsilon_ : T {});
+		T len = length(direction);
+		if (len > epsilon_) {
+			result.x = (-direction.x / len) * epsilon_;
+			result.y = (-direction.y / len) * epsilon_;
+			result.z = (-direction.z / len) * epsilon_;
 		} else {
-			T len = length(direction);
-			if (len > epsilon_) {
-				result.x = (-direction.x / len) * epsilon_;
-				result.y = (-direction.y / len) * epsilon_;
-				result.z = (-direction.z / len) * epsilon_;
-			} else {
-				result.reset();
-			}
-		}
-	}
-
-	void snap_to_grid_vec(vec3<T> & pos) const {
-		if (snap_to_grid_) {
-			tr::snap_to_grid(pos.x, epsilon_state_);
-			tr::snap_to_grid(pos.y, epsilon_state_);
-			tr::snap_to_grid(pos.z, epsilon_state_);
+			result.reset();
 		}
 	}
 
@@ -382,7 +366,6 @@ private:
 	T epsilon_ {};
 	T half_epsilon_ {};
 	T quarter_epsilon_ {};
-	bool snap_to_grid_ = false;
 	bool average_normals_ = false;
 	T max_position_component_ {};
 	T max_velocity_component_ {};
@@ -499,9 +482,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 		manager_->intra_update(solid_ptr, dt, fdt);
 	}
 
-	snap_to_grid_vec(old_pos);
 	cap_vec3(old_pos, max_position_component_);
-	snap_to_grid_vec(new_pos);
 	cap_vec3(new_pos, max_position_component_);
 
 	// Collect spacials
@@ -541,8 +522,6 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 	loop = 0;
 	while (!skip) {
 		if (!first) {
-			snap_to_grid_vec(old_pos);
-			snap_to_grid_vec(new_pos);
 			sub(temp, new_pos, old_pos);
 			if (too_small(temp, epsilon_)) {
 				new_pos.set(old_pos);
@@ -554,7 +533,6 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 		trace_solid_with_current_spacials(c, solid_ptr, path, solid_ptr->collide_with_scope_);
 
 		if (c.time < one) {
-			snap_to_grid_vec(c.point);
 			sub(left_over, c.point, old_pos);
 			calculate_epsilon_offset(old_pos, left_over, c.normal);
 			add(old_pos, c.point);
