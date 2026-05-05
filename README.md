@@ -126,6 +126,23 @@ if (r.trigger_scope & 0x4) {
 
 Trigger bits work for primitive shapes and traceable meshes alike, so a `convex_solid` or trimesh trigger volume reports the same way as a sphere.
 
+## User Data
+
+Each `solid` carries an opaque `void *` user data pointer for associating game-engine objects with physics bodies without any allocation:
+
+```cpp
+struct GameObject { /* ... */ };
+GameObject obj;
+
+auto s = std::make_shared<solid<float>>();
+s->set_user_data(&obj);
+
+// Later, in a collision callback or query loop:
+auto * go = static_cast<GameObject *>(s->get_user_data());
+```
+
+The pointer is `nullptr` by default and is cleared on `solid::reset()`. It is not interpreted or dereferenced by the simulator.
+
 ## Usage
 
 ```cpp
