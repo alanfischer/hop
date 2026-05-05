@@ -234,7 +234,7 @@ async function main() {
 	function animate() {
 		requestAnimationFrame(animate);
 
-		sim.update(16);
+		sim.update(0.016);
 
 		// Update mesh positions (Z-up → Y-up)
 		boxMesh.position.set(...hopToThree(box.getPosition()));

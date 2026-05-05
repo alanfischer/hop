@@ -16,6 +16,7 @@ template <typename T> struct collision {
 	using tr = scalar_traits<T>;
 
 	T time = tr::one();
+	T depth = T {};
 	vec3<T> point;
 	vec3<T> impact;
 	vec3<T> normal;
@@ -29,6 +30,7 @@ template <typename T> struct collision {
 
 	collision & set(const collision & c) {
 		time = c.time;
+		depth = c.depth;
 		point.set(c.point);
 		impact.set(c.impact);
 		normal.set(c.normal);
@@ -41,6 +43,7 @@ template <typename T> struct collision {
 
 	collision & reset() {
 		time = tr::one();
+		depth = T {};
 		point.reset();
 		impact.reset();
 		normal.reset();

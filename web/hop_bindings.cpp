@@ -6,7 +6,7 @@
 //   solid.setMass(1);
 //   solid.addShape(Module.HopShape.box(0.5, 0.5, 0.5));
 //   solid.setPosition(1, 0, 4);
-//   sim.update(16);
+//   sim.update(0.016);
 //   const pos = solid.getPosition(); // {x, y, z}
 
 #include <emscripten/bind.h>
@@ -115,7 +115,7 @@ public:
 	HopSimulator() = default;
 
 	void setGravity(float x, float y, float z) { sim_.set_gravity(hop::vec3<float>(x, y, z)); }
-	void update(int dt_ms) { sim_.update(dt_ms, hop::simulator<float>::scope_report_collisions); }
+	void update(float dt) { sim_.update(dt, hop::simulator<float>::scope_report_collisions); }
 
 	HopSolid addSolid() {
 		auto s = std::make_shared<hop::solid<float>>();

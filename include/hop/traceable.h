@@ -30,6 +30,13 @@ template <typename T> class solid;
 //                   top of trace_solid and run a static Minkowski-sum overlap
 //                   check (see HopTrimeshTraceable for a reference
 //                   implementation).
+//
+//                   When returning t=0 (overlap), also set `result.depth` to
+//                   the penetration depth — the distance the solid must move
+//                   along `result.normal` to reach the surface.  The simulator
+//                   uses this for position correction.  Leaving it at 0 falls
+//                   back to the old epsilon-nudge behaviour, which is safe but
+//                   slower to resolve deep penetrations.
 template <typename T> class traceable {
 public:
 	virtual ~traceable() = default;

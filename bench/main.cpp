@@ -135,7 +135,7 @@ template <typename T> static void bench_full_tick(const char * label) {
 	}
 
 	// Measure ms/tick over a long run so the number is stable.
-	bench::go("sim->update(10ms)", 5000, [&] { sim->update(10); });
+	bench::go("sim->update(10ms)", 5000, [&] { sim->update(tr::from_milli(10)); });
 }
 
 // ----------------------------------------------------------------------------
@@ -193,6 +193,7 @@ template <typename T> static void setup_stress_scene(simulator<T> & sim, int n) 
 }
 
 template <typename T> static void bench_stress(const char * label) {
+	using tr = scalar_traits<T>;
 	printf("[stress %s]\n", label);
 
 	// Tune iterations so each sweep runs in ~1s even at the largest N.
@@ -206,7 +207,7 @@ template <typename T> static void bench_stress(const char * label) {
 			setup_stress_scene(*sim, c.n);
 			char name[64];
 			std::snprintf(name, sizeof(name), "N=%d linear", c.n);
-			bench::go(name, c.iters, [&] { sim->update(10); });
+			bench::go(name, c.iters, [&] { sim->update(tr::from_milli(10)); });
 		}
 		// BVH broad-phase.
 		{
@@ -221,7 +222,7 @@ template <typename T> static void bench_stress(const char * label) {
 				mgr.add_solid(sim->get_solid(i), i < 6);
 			char name[64];
 			std::snprintf(name, sizeof(name), "N=%d bvh", c.n);
-			bench::go(name, c.iters, [&] { sim->update(10); });
+			bench::go(name, c.iters, [&] { sim->update(tr::from_milli(10)); });
 		}
 	}
 }
