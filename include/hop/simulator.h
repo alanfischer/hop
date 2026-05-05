@@ -150,12 +150,11 @@ public:
 	}
 
 	// Main update
-	void update(int dt, int scope = 0, solid<T> * target = nullptr) {
-		T fdt = tr::from_milli(dt);
+	void update(T dt, int scope = 0, solid<T> * target = nullptr) {
 		num_collisions_ = 0;
 		++current_tick_;
 		if (manager_)
-			manager_->pre_update(dt, fdt);
+			manager_->pre_update(dt);
 
 		// Manager may suggest a spatial-locality iteration order. Contract:
 		// when non-null, it must contain every solid the simulator should
@@ -174,23 +173,23 @@ public:
 				continue;
 
 			if (manager_) {
-				manager_->pre_update(s, dt, fdt);
+				manager_->pre_update(s, dt);
 			}
 
-			update_solid(s, dt, fdt);
+			update_solid(s, dt);
 
 			if (manager_) {
-				manager_->post_update(s, dt, fdt);
+				manager_->post_update(s, dt);
 			}
 		}
 
 		if (scope & scope_report_collisions)
 			report_collisions();
 		if (manager_)
-			manager_->post_update(dt, fdt);
+			manager_->post_update(dt);
 	}
 
-	void update_solid(solid<T> * solid_ptr, int dt, T fdt);
+	void update_solid(solid<T> * solid_ptr, T dt);
 
 	// Find solids in box
 	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) const {
@@ -345,18 +344,18 @@ private:
 	                   solid<T> * hit,
 	                   const vec3<T> & hit_normal,
 	                   const vec3<T> & applied_force,
-	                   T fdt);
+	                   T dt);
 	// Apply Coulomb friction impulse at the moment of collision, opposing the
 	// tangential relative velocity, capped by µ_d * |normal_impulse|.
 	void collision_friction(solid<T> * s, solid<T> * hit, const collision<T> & c, T normal_impulse, T one_over_mass);
 	void constraint_link(vec3<T> & result, solid<T> * s, const vec3<T> & solid_pos, const vec3<T> & solid_vel);
-	void update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T fdt);
+	void update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T dt);
 	void integration_step(solid<T> * s,
 	                      const vec3<T> & x,
 	                      const vec3<T> & v,
 	                      const vec3<T> & dx,
 	                      const vec3<T> & dv,
-	                      T fdt,
+	                      T dt,
 	                      vec3<T> & result_x,
 	                      vec3<T> & result_v);
 
@@ -390,7 +389,7 @@ private:
 // Implementation
 // ============================================================================
 
-template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int dt, T fdt) {
+template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt) {
 	vec3<T> old_pos;
 	vec3<T> new_pos;
 	vec3<T> old_vel;
@@ -415,60 +414,60 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 
 	// Integration
 	if (integrator_ == integrator_type::euler) {
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, fdt, dx1, dv1);
-		mul(new_pos, dx1, fdt);
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, dt, dx1, dv1);
+		mul(new_pos, dx1, dt);
 		add(new_pos, old_pos);
-		mul(vel, dv1, fdt);
+		mul(vel, dv1, dt);
 		add(vel, solid_ptr->velocity_);
 	} else if (integrator_ == integrator_type::improved) {
-		T hfdt = fdt / two;
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, fdt, dx1, dv1);
+		T hdt = dt / two;
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, dt, dx1, dv1);
 		new_pos.set(dx1);
 		vel.set(dv1);
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx1, dv1, fdt, dx2, dv2);
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx1, dv1, dt, dx2, dv2);
 		add(new_pos, dx2);
-		mul(new_pos, hfdt);
+		mul(new_pos, hdt);
 		add(new_pos, old_pos);
 		add(vel, dv2);
-		mul(vel, hfdt);
+		mul(vel, hdt);
 		add(vel, solid_ptr->velocity_);
 	} else if (integrator_ == integrator_type::heun) {
-		T qfdt = fdt / tr::four();
-		T ttfdt = fdt * two / three;
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, fdt, dx1, dv1);
+		T qdt = dt / tr::four();
+		T ttdt = dt * two / three;
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, dt, dx1, dv1);
 		new_pos.set(dx1);
 		vel.set(dv1);
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx1, dv1, ttfdt, dx2, dv2);
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx1, dv1, ttdt, dx2, dv2);
 		mul(dx2, three);
 		add(new_pos, dx2);
-		mul(new_pos, qfdt);
+		mul(new_pos, qdt);
 		add(new_pos, old_pos);
 		mul(dv2, three);
 		add(vel, dv2);
-		mul(vel, qfdt);
+		mul(vel, qdt);
 		add(vel, solid_ptr->velocity_);
 	} else if (integrator_ == integrator_type::runge_kutta) {
-		T hfdt = fdt / two;
-		T sfdt = fdt / tr::from_int(6);
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, fdt, dx1, dv1);
+		T hdt = dt / two;
+		T sdt = dt / tr::from_int(6);
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, dt, dx1, dv1);
 		new_pos.set(dx1);
 		vel.set(dv1);
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx1, dv1, hfdt, dx2, dv2);
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx1, dv1, hdt, dx2, dv2);
 		mul(temp, dx2, two);
 		add(new_pos, temp);
 		mul(temp, dv2, two);
 		add(vel, temp);
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx2, dv2, hfdt, dx1, dv1);
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx2, dv2, hdt, dx1, dv1);
 		mul(temp, dx1, two);
 		add(new_pos, temp);
 		mul(temp, dv1, two);
 		add(vel, temp);
-		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx1, dv1, fdt, dx2, dv2);
+		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, dx1, dv1, dt, dx2, dv2);
 		add(new_pos, dx2);
-		mul(new_pos, sfdt);
+		mul(new_pos, sdt);
 		add(new_pos, old_pos);
 		add(vel, dv2);
-		mul(vel, sfdt);
+		mul(vel, sdt);
 		add(vel, solid_ptr->velocity_);
 	}
 
@@ -480,7 +479,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 	bool skip = false;
 
 	if (manager_) {
-		manager_->intra_update(solid_ptr, dt, fdt);
+		manager_->intra_update(solid_ptr, dt);
 	}
 
 	cap_vec3(old_pos, max_position_component_);
@@ -535,8 +534,20 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, int 
 
 		if (c.time < one) {
 			sub(left_over, c.point, old_pos);
-			calculate_epsilon_offset(old_pos, left_over, c.normal);
-			add(old_pos, c.point);
+			if (c.time == T {} && c.depth > T {}) {
+				// Penetration at frame start: push old_pos out along the contact
+				// normal by the full overlap depth. Split evenly if both bodies
+				// are dynamic so each side's update contributes half the correction.
+				T push = c.depth;
+				if (c.collider && !c.collider->has_infinite_mass())
+					push = c.depth * tr::half();
+				vec3<T> correction;
+				mul(correction, c.normal, push);
+				add(old_pos, correction);
+			} else {
+				calculate_epsilon_offset(old_pos, left_over, c.normal);
+				add(old_pos, c.point);
+			}
 			sub(left_over, new_pos, old_pos);
 
 			// Store collision for reporting
@@ -1264,56 +1275,42 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 template <typename T> void simulator<T>::trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & box) {
 	const T one = tr::one();
 	if (test_inside(box, seg.origin)) {
-		if (length_squared(seg.direction) > T {}) {
-			T x;
-			T dix, diy, diz, dax, day, daz;
-			x = seg.origin.x - box.mins.x;
-			dix = tr::abs(x);
-			x = seg.origin.y - box.mins.y;
-			diy = tr::abs(x);
-			x = seg.origin.z - box.mins.z;
-			diz = tr::abs(x);
-			x = seg.origin.x - box.maxs.x;
-			dax = tr::abs(x);
-			x = seg.origin.y - box.maxs.y;
-			day = tr::abs(x);
-			x = seg.origin.z - box.maxs.z;
-			daz = tr::abs(x);
+		T dix = tr::abs(seg.origin.x - box.mins.x);
+		T diy = tr::abs(seg.origin.y - box.mins.y);
+		T diz = tr::abs(seg.origin.z - box.mins.z);
+		T dax = tr::abs(seg.origin.x - box.maxs.x);
+		T day = tr::abs(seg.origin.y - box.maxs.y);
+		T daz = tr::abs(seg.origin.z - box.maxs.z);
 
-			auto neg_x = constants<T>::neg_x_unit_vec3();
-			auto neg_y = constants<T>::neg_y_unit_vec3();
-			auto neg_z = constants<T>::neg_z_unit_vec3();
-			auto pos_x = constants<T>::x_unit_vec3();
-			auto pos_y = constants<T>::y_unit_vec3();
-			auto pos_z = constants<T>::z_unit_vec3();
+		auto neg_x = constants<T>::neg_x_unit_vec3();
+		auto neg_y = constants<T>::neg_y_unit_vec3();
+		auto neg_z = constants<T>::neg_z_unit_vec3();
+		auto pos_x = constants<T>::x_unit_vec3();
+		auto pos_y = constants<T>::y_unit_vec3();
+		auto pos_z = constants<T>::z_unit_vec3();
 
-			if (dix <= diy && dix <= diz && dix <= dax && dix <= day && dix <= daz) {
-				if (dot(seg.direction, neg_x) >= T {})
-					return;
-				c.normal.set(neg_x);
-			} else if (diy <= diz && diy <= dax && diy <= day && diy <= daz) {
-				if (dot(seg.direction, neg_y) >= T {})
-					return;
-				c.normal.set(neg_y);
-			} else if (diz <= dax && diz <= day && diz <= daz) {
-				if (dot(seg.direction, neg_z) >= T {})
-					return;
-				c.normal.set(neg_z);
-			} else if (dax <= day && dax <= daz) {
-				if (dot(seg.direction, pos_x) >= T {})
-					return;
-				c.normal.set(pos_x);
-			} else if (day <= daz) {
-				if (dot(seg.direction, pos_y) >= T {})
-					return;
-				c.normal.set(pos_y);
-			} else {
-				if (dot(seg.direction, pos_z) >= T {})
-					return;
-				c.normal.set(pos_z);
-			}
+		vec3<T> face_normal;
+		T depth;
+		if (dix <= diy && dix <= diz && dix <= dax && dix <= day && dix <= daz) {
+			face_normal.set(neg_x); depth = dix;
+		} else if (diy <= diz && diy <= dax && diy <= day && diy <= daz) {
+			face_normal.set(neg_y); depth = diy;
+		} else if (diz <= dax && diz <= day && diz <= daz) {
+			face_normal.set(neg_z); depth = diz;
+		} else if (dax <= day && dax <= daz) {
+			face_normal.set(pos_x); depth = dax;
+		} else if (day <= daz) {
+			face_normal.set(pos_y); depth = day;
+		} else {
+			face_normal.set(pos_z); depth = daz;
 		}
+
+		if (length_squared(seg.direction) > T {} && dot(seg.direction, face_normal) >= T {})
+			return;
+
 		c.time = T {};
+		c.depth = depth;
+		c.normal.set(face_normal);
 		c.point.set(seg.origin);
 	} else {
 		c.time = find_intersection(seg, box, c.point, c.normal);
@@ -1327,6 +1324,7 @@ void simulator<T>::trace_sphere(collision<T> & c, const segment<T> & seg, const 
 		vec3<T> n;
 		n.set(seg.origin);
 		sub(n, sph.origin);
+		T dist = length(n);
 		if (!normalize_carefully(n, epsilon_)) {
 			// Origin exactly at sphere center — use negative direction as normal
 			normalize(n, seg.direction);
@@ -1334,6 +1332,7 @@ void simulator<T>::trace_sphere(collision<T> & c, const segment<T> & seg, const 
 		}
 		if (dot(n, seg.direction) <= epsilon_) {
 			c.time = T {};
+			c.depth = sph.radius - dist;
 			c.point.set(seg.origin);
 			c.normal.set(n);
 		} else {
@@ -1533,6 +1532,7 @@ void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, 
 	}
 	if (inside && closest_plane >= 0) {
 		c.time = zero_val;
+		c.depth = -closest_dist;
 		c.point.set(seg.origin);
 		c.normal.set(cs.planes[closest_plane].normal);
 		return;
@@ -1659,7 +1659,7 @@ void simulator<T>::friction_link(vec3<T> & result,
                                  solid<T> * hit,
                                  const vec3<T> & hit_normal,
                                  const vec3<T> & applied_force,
-                                 T fdt) {
+                                 T dt) {
 	result.reset();
 	T zero_val {};
 	if (s->mass_ > zero_val && hit->mass_ != zero_val &&
@@ -1677,23 +1677,23 @@ void simulator<T>::friction_link(vec3<T> & result,
 		cap_vec3(vr, max_velocity_component_);
 		T len_vr = length(vr);
 
-		if (fn != zero_val && len_vr > zero_val && fdt > zero_val) {
+		if (fn != zero_val && len_vr > zero_val && dt > zero_val) {
 			div(norm_vr, vr, len_vr);
 			mul(ff, norm_vr, fn);
 			mul(result, ff, s->coefficient_of_static_friction_);
-			mul(result, fdt);
+			mul(result, dt);
 
 			mul(fs, vr, -s->mass_);
 			mul(norm_vr, hit_normal, dot(applied_force, hit_normal));
 			sub(norm_vr, applied_force, norm_vr);
-			mul(norm_vr, fdt);
+			mul(norm_vr, dt);
 			add(fs, norm_vr);
 			cap_vec3(fs, max_force_component_);
 
 			if (length_squared(fs) > length_squared(result)) {
 				mul(result, ff, s->coefficient_of_dynamic_friction_);
 			} else {
-				div(result, fs, fdt);
+				div(result, fs, dt);
 			}
 		}
 	}
@@ -1740,7 +1740,7 @@ void simulator<T>::constraint_link(vec3<T> & result,
 }
 
 template <typename T>
-void simulator<T>::update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T fdt) {
+void simulator<T>::update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T dt) {
 	vec3<T> friction_force;
 	vec3<T> constraint_force;
 	vec3<T> fluid_force;
@@ -1752,10 +1752,10 @@ void simulator<T>::update_acceleration(vec3<T> & result, solid<T> * s, const vec
 		constraint_link(constraint_force, s, x, v);
 		add(constraint_force, s->force_);
 		if (s->touched1_) {
-			friction_link(friction_force, s, v, s->touched1_, s->touched1_normal_, constraint_force, fdt);
+			friction_link(friction_force, s, v, s->touched1_, s->touched1_normal_, constraint_force, dt);
 			add(constraint_force, friction_force);
 			if (s->touched2_ && s->touched2_ != s->touched1_) {
-				friction_link(friction_force, s, v, s->touched2_, s->touched2_normal_, constraint_force, fdt);
+				friction_link(friction_force, s, v, s->touched2_, s->touched2_normal_, constraint_force, dt);
 				add(constraint_force, friction_force);
 			}
 		}
@@ -1773,17 +1773,17 @@ void simulator<T>::integration_step(solid<T> * s,
                                     const vec3<T> & v,
                                     const vec3<T> & dx,
                                     const vec3<T> & dv,
-                                    T fdt,
+                                    T dt,
                                     vec3<T> & result_x,
                                     vec3<T> & result_v) {
 	vec3<T> tx;
 	vec3<T> tv;
-	mul(tx, dx, fdt);
+	mul(tx, dx, dt);
 	add(tx, x);
-	mul(tv, dv, fdt);
+	mul(tv, dv, dt);
 	add(tv, v);
 	result_x.set(tv);
-	update_acceleration(result_v, s, tx, tv, fdt);
+	update_acceleration(result_v, s, tx, tv, dt);
 }
 
 } // namespace hop

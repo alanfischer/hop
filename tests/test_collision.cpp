@@ -142,7 +142,7 @@ template <typename T> static void test_sphere_floor_bounce(const char * label) {
 	sim.add_solid(sphere);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(sphere->get_position().z);
 	printf("z=%.2f ", z);
@@ -182,7 +182,7 @@ template <typename T> static void test_box_box_collision(const char * label) {
 	sim.add_solid(box2);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float v1x = tr::to_float(box1->get_velocity().x);
 	float v2x = tr::to_float(box2->get_velocity().x);
@@ -222,7 +222,7 @@ template <typename T> static void test_sphere_sphere_collision(const char * labe
 	sim.add_solid(s2);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float v1x = tr::to_float(s1->get_velocity().x);
 	float v2x = tr::to_float(s2->get_velocity().x);
@@ -251,7 +251,7 @@ template <typename T> static void test_capsule_box_collision(const char * label)
 	sim.add_solid(cap);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(cap->get_position().z);
 	printf("z=%.2f ", z);
@@ -279,7 +279,7 @@ template <typename T> static void test_inelastic_collision(const char * label) {
 	sim.add_solid(sphere);
 
 	for (int i = 0; i < 300; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(sphere->get_position().z);
 	float vz = tr::to_float(sphere->get_velocity().z);
@@ -306,7 +306,7 @@ template <typename T> static void test_deactivation(const char * label) {
 	sim.add_solid(sphere);
 
 	for (int i = 0; i < 500; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	bool active = sphere->active();
 	printf("active=%d ", active);
@@ -340,7 +340,7 @@ template <typename T> static void test_scope_filtering(const char * label) {
 	sim.add_solid(s2);
 
 	for (int i = 0; i < 100; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float x1 = tr::to_float(s1->get_position().x);
 	float x2 = tr::to_float(s2->get_position().x);
@@ -377,7 +377,7 @@ template <typename T> static void test_constraint(const char * label) {
 	sim.add_constraint(c);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float dist = std::fabs(tr::to_float(s1->get_position().x) - tr::to_float(s2->get_position().x));
 	printf("dist=%.2f ", dist);
@@ -439,7 +439,7 @@ template <typename T> static void test_impact_sphere_on_floor(const char * label
 	sim.add_solid(sph);
 
 	for (int i = 0; i < 200 && !got; ++i)
-		sim.update(10, simulator<T>::scope_report_collisions);
+		sim.update(tr::from_milli(10), simulator<T>::scope_report_collisions);
 
 	assert(got);
 	float pz = tr::to_float(last_col.point.z);
@@ -499,7 +499,7 @@ template <typename T> static void test_impact_box_on_floor(const char * label) {
 	sim.add_solid(box);
 
 	for (int i = 0; i < 200 && !got; ++i)
-		sim.update(10, simulator<T>::scope_report_collisions);
+		sim.update(tr::from_milli(10), simulator<T>::scope_report_collisions);
 
 	assert(got);
 	float pz = tr::to_float(last_col.point.z);
@@ -538,7 +538,7 @@ template <typename T> static void test_sphere_capsule_collision(const char * lab
 	sim.add_solid(sph);
 
 	for (int i = 0; i < 100; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float vx = tr::to_float(sph->get_velocity().x);
 	printf("vx=%.2f ", vx);
@@ -575,7 +575,7 @@ template <typename T> static void test_capsule_capsule_perpendicular(const char 
 	sim.add_solid(c2);
 
 	for (int i = 0; i < 100; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(c2->get_position().z);
 	float vz = tr::to_float(c2->get_velocity().z);
@@ -617,7 +617,7 @@ template <typename T> static void test_capsule_capsule_parallel(const char * lab
 	sim.add_solid(c2);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float v1x = tr::to_float(c1->get_velocity().x);
 	float v2x = tr::to_float(c2->get_velocity().x);
@@ -690,7 +690,7 @@ template <typename T> static void test_sphere_convex_solid(const char * label) {
 	sim.add_solid(sph);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(sph->get_position().z);
 	printf("z=%.2f ", z);
@@ -718,7 +718,7 @@ template <typename T> static void test_capsule_convex_solid(const char * label) 
 	sim.add_solid(cap);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(cap->get_position().z);
 	printf("z=%.2f ", z);
@@ -746,7 +746,7 @@ template <typename T> static void test_box_convex_solid(const char * label) {
 	sim.add_solid(box);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(box->get_position().z);
 	printf("z=%.2f ", z);
@@ -791,7 +791,7 @@ template <typename T> static void test_sphere_convex_wedge(const char * label) {
 	sim.add_solid(sph);
 
 	for (int i = 0; i < 100; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float vx = tr::to_float(sph->get_velocity().x);
 	float vz = tr::to_float(sph->get_velocity().z);
@@ -819,7 +819,7 @@ template <typename T> static void test_convex_solid_vs_box(const char * label) {
 	sim.add_solid(conv);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(conv->get_position().z);
 	printf("z=%.2f ", z);
@@ -854,7 +854,7 @@ template <typename T> static void test_convex_solid_vs_sphere(const char * label
 	sim.add_solid(conv);
 
 	for (int i = 0; i < 100; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float vx = tr::to_float(conv->get_velocity().x);
 	printf("vx=%.2f ", vx);
@@ -890,7 +890,7 @@ template <typename T> static void test_convex_solid_vs_capsule(const char * labe
 	sim.add_solid(conv);
 
 	for (int i = 0; i < 100; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float vx = tr::to_float(conv->get_velocity().x);
 	printf("vx=%.2f ", vx);
@@ -920,7 +920,7 @@ template <typename T> static void test_convex_solid_vs_convex_solid(const char *
 	sim.add_solid(c2);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float x1 = tr::to_float(c1->get_position().x);
 	float x2 = tr::to_float(c2->get_position().x);
@@ -951,7 +951,7 @@ template <typename T> static void test_sphere_traceable_floor(const char * label
 	sim.add_solid(sph);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(sph->get_position().z);
 	printf("z=%.2f ", z);
@@ -980,7 +980,7 @@ template <typename T> static void test_box_traceable_floor(const char * label) {
 	sim.add_solid(box);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(box->get_position().z);
 	printf("z=%.2f ", z);
@@ -1009,7 +1009,7 @@ template <typename T> static void test_capsule_traceable_floor(const char * labe
 	sim.add_solid(cap);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(cap->get_position().z);
 	printf("z=%.2f ", z);
@@ -1037,7 +1037,7 @@ template <typename T> static void test_convex_solid_traceable_floor(const char *
 	sim.add_solid(conv);
 
 	for (int i = 0; i < 200; ++i)
-		sim.update(10);
+		sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(conv->get_position().z);
 	printf("z=%.2f ", z);
@@ -1136,7 +1136,7 @@ template <typename T> static void test_collision_filter(const char * label) {
 
 	// Step enough for them to pass through each other
 	for (int i = 0; i < 20; ++i)
-		sim.update(16);
+		sim.update(tr::from_milli(16));
 
 	// Without filter they'd bounce apart. With filter, s1 passes through s2.
 	// s1 started at x=-3 moving +10, after 320ms should be around x=-3+3.2=0.2
@@ -1180,7 +1180,7 @@ template <typename T> static void test_collision_filter_bidirectional(const char
 	sim.add_solid(s2);
 
 	for (int i = 0; i < 20; ++i)
-		sim.update(16);
+		sim.update(tr::from_milli(16));
 
 	float v1x = tr::to_float(s1->get_velocity().x);
 	printf("v1x=%.2f ", v1x);

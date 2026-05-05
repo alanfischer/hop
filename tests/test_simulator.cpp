@@ -24,7 +24,7 @@ template <typename T> static void test_gravity_drop() {
 
 	// Update for 1 second (1000ms) in 10ms steps
 	for (int i = 0; i < 100; ++i) {
-		sim->update(10);
+		sim->update(tr::from_milli(10));
 	}
 
 	// Expected: z ≈ 10 - 0.5 * 9.81 * 1^2 = 10 - 4.905 = 5.095
@@ -108,7 +108,7 @@ int main() {
 		sim->add_solid(s);
 
 		for (int i = 0; i < 100; ++i) {
-			sim->update(10);
+			sim->update(tr::from_milli(10));
 		}
 		float z = tr::to_float(s->get_position().z);
 		printf("  fixed16 gravity drop: z = %.3f (expected ~5.1)\n", z);

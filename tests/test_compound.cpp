@@ -58,7 +58,7 @@ template <typename T> static void test_sphere_local_position_equivalence(const c
 	simA.add_solid(tA);
 	sA->set_velocity({ tr::from_int(2), T {}, T {} });
 
-	for (int i = 0; i < 100; ++i) simA.update(10);
+	for (int i = 0; i < 100; ++i) simA.update(tr::from_milli(10));
 	float xA = tr::to_float(sA->get_position().x);
 
 	// Setup B: sphere at solid origin, solid at (3,0,0)
@@ -80,7 +80,7 @@ template <typename T> static void test_sphere_local_position_equivalence(const c
 	simB.add_solid(tB);
 	sB->set_velocity({ tr::from_int(2), T {}, T {} });
 
-	for (int i = 0; i < 100; ++i) simB.update(10);
+	for (int i = 0; i < 100; ++i) simB.update(tr::from_milli(10));
 	float xB = tr::to_float(sB->get_position().x);
 
 	// sB starts 3 ahead of sA (sB.pos=3, sA.pos=0 but its sphere is at x=3).
@@ -119,7 +119,7 @@ template <typename T> static void test_box_local_position_equivalence(const char
 	wA->set_position({ tr::from_int(5), T {}, T {} });
 	simA.add_solid(wA);
 
-	for (int i = 0; i < 100; ++i) simA.update(10);
+	for (int i = 0; i < 100; ++i) simA.update(tr::from_milli(10));
 	float xA = tr::to_float(sA->get_position().x);
 
 	simulator<T> simB;
@@ -144,7 +144,7 @@ template <typename T> static void test_box_local_position_equivalence(const char
 	wB->set_position({ tr::from_int(5), T {}, T {} });
 	simB.add_solid(wB);
 
-	for (int i = 0; i < 100; ++i) simB.update(10);
+	for (int i = 0; i < 100; ++i) simB.update(tr::from_milli(10));
 	float xB = tr::to_float(sB->get_position().x);
 
 	printf("xA=%.3f xB=%.3f (xB-xA=%.3f) ", xA, xB, xB - xA);
@@ -186,7 +186,7 @@ template <typename T> static void test_dumbbell_collides_both_sides(const char *
 	sim.add_solid(ballL);
 
 	// Ball starts 2m from contact; at 3 m/s needs ~670ms. 100 steps of 10ms gives margin.
-	for (int i = 0; i < 100; ++i) sim.update(10);
+	for (int i = 0; i < 100; ++i) sim.update(tr::from_milli(10));
 	float vxL = tr::to_float(ballL->get_velocity().x);
 	printf("vxL=%.2f ", vxL);
 	assert(vxL < 0.0f); // bounced back
@@ -215,7 +215,7 @@ template <typename T> static void test_dumbbell_collides_both_sides(const char *
 	ballR->set_velocity({ -tr::from_int(3), T {}, T {} });
 	sim2.add_solid(ballR);
 
-	for (int i = 0; i < 100; ++i) sim2.update(10);
+	for (int i = 0; i < 100; ++i) sim2.update(tr::from_milli(10));
 	float vxR = tr::to_float(ballR->get_velocity().x);
 	printf("vxR=%.2f ", vxR);
 	assert(vxR > 0.0f); // bounced back
@@ -256,7 +256,7 @@ template <typename T> static void test_character_compound_lands_on_feet(const ch
 	sim.add_solid(ch);
 
 	// Let it settle
-	for (int i = 0; i < 400; ++i) sim.update(10);
+	for (int i = 0; i < 400; ++i) sim.update(tr::from_milli(10));
 
 	float z = tr::to_float(ch->get_position().z);
 	float vz = tr::to_float(ch->get_velocity().z);
@@ -341,7 +341,7 @@ template <typename T> static void test_impact_with_local_position(const char * l
 	sim.add_solid(s);
 
 	// scope_report_collisions is required for set_collision_callback to fire.
-	for (int i = 0; i < 400; ++i) sim.update(10, simulator<T>::scope_report_collisions);
+	for (int i = 0; i < 400; ++i) sim.update(tr::from_milli(10), simulator<T>::scope_report_collisions);
 
 	assert(got_impact);
 	float iz = tr::to_float(last_impact.z);
@@ -394,7 +394,7 @@ template <typename T> static void test_capsule_vs_convex_preserves_collider(cons
 	});
 	sim.add_solid(mover);
 
-	for (int i = 0; i < 200; ++i) sim.update(10, simulator<T>::scope_report_collisions);
+	for (int i = 0; i < 200; ++i) sim.update(tr::from_milli(10), simulator<T>::scope_report_collisions);
 
 	assert(seen_collider);  // callback fired (collider was not wiped to null)
 	assert(seen_collider == target.get());

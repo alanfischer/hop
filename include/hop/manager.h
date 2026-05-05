@@ -36,12 +36,12 @@ public:
 	virtual int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) = 0;
 	virtual void trace_segment(collision<T> & result, const segment<T> & seg, int collide_with_bits) = 0;
 	virtual void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits) = 0;
-	virtual void pre_update(int dt, T fdt) = 0;
-	virtual void post_update(int dt, T fdt) = 0;
-	virtual void pre_update(solid<T> * s, int dt, T fdt) = 0;
-	virtual void intra_update(solid<T> * s, int dt, T fdt) = 0;
+	virtual void pre_update(T dt) = 0;
+	virtual void post_update(T dt) = 0;
+	virtual void pre_update(solid<T> * s, T dt) = 0;
+	virtual void intra_update(solid<T> * s, T dt) = 0;
 	virtual bool collision_response(solid<T> * s, vec3<T> & position, vec3<T> & remainder, collision<T> & col) = 0;
-	virtual void post_update(solid<T> * s, int dt, T fdt) = 0;
+	virtual void post_update(solid<T> * s, T dt) = 0;
 
 	// Optional: a per-tick iteration order for the simulator's update loop.
 	// Returning non-null commits to including every solid the simulator should

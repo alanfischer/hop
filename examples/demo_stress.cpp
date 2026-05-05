@@ -142,7 +142,7 @@ template <typename T> static void run() {
 
 		if (!paused) {
 			auto t0 = std::chrono::high_resolution_clock::now();
-			sim.update(16);
+			sim.update(tr::from_milli(16));
 			auto t1 = std::chrono::high_resolution_clock::now();
 			phys_ms   = std::chrono::duration<float, std::milli>(t1 - t0).count();
 			cam_angle += 0.15f * dt;
@@ -197,6 +197,6 @@ template <typename T> static void run() {
 }
 
 int main() {
-	run<hop::fixed32>();
+	run<float>();
 	return 0;
 }

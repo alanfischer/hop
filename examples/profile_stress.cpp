@@ -116,7 +116,7 @@ template <typename T> static void run(int n_spheres, int steps) {
 	auto t0 = std::chrono::steady_clock::now();
 	auto bucket_start = t0;
 	for (int s = 0; s < steps; ++s) {
-		sim.update(16);
+		sim.update(tr::from_milli(16));
 		// Sample max partner count across all spheres this tick.
 		for (int i = 0; i < n_spheres; ++i) {
 			int pc = spheres[i]->get_impulse_partner_count();

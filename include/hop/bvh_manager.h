@@ -28,7 +28,7 @@ namespace hop {
 // rebuilds lazily on the next query. If a "static" solid's world_bound
 // changes — e.g., the caller moves it or reshapes it — call mark_dirty().
 //
-// Dynamic BVH: refit happens automatically in pre_update(dt, fdt), so as
+// Dynamic BVH: refit happens automatically in pre_update(dt), so as
 // long as the simulator drives the tick the dynamic tree is always fresh
 // at the start of a tick. After many ticks the topology drifts (objects
 // leave their initial clusters), inflating internal-node AABBs and
@@ -190,7 +190,7 @@ public:
 	// topology is stale (adds/removes since last rebuild) or every
 	// dynamic_rebuild_period ticks to recover from drift; otherwise refit.
 	// Below threshold the linear scan is faster, so we skip the BVH work.
-	void pre_update(int dt, T fdt) override {
+	void pre_update(T dt) override {
 		if (static_cast<int>(dynamic_solids_.size()) < linear_scan_threshold)
 			return;
 		if (dynamic_dirty_ || ++ticks_since_dynamic_rebuild_ >= dynamic_rebuild_period) {
@@ -200,13 +200,13 @@ public:
 			dynamic_bvh_.refit([](solid<T> * s) { return s->get_world_bound(); });
 		}
 	}
-	void post_update(int dt, T fdt) override {}
-	void pre_update(solid<T> * s, int dt, T fdt) override {}
-	void intra_update(solid<T> * s, int dt, T fdt) override {}
+	void post_update(T dt) override {}
+	void pre_update(solid<T> * s, T dt) override {}
+	void intra_update(solid<T> * s, T dt) override {}
 	bool collision_response(solid<T> * s, vec3<T> & position, vec3<T> & remainder, collision<T> & col) override {
 		return false;
 	}
-	void post_update(solid<T> * s, int dt, T fdt) override {}
+	void post_update(solid<T> * s, T dt) override {}
 
 	// Spatial-locality iteration order. Returned when the dynamic BVH is in
 	// active use — below that threshold the linear-scan fallback wouldn't
