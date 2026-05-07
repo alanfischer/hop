@@ -70,7 +70,7 @@ public:
 		entries.reserve(static_solids_.size());
 
 		for (auto * s : static_solids_) {
-			if (s->get_num_shapes() == 0)
+			if (s->get_shapes().empty())
 				continue;
 			entries.push_back({ s->get_world_bound(), s });
 		}
@@ -88,7 +88,7 @@ public:
 		entries.reserve(dynamic_solids_.size());
 
 		for (auto * s : dynamic_solids_) {
-			if (s->get_num_shapes() == 0)
+			if (s->get_shapes().empty())
 				continue;
 			entries.push_back({ s->get_world_bound(), s });
 		}
@@ -143,7 +143,7 @@ public:
 			for (auto * s : static_solids_) {
 				if (count >= max_solids)
 					break;
-				if (s->get_num_shapes() == 0)
+				if (s->get_shapes().empty())
 					continue;
 				if (test_intersection(box, s->get_world_bound())) {
 					solids[count] = s;

@@ -218,8 +218,10 @@ template <typename T> static void bench_stress(const char * label) {
 			// Register only the walls as static; dynamic spheres stay in the flat
 			// list. The first 6 solids added are the walls — this matches the
 			// order setup_stress_scene uses.
-			for (int i = 0; i < sim->get_num_solids(); ++i)
-				mgr.add_solid(sim->get_solid(i), i < 6);
+			int i = 0;
+			for (auto & solid: sim->get_solids()) {
+				mgr.add_solid(solid.get(), (i++) < 6);
+			}
 			char name[64];
 			std::snprintf(name, sizeof(name), "N=%d bvh", c.n);
 			bench::go(name, c.iters, [&] { sim->update(tr::from_milli(10)); });

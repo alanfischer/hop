@@ -39,9 +39,9 @@ public:
 		T floor_z = position.z;
 		// Find the solid's lowest z extent from its shapes
 		T lowest_z = T {};
-		for (int i = 0; i < s->get_num_shapes(); ++i) {
+		for (auto & shape : s->get_shapes()) {
 			aa_box<T> bound;
-			s->get_shape(i)->get_bound(bound);
+			shape->get_bound(bound);
 			if (bound.mins.z < lowest_z)
 				lowest_z = bound.mins.z;
 		}
@@ -396,19 +396,19 @@ template <typename T> static void test_add_remove_solid(const char * label) {
 	s1->set_mass(tr::one());
 	s1->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
 	sim.add_solid(s1);
-	assert(sim.get_num_solids() == 1);
+	assert(sim.get_solids().size() == 1);
 
 	auto s2 = std::make_shared<solid<T>>();
 	s2->set_mass(tr::one());
 	s2->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
 	sim.add_solid(s2);
-	assert(sim.get_num_solids() == 2);
+	assert(sim.get_solids().size() == 2);
 
 	sim.remove_solid(s1);
-	assert(sim.get_num_solids() == 1);
+	assert(sim.get_solids().size() == 1);
 
 	sim.remove_solid(s2);
-	assert(sim.get_num_solids() == 0);
+	assert(sim.get_solids().size() == 0);
 
 	printf("OK\n");
 }

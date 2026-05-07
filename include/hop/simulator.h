@@ -131,8 +131,7 @@ public:
 		solids_.erase(std::remove(solids_.begin(), solids_.end(), s), solids_.end());
 	}
 
-	int get_num_solids() const { return static_cast<int>(solids_.size()); }
-	solid<T> * get_solid(int i) const { return solids_[i].get(); }
+	const std::vector<std::shared_ptr<solid<T>>> & get_solids() const { return solids_; }
 
 	// Constraint management
 	void add_constraint(typename constraint<T>::ptr c) {

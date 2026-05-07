@@ -1,6 +1,6 @@
 # hop
 
-A standalone, header-only C++17 physics library for swept-collision simulation. Extracted from the [Toadlet](https://github.com/alanfischer/toadlet) game engine.
+A standalone, header-only C++17 physics library for swept-collision simulation. Extracted from the [toadlet](https://github.com/alanfischer/toadlet) game engine.
 
 Supports `float`, `double`, `fixed16`, and `fixed32` scalar types via template parameterization, allowing deterministic fixed-point physics alongside standard floating-point in the same binary.
 
@@ -15,7 +15,7 @@ Supports `float`, `double`, `fixed16`, and `fixed32` scalar types via template p
 
 Hop is currently a **translation-only** physics engine — solids have position and linear velocity but no rotation. There is no angular velocity, no torque, no inertia tensor, and no orientation state.
 
-This is intentional. Hop was designed for the [Toadlet](https://github.com/alanfischer/toadlet) game engine where gameplay objects needed fast, predictable collision response without the complexity of a full rigid-body solver. The tradeoff is straightforward: you get continuous swept-collision detection, deterministic fixed-point support, and zero-allocation simulation in exchange for not handling rotational dynamics. For many game scenarios — characters, projectiles, pickups, triggers, vehicles on terrain — translation-only physics is sufficient and far simpler to reason about.
+This is intentional. Hop was designed for the [toadlet](https://github.com/alanfischer/toadlet) game engine where gameplay objects needed fast, predictable collision response without the complexity of a full rigid-body solver. The tradeoff is straightforward: you get continuous swept-collision detection, deterministic fixed-point support, and zero-allocation simulation in exchange for not handling rotational dynamics. For many game scenarios — characters, projectiles, pickups, triggers, vehicles on terrain — translation-only physics is sufficient and far simpler to reason about.
 
 Rotational support is a work in progress — see `docs/rotation_plan.md` for the roadmap. The `mat3` and `quat` math primitives have landed; the simulator itself has not yet adopted them.
 
@@ -78,16 +78,6 @@ Traceable implementations **must** add an explicit zero-direction branch.  The c
 See `HopTrimeshTraceable::trace_solid` in `hop-godot` for a reference implementation.
 
 ## Collision Pairs
-
-Not all shape combinations are supported for solid-vs-solid collision. The matrix below shows which pairs have swept collision detection:
-
-|               |  Box   | Sphere | Capsule | Convex | Traceable |
-|---------------|:------:|:------:|:-------:|:------:|:---------:|
-| **Box**       |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
-| **Sphere**    |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
-| **Capsule**   |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
-| **Convex**    |   ✓    |   ✓    |    ✓    |   ✓    |     ✓     |
-| **Traceable** |   ✓    |   ✓    |    ✓    |   ✓    |           |
 
 Traceable-vs-Traceable is not supported. Segment traces (raycasting) work against all shape types.
 
