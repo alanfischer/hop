@@ -174,8 +174,7 @@ public:
 		update_local_bound();
 		activate();
 	}
-	shape<T> * get_shape(int i) const { return shapes_[i].get(); }
-	int get_num_shapes() const { return static_cast<int>(shapes_.size()); }
+	const std::vector<typename shape<T>::ptr> & get_shapes() const { return shapes_; }
 	int get_shape_types() const { return shape_types_; }
 
 	const aa_box<T> & get_local_bound() const { return local_bound_; }
