@@ -26,11 +26,6 @@ template <typename T> class simulator {
 public:
 	using tr = scalar_traits<T>;
 
-	// Bit OR'd into the `scope` argument of update(dt, scope) to opt into
-	// dispatching collision callbacks for this tick. Reuses the scope mask
-	// because no solid would set its scope_ to bit 30 in practice.
-	enum { scope_report_collisions = 1 << 30 };
-
 	simulator(const vec3<T> gravity = { T {}, T {}, -tr::from_milli(9810) }) {
 		set_gravity(gravity);
 		init_epsilon_defaults();
@@ -182,8 +177,7 @@ public:
 			}
 		}
 
-		if (scope & scope_report_collisions)
-			report_collisions();
+		report_collisions();
 		if (manager_)
 			manager_->post_update(dt);
 	}
