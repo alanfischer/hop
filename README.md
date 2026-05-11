@@ -48,15 +48,6 @@ sim->trace_solid(result, my_solid, seg, collision_mask);
 bool overlapping = result.time < 1.0f;  // t == 0 means solid is inside
 ```
 
-### Zero-direction behaviour by shape type
-
-| Shape pair | Zero-direction result |
-|---|---|
-| Solid vs box | `t = 0` when inside (via `test_inside` path) |
-| Solid vs sphere | `t = 0` when inside |
-| Solid vs capsule | `t = 0` when inside |
-| Solid vs traceable | Depends on the `traceable` implementation — **see below** |
-
 ### Implementing `traceable::trace_solid` for zero direction
 
 The sweep loop inside a traceable typically guards each face with:
