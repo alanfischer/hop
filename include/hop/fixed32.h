@@ -71,8 +71,10 @@ struct fixed32 {
 	constexpr fixed32 operator*(fixed32 b) const { return from_raw(detail::mul_shr32(raw, b.raw)); }
 
 	constexpr fixed32 operator/(fixed32 b) const {
-		if (b.raw == 0)
-			return from_raw(0);
+		if (b.raw == 0) {
+			// Return the largest possible magnitude with the correct sign
+		        return (raw >= 0) ? from_raw(INT64_MAX) : from_raw(INT64_MIN);
+		}
 		return from_raw(detail::shl32_div(raw, b.raw));
 	}
 
