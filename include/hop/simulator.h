@@ -31,8 +31,8 @@ public:
 	// because no solid would set its scope_ to bit 30 in practice.
 	enum { scope_report_collisions = 1 << 30 };
 
-	simulator() {
-		set_gravity({ T {}, T {}, -tr::from_milli(9810) });
+	simulator(const vec3<T> gravity = { T {}, T {}, -tr::from_milli(9810) }) {
+		set_gravity(gravity);
 		init_epsilon_defaults();
 		collisions_.resize(64);
 	}

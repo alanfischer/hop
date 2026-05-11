@@ -189,7 +189,7 @@ public:
 
 	using collision_filter_fn = std::function<bool(solid<T> *)>;
 	void set_collision_filter(collision_filter_fn fn) { collision_filter_ = std::move(fn); }
-	bool should_collide(solid<T> * other) const { return !collision_filter_ || collision_filter_(other); }
+	bool should_collide(solid<T> * other) const { return !collision_filter_ || (other && collision_filter_(other)); }
 
 	void set_user_data(void * d) { user_data_ = d; }
 	void * get_user_data() const { return user_data_; }
