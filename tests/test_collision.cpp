@@ -439,7 +439,7 @@ template <typename T> static void test_impact_sphere_on_floor(const char * label
 	sim.add_solid(sph);
 
 	for (int i = 0; i < 200 && !got; ++i)
-		sim.update(tr::from_milli(10), simulator<T>::scope_report_collisions);
+		sim.update(tr::from_milli(10));
 
 	assert(got);
 	float pz = tr::to_float(last_col.point.z);
@@ -499,7 +499,7 @@ template <typename T> static void test_impact_box_on_floor(const char * label) {
 	sim.add_solid(box);
 
 	for (int i = 0; i < 200 && !got; ++i)
-		sim.update(tr::from_milli(10), simulator<T>::scope_report_collisions);
+		sim.update(tr::from_milli(10));
 
 	assert(got);
 	float pz = tr::to_float(last_col.point.z);

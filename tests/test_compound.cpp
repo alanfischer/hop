@@ -340,8 +340,7 @@ template <typename T> static void test_impact_with_local_position(const char * l
 
 	sim.add_solid(s);
 
-	// scope_report_collisions is required for set_collision_callback to fire.
-	for (int i = 0; i < 400; ++i) sim.update(tr::from_milli(10), simulator<T>::scope_report_collisions);
+	for (int i = 0; i < 400; ++i) sim.update(tr::from_milli(10));
 
 	assert(got_impact);
 	float iz = tr::to_float(last_impact.z);
@@ -394,7 +393,7 @@ template <typename T> static void test_capsule_vs_convex_preserves_collider(cons
 	});
 	sim.add_solid(mover);
 
-	for (int i = 0; i < 200; ++i) sim.update(tr::from_milli(10), simulator<T>::scope_report_collisions);
+	for (int i = 0; i < 200; ++i) sim.update(tr::from_milli(10));
 
 	assert(seen_collider);  // callback fired (collider was not wiped to null)
 	assert(seen_collider == target.get());

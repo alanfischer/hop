@@ -286,7 +286,7 @@ template <typename T> void run() {
 	while (!WindowShouldClose() && (duration <= 0.0f || elapsed < duration)) {
 		float frame_dt = GetFrameTime();
 		elapsed += frame_dt;
-		sim.update(tr::from_milli(16), hop::simulator<T>::scope_report_collisions);
+		sim.update(tr::from_milli(16));
 
 		bool box_in_zone = in_trigger_zone(box_solid);
 		bool sphere_in_zone = in_trigger_zone(sphere_solid);

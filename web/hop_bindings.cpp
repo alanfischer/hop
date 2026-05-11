@@ -115,7 +115,7 @@ public:
 	HopSimulator() = default;
 
 	void setGravity(float x, float y, float z) { sim_.set_gravity(hop::vec3<float>(x, y, z)); }
-	void update(float dt) { sim_.update(dt, hop::simulator<float>::scope_report_collisions); }
+	void update(float dt) { sim_.update(dt); }
 
 	HopSolid addSolid() {
 		auto s = std::make_shared<hop::solid<float>>();
