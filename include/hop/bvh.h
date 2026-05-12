@@ -112,23 +112,20 @@ private:
 		T dx = total.maxs.x - total.mins.x;
 		T dy = total.maxs.y - total.mins.y;
 		T dz = total.maxs.z - total.mins.z;
-		int axis = (dx >= dy && dx >= dz) ? 0 : (dy >= dz) ? 1 : 2;
+		int axis;
+		if (dx >= dy && dx >= dz)
+			axis = 0;
+		else if (dy >= dz)
+			axis = 1;
+		else
+			axis = 2;
 
 		// Sort by centroid on split axis
 		std::sort(entries.begin() + start,
 		          entries.begin() + end,
 		          [axis](const std::pair<aa_box<T>, Item> & a, const std::pair<aa_box<T>, Item> & b) {
-			          T ca, cb;
-			          if (axis == 0) {
-				          ca = a.first.mins.x + a.first.maxs.x;
-				          cb = b.first.mins.x + b.first.maxs.x;
-			          } else if (axis == 1) {
-				          ca = a.first.mins.y + a.first.maxs.y;
-				          cb = b.first.mins.y + b.first.maxs.y;
-			          } else {
-				          ca = a.first.mins.z + a.first.maxs.z;
-				          cb = b.first.mins.z + b.first.maxs.z;
-			          }
+			          T ca = a.first.mins[axis] + a.first.maxs[axis];
+			          T cb = b.first.mins[axis] + b.first.maxs[axis];
 			          return ca < cb;
 		          });
 

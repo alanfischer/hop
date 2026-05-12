@@ -14,9 +14,16 @@ namespace hop {
 // Support functions: furthest point on a shape in a given direction
 template <typename T> inline void support(vec3<T> & result, const aa_box<T> & box, const vec3<T> & d) {
 	using tr = scalar_traits<T>;
-	result.x = d.x > T {} ? box.maxs.x : (d.x < T {} ? box.mins.x : (box.mins.x + box.maxs.x) * tr::half());
-	result.y = d.y > T {} ? box.maxs.y : (d.y < T {} ? box.mins.y : (box.mins.y + box.maxs.y) * tr::half());
-	result.z = d.z > T {} ? box.maxs.z : (d.z < T {} ? box.mins.z : (box.mins.z + box.maxs.z) * tr::half());
+	auto axis = [](T di, T mn, T mx) {
+		if (di > T {})
+			return mx;
+		if (di < T {})
+			return mn;
+		return (mn + mx) * tr::half();
+	};
+	result.x = axis(d.x, box.mins.x, box.maxs.x);
+	result.y = axis(d.y, box.mins.y, box.maxs.y);
+	result.z = axis(d.z, box.mins.z, box.maxs.z);
 }
 
 template <typename T> inline void support(vec3<T> & result, const sphere<T> & sph, const vec3<T> & d) {
