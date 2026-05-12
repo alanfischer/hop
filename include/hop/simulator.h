@@ -10,7 +10,6 @@
 #include <hop/math/support.h>
 #include <hop/math/project.h>
 #include <hop/solid.h>
-#include <stdexcept>
 #include <vector>
 
 namespace hop {
@@ -150,31 +149,35 @@ public:
 		if (manager_)
 			manager_->pre_update(dt);
 
-		// Manager may suggest a spatial-locality iteration order. Contract:
-		// when non-null, it must contain every solid the simulator should
-		// update — anything in solids_ but absent from the order is skipped.
+		// Build the iteration list. When a target is given we update just that
+		// one solid. Otherwise the manager may suggest a spatial-locality
+		// iteration order; contract: when non-null, it must contain every solid
+		// the simulator should update — anything in solids_ but absent from the
+		// order is skipped. With no manager order, iterate solids_ directly.
 		const std::vector<solid<T> *> * order =
 		    (target == nullptr && manager_) ? manager_->get_iteration_order() : nullptr;
 		assert(!order || order->size() == solids_.size());
 
-		int num = (target != nullptr) ? 1
-		          : (order ? static_cast<int>(order->size()) : static_cast<int>(solids_.size()));
-		for (int i = 0; i < num; ++i) {
-			solid<T> * s = (target != nullptr) ? target
-			               : (order ? (*order)[i] : solids_[i].get());
+		const size_t num = target ? 1 : (order ? order->size() : solids_.size());
+		for (size_t i = 0; i < num; ++i) {
+			solid<T> * s;
+			if (target)
+				s = target;
+			else if (order)
+				s = (*order)[i];
+			else
+				s = solids_[i].get();
 
 			if (!s->active_ || (scope != 0 && (s->scope_ & scope) == 0))
 				continue;
 
-			if (manager_) {
+			if (manager_)
 				manager_->pre_update(s, dt);
-			}
 
 			update_solid(s, dt);
 
-			if (manager_) {
+			if (manager_)
 				manager_->post_update(s, dt);
-			}
 		}
 
 		report_collisions();
@@ -385,7 +388,6 @@ private:
 template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt) {
 	vec3<T> old_pos;
 	vec3<T> new_pos;
-	vec3<T> old_vel;
 	vec3<T> vel;
 	vec3<T> temp;
 	vec3<T> t;
@@ -403,7 +405,6 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	const T three = tr::three();
 
 	old_pos.set(solid_ptr->position_);
-	old_vel.set(solid_ptr->velocity_);
 
 	// Integration
 	if (integrator_ == integrator_type::euler) {
@@ -469,7 +470,6 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	solid_ptr->clear_force();
 
 	bool first = true;
-	bool skip = false;
 
 	if (manager_) {
 		manager_->intra_update(solid_ptr, dt);
@@ -481,39 +481,24 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	// Collect spacials
 	if (solid_ptr->collide_with_scope_ != 0) {
 		sub(temp, new_pos, old_pos);
-		{
-			if (temp.x < T {})
-				temp.x = -temp.x;
-			if (temp.y < T {})
-				temp.y = -temp.y;
-			if (temp.z < T {})
-				temp.z = -temp.z;
+		T m = tr::max_val(tr::abs(temp.x), tr::max_val(tr::abs(temp.y), tr::abs(temp.z))) + epsilon_;
 
-			T m = temp.x;
-			if (temp.y > m)
-				m = temp.y;
-			if (temp.z > m)
-				m = temp.z;
-			m = m + epsilon_;
+		aa_box<T> box;
+		box.set(solid_ptr->local_bound_);
+		add(box, new_pos);
+		box.mins.x -= m;
+		box.mins.y -= m;
+		box.mins.z -= m;
+		box.maxs.x += m;
+		box.maxs.y += m;
+		box.maxs.z += m;
 
-			aa_box<T> box;
-			box.set(solid_ptr->local_bound_);
-			add(box, new_pos);
-			box.mins.x -= m;
-			box.mins.y -= m;
-			box.mins.z -= m;
-			box.maxs.x += m;
-			box.maxs.y += m;
-			box.maxs.z += m;
-
-			num_spacial_collection_ =
-			    find_solids_in_aa_box(box, spacial_collection_.data(), static_cast<int>(spacial_collection_.size()));
-		}
+		num_spacial_collection_ =
+		    find_solids_in_aa_box(box, spacial_collection_.data(), static_cast<int>(spacial_collection_.size()));
 	}
 
 	// Collision loop
-	loop = 0;
-	while (!skip) {
+	while (true) {
 		if (!first) {
 			sub(temp, new_pos, old_pos);
 			if (too_small(temp, epsilon_)) {
@@ -693,7 +678,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// Push the body out along the last contact normal rather
 				// than zeroing velocity. Zeroing causes permanent overlap
 				// when two dynamic bodies collide at the loop limit.
-				mul(temp, c.normal, epsilon_ * tr::from_int(4));
+				mul(temp, c.normal, epsilon_ * tr::four());
 				add(new_pos, old_pos, temp);
 				break;
 			} else {
@@ -715,7 +700,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	}
 
 	// Reset touching if no collision
-	if (!skip && c.time == one && loop == 0) {
+	if (c.time == one && loop == 0) {
 		solid_ptr->touching_ = nullptr;
 		solid_ptr->touched1_ = nullptr;
 		solid_ptr->touched2_ = nullptr;
@@ -978,11 +963,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				vec3<T> half;
 				sub(half, sh1->box_.maxs, sh1->box_.mins);
 				mul(half, tr::half());
-				T max_half = half.x;
-				if (half.y > max_half)
-					max_half = half.y;
-				if (half.z > max_half)
-					max_half = half.z;
+				T max_half = tr::max_val(half.x, tr::max_val(half.y, half.z));
 				for (auto & p : cs.planes)
 					p.distance = p.distance + max_half;
 				// sh1 reference = box center + lp1.
@@ -1112,11 +1093,7 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				vec3<T> half;
 				sub(half, sh2->box_.maxs, sh2->box_.mins);
 				mul(half, tr::half());
-				T max_half = half.x;
-				if (half.y > max_half)
-					max_half = half.y;
-				if (half.z > max_half)
-					max_half = half.z;
+				T max_half = tr::max_val(half.x, tr::max_val(half.y, half.z));
 				for (auto & p : cs.planes)
 					p.distance = p.distance + max_half;
 				vec3<T> sh2_offset;
@@ -1266,7 +1243,6 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 }
 
 template <typename T> void simulator<T>::trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & box) {
-	const T one = tr::one();
 	if (test_inside(box, seg.origin)) {
 		T dix = tr::abs(seg.origin.x - box.mins.x);
 		T diy = tr::abs(seg.origin.y - box.mins.y);
@@ -1363,52 +1339,34 @@ void simulator<T>::trace_capsule_capsule(
 
 	c.time = one;
 
-	// Edge 1: V0->V1 = capsule(base, D2, R) — sh1-start vs sh2-spine
 	capsule<T> edge_cap;
-	edge_cap.set(base, D2, radius);
 	collision<T> edge_col;
-	trace_capsule(edge_col, seg, edge_cap);
-	if (edge_col.time < c.time) {
-		c.time = edge_col.time;
-		c.point.set(edge_col.point);
-		c.normal.set(edge_col.normal);
-	}
+	auto trace_edge = [&](const vec3<T> & origin, const vec3<T> & dir) {
+		edge_cap.set(origin, dir, radius);
+		edge_col.reset();
+		trace_capsule(edge_col, seg, edge_cap);
+		if (edge_col.time < c.time) {
+			c.time = edge_col.time;
+			c.point.set(edge_col.point);
+			c.normal.set(edge_col.normal);
+		}
+	};
 
-	// Edge 2: V3->V2 = capsule(base - D1, D2, R) — sh1-end vs sh2-spine
 	vec3<T> v3;
 	sub(v3, base, D1);
-	edge_cap.set(v3, D2, radius);
-	edge_col.reset();
-	trace_capsule(edge_col, seg, edge_cap);
-	if (edge_col.time < c.time) {
-		c.time = edge_col.time;
-		c.point.set(edge_col.point);
-		c.normal.set(edge_col.normal);
-	}
-
-	// Edge 3: V0->V3 = capsule(base, -D1, R) — sh2-start vs sh1-spine
-	vec3<T> neg_D1;
-	neg(neg_D1, D1);
-	edge_cap.set(base, neg_D1, radius);
-	edge_col.reset();
-	trace_capsule(edge_col, seg, edge_cap);
-	if (edge_col.time < c.time) {
-		c.time = edge_col.time;
-		c.point.set(edge_col.point);
-		c.normal.set(edge_col.normal);
-	}
-
-	// Edge 4: V1->V2 = capsule(base + D2, -D1, R) — sh2-end vs sh1-spine
 	vec3<T> v1;
 	add(v1, base, D2);
-	edge_cap.set(v1, neg_D1, radius);
-	edge_col.reset();
-	trace_capsule(edge_col, seg, edge_cap);
-	if (edge_col.time < c.time) {
-		c.time = edge_col.time;
-		c.point.set(edge_col.point);
-		c.normal.set(edge_col.normal);
-	}
+	vec3<T> neg_D1;
+	neg(neg_D1, D1);
+
+	// V0->V1 = capsule(base, D2, R) — sh1-start vs sh2-spine
+	trace_edge(base, D2);
+	// V3->V2 = capsule(base - D1, D2, R) — sh1-end vs sh2-spine
+	trace_edge(v3, D2);
+	// V0->V3 = capsule(base, -D1, R) — sh2-start vs sh1-spine
+	trace_edge(base, neg_D1);
+	// V1->V2 = capsule(base + D2, -D1, R) — sh2-end vs sh1-spine
+	trace_edge(v1, neg_D1);
 
 	// Interior-interior analytical solve:
 	// When both closest-point parameters s,u are in (0,1), the closest-point
@@ -1469,13 +1427,13 @@ void simulator<T>::trace_capsule_capsule(
 		// Quadratic: |P0 + t*dP|² = R²
 		// A*t² + B*t + C = 0
 		T A = dot(dP, dP);
-		T B = tr::from_int(2) * dot(P0, dP);
+		T B = tr::two() * dot(P0, dP);
 		T C = dot(P0, P0) - radius * radius;
 
-		T disc = B * B - tr::from_int(4) * A * C;
+		T disc = B * B - tr::four() * A * C;
 		if (disc >= zero_val && A > epsilon_) {
 			T sqrt_disc = tr::sqrt(disc);
-			T t_hit = (-B - sqrt_disc) / (tr::from_int(2) * A);
+			T t_hit = (-B - sqrt_disc) / (tr::two() * A);
 
 			if (t_hit >= zero_val && t_hit < c.time) {
 				// Validate s(t) and u(t) are in [0,1]
@@ -1550,12 +1508,10 @@ void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, 
 					break;
 				}
 			}
-			if (b) {
-				if (t < c.time) {
-					c.time = t;
-					c.point.set(u);
-					c.normal.set(cs.planes[i].normal);
-				}
+			if (b && t < c.time) {
+				c.time = t;
+				c.point.set(u);
+				c.normal.set(cs.planes[i].normal);
 			}
 		}
 	}
@@ -1616,7 +1572,7 @@ void simulator<T>::collision_friction(
 	T zero_val {};
 	if (s->coefficient_of_dynamic_friction_ <= zero_val)
 		return;
-	T abs_impulse = normal_impulse < zero_val ? -normal_impulse : normal_impulse;
+	T abs_impulse = tr::abs(normal_impulse);
 	if (abs_impulse <= zero_val)
 		return;
 
