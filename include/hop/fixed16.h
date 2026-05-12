@@ -35,10 +35,8 @@ struct fixed16 {
 	}
 
 	constexpr fixed16 operator/(fixed16 b) const {
-		if (b.raw == 0) {
-			// Return the largest possible magnitude with the correct sign
+		if (b.raw == 0)
 			return (raw >= 0) ? from_raw(INT32_MAX) : from_raw(INT32_MIN);
-		}
 		return from_raw(static_cast<int32_t>((((static_cast<int64_t>(raw)) << 32) / b.raw) >> bits));
 	}
 
