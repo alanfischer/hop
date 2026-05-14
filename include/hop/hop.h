@@ -22,6 +22,7 @@
 
 #include <hop/bvh.h>
 #include <hop/bvh_manager.h>
+#include <hop/collide.h>
 #include <hop/collision.h>
 #include <hop/constraint.h>
 #include <hop/manager.h>

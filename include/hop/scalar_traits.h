@@ -11,28 +11,6 @@ template <> struct is_fixed_scalar<fixed16> : std::true_type {};
 template <> struct is_fixed_scalar<fixed32> : std::true_type {};
 template <typename T> inline constexpr bool is_fixed_scalar_v = is_fixed_scalar<T>::value;
 
-// Epsilon state — differs between floating-point (stores 1/epsilon) and fixed types (stores bit count)
-template <typename T> struct epsilon_state {
-	T epsilon = 0;
-	T half_epsilon = 0;
-	T quarter_epsilon = 0;
-	T one_over_epsilon = 0;
-};
-
-template <> struct epsilon_state<fixed16> {
-	int epsilon_bits = 0;
-	fixed16 epsilon = {};
-	fixed16 half_epsilon = {};
-	fixed16 quarter_epsilon = {};
-};
-
-template <> struct epsilon_state<fixed32> {
-	int epsilon_bits = 0;
-	fixed32 epsilon = {};
-	fixed32 half_epsilon = {};
-	fixed32 quarter_epsilon = {};
-};
-
 // scalar_traits<float>
 template <typename T> struct scalar_traits;
 
@@ -77,18 +55,13 @@ template <> struct scalar_traits<float> {
 	static float square(float v) { return v * v; }
 
 	// Epsilon
-	static void make_epsilon(epsilon_state<float> & s, float epsilon) {
-		s.epsilon = epsilon;
-		s.one_over_epsilon = 1.0f / epsilon;
-		s.half_epsilon = epsilon * 0.5f;
-		s.quarter_epsilon = epsilon * 0.25f;
-	}
+	static float make_epsilon(float epsilon) { return epsilon; }
 
 	static float default_epsilon() { return 0.001f; }
 	static float default_max_position_component() { return 100000.0f; }
 	static float default_max_velocity_component() { return 1000.0f; }
 	static float default_max_force_component() { return 1000.0f; }
-	static float default_deactivate_speed(const epsilon_state<float> & s) { return s.epsilon * 2.0f; }
+	static float default_deactivate_speed(float epsilon) { return epsilon * 2.0f; }
 
 	// Cap — clamp + NaN guard
 	static float cap(float v, float limit) {
@@ -140,18 +113,13 @@ template <> struct scalar_traits<double> {
 	static double square(double v) { return v * v; }
 
 	// Epsilon
-	static void make_epsilon(epsilon_state<double> & s, double epsilon) {
-		s.epsilon = epsilon;
-		s.one_over_epsilon = 1.0 / epsilon;
-		s.half_epsilon = epsilon * 0.5;
-		s.quarter_epsilon = epsilon * 0.25;
-	}
+	static double make_epsilon(double epsilon) { return epsilon; }
 
 	static double default_epsilon() { return 0.001; }
 	static double default_max_position_component() { return 100000.0; }
 	static double default_max_velocity_component() { return 1000.0; }
 	static double default_max_force_component() { return 1000.0; }
-	static double default_deactivate_speed(const epsilon_state<double> & s) { return s.epsilon * 2.0; }
+	static double default_deactivate_speed(double epsilon) { return epsilon * 2.0; }
 
 	// Cap — clamp + NaN guard
 	static double cap(double v, double limit) {
@@ -342,18 +310,13 @@ template <> struct scalar_traits<fixed16> {
 	static constexpr fixed16 square(fixed16 v) { return v * v; }
 
 	// Epsilon (fixed uses bit-shift)
-	static void make_epsilon(epsilon_state<fixed16> & s, int epsilon_bits) {
-		s.epsilon_bits = epsilon_bits;
-		s.epsilon = fixed16::from_raw(1 << epsilon_bits);
-		s.half_epsilon = fixed16::from_raw(s.epsilon.raw >> 1);
-		s.quarter_epsilon = fixed16::from_raw(s.epsilon.raw >> 2);
-	}
+	static fixed16 make_epsilon(int epsilon_bits) { return fixed16::from_raw(1 << epsilon_bits); }
 
 	static int default_epsilon_bits() { return 4; }
 	static fixed16 default_max_position_component() { return fixed16::from_raw(0x7FFF0000); } // ~32767
 	static fixed16 default_max_velocity_component() { return fixed16::from_int(104); }
 	static fixed16 default_max_force_component() { return fixed16::from_int(104); }
-	static fixed16 default_deactivate_speed(const epsilon_state<fixed16> &) { return fixed16::from_raw(1 << 8); }
+	static fixed16 default_deactivate_speed(fixed16) { return fixed16::from_raw(1 << 8); }
 
 	// Cap — branchless clamp (no NaN possible for fixed)
 	static constexpr fixed16 cap(fixed16 v, fixed16 limit) {
@@ -541,19 +504,14 @@ template <> struct scalar_traits<fixed32> {
 	static constexpr fixed32 square(fixed32 v) { return v * v; }
 
 	// Epsilon (fixed uses bit-shift; default gives same float epsilon as fixed16's default of 4 bits)
-	static void make_epsilon(epsilon_state<fixed32> & s, int epsilon_bits) {
-		s.epsilon_bits = epsilon_bits;
-		s.epsilon = fixed32::from_raw(1LL << epsilon_bits);
-		s.half_epsilon = fixed32::from_raw(s.epsilon.raw >> 1);
-		s.quarter_epsilon = fixed32::from_raw(s.epsilon.raw >> 2);
-	}
+	static fixed32 make_epsilon(int epsilon_bits) { return fixed32::from_raw(1LL << epsilon_bits); }
 
 	static int default_epsilon_bits() { return 20; }
 	static fixed32 default_max_position_component() { return fixed32::from_int(100000); }
 	static fixed32 default_max_velocity_component() { return fixed32::from_int(1000); }
 	static fixed32 default_max_force_component() { return fixed32::from_int(1000); }
 	// 2^-8 ≈ 0.0039, matching fixed16's default_deactivate_speed of from_raw(1 << 8) / 2^16
-	static fixed32 default_deactivate_speed(const epsilon_state<fixed32> &) { return fixed32::from_raw(1LL << 24); }
+	static fixed32 default_deactivate_speed(fixed32) { return fixed32::from_raw(1LL << 24); }
 
 	// Cap — branchless clamp (no NaN possible for fixed)
 	static constexpr fixed32 cap(fixed32 v, fixed32 limit) {
