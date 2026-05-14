@@ -68,7 +68,7 @@ async function main() {
 	const rope = sim.addConstraint(cap, anchorPoint.x, anchorPoint.y, anchorPoint.z);
 	rope.setSpringConstant(5);
 	rope.setDampingConstant(0.5);
-	rope.setDistanceThreshold(2);
+	rope.setRestLength(2);
 
 	// Capsule 2: radius 0.3, direction (2,0,0) — horizontal along X, starts at (1, 1, 2)
 	const cap2 = addDynamic(Module.HopShape.capsule(0.3, 2, 0, 0));

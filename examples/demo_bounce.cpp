@@ -1,5 +1,15 @@
 // demo_bounce.cpp — Raylib visualization of hop physics
-// A box, sphere, and capsule bounce around inside a closed room.
+//
+// Showcases every primitive collision shape (box, sphere, capsule, convex_solid)
+// and every constraint variant:
+//   spring + solid→anchor  : vertical capsule pendulum hanging from the ceiling
+//   rope   + solid→anchor  : horizontal capsule leashed to a ceiling anchor
+//   spring + solid→solid   : octahedron and a sphere coupled together
+//   rope   + solid→solid   : two spheres tethered like a bola
+//
+// A thin "pressure pad" trigger zone sits in one floor corner — bodies tint
+// yellow while overlapping it.
+//
 // Pass --fixed to use fixed16 arithmetic instead of float.
 
 #include <cmath>
@@ -94,6 +104,107 @@ std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	return wall;
 }
 
+// Build a regular octahedron centered at the origin, vertex distance `r` from
+// the center. 8 face planes — the dual of an axis-aligned cube.
+template <typename T> static hop::convex_solid<T> make_octahedron(T r) {
+	using tr = hop::scalar_traits<T>;
+	hop::convex_solid<T> cs;
+	// Face normals point at the 8 octants. Each face plane satisfies
+	// dot(n, vertex) = r/√3 for the axis-vertices, so distance = r/√3.
+	T inv_sqrt3 = tr::one() / tr::sqrt(tr::from_int(3));
+	T n = inv_sqrt3;
+	T d = r * inv_sqrt3;
+	cs.planes.push_back({ {  n,  n,  n }, d });
+	cs.planes.push_back({ {  n,  n, -n }, d });
+	cs.planes.push_back({ {  n, -n,  n }, d });
+	cs.planes.push_back({ {  n, -n, -n }, d });
+	cs.planes.push_back({ { -n,  n,  n }, d });
+	cs.planes.push_back({ { -n,  n, -n }, d });
+	cs.planes.push_back({ { -n, -n,  n }, d });
+	cs.planes.push_back({ { -n, -n, -n }, d });
+	return cs;
+}
+
+// Draw a regular octahedron of radius r at world position p (raylib Y-up frame).
+static void draw_octahedron(Vector3 p, float r, Color fill, Color wire) {
+	// Vertices in raylib Y-up: hop Z-up so the "up" vertex sits at +Y.
+	Vector3 v[6] = {
+		{ p.x + r, p.y,     p.z     }, // +x
+		{ p.x - r, p.y,     p.z     }, // -x
+		{ p.x,     p.y + r, p.z     }, // +y (up)
+		{ p.x,     p.y - r, p.z     }, // -y (down)
+		{ p.x,     p.y,     p.z + r }, // +z
+		{ p.x,     p.y,     p.z - r }, // -z
+	};
+	// 8 triangle faces, wound so the outward normal points away from p.
+	rlDisableBackfaceCulling();
+	DrawTriangle3D(v[2], v[0], v[4], fill);
+	DrawTriangle3D(v[2], v[4], v[1], fill);
+	DrawTriangle3D(v[2], v[1], v[5], fill);
+	DrawTriangle3D(v[2], v[5], v[0], fill);
+	DrawTriangle3D(v[3], v[4], v[0], fill);
+	DrawTriangle3D(v[3], v[1], v[4], fill);
+	DrawTriangle3D(v[3], v[5], v[1], fill);
+	DrawTriangle3D(v[3], v[0], v[5], fill);
+	rlEnableBackfaceCulling();
+	// Edges: 4 from top vertex (v2), 4 from bottom vertex (v3), 4 equator.
+	DrawLine3D(v[2], v[0], wire); DrawLine3D(v[2], v[1], wire);
+	DrawLine3D(v[2], v[4], wire); DrawLine3D(v[2], v[5], wire);
+	DrawLine3D(v[3], v[0], wire); DrawLine3D(v[3], v[1], wire);
+	DrawLine3D(v[3], v[4], wire); DrawLine3D(v[3], v[5], wire);
+	DrawLine3D(v[0], v[4], wire); DrawLine3D(v[4], v[1], wire);
+	DrawLine3D(v[1], v[5], wire); DrawLine3D(v[5], v[0], wire);
+}
+
+// Draw a constraint as a line between two world points. Springs zigzag, ropes
+// are straight; both fade to red when stretched well past their rest length.
+static void draw_constraint_line(Vector3 a, Vector3 b, float rest_length, bool is_spring) {
+	float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+	float len = sqrtf(dx * dx + dy * dy + dz * dz);
+	float stretch = (rest_length > 0.0f) ? (len / rest_length) : 1.0f;
+	// Slack rope: gray. Spring at rest: gray. Stretched: blend to red.
+	float tension = stretch <= 1.0f ? 0.0f : fminf((stretch - 1.0f) * 1.5f, 1.0f);
+	Color c = {
+		(unsigned char)(180 + 75 * tension),
+		(unsigned char)(180 * (1.0f - tension)),
+		(unsigned char)(180 * (1.0f - tension)),
+		220,
+	};
+	if (!is_spring) {
+		DrawLine3D(a, b, c);
+		return;
+	}
+	// Zigzag for springs: 12 segments offset perpendicular to the spring axis.
+	const int segs = 14;
+	// Build an arbitrary unit vector perpendicular to (dx,dy,dz).
+	Vector3 axis = { dx / fmaxf(len, 1e-4f), dy / fmaxf(len, 1e-4f), dz / fmaxf(len, 1e-4f) };
+	Vector3 up = fabsf(axis.y) < 0.9f ? Vector3{ 0, 1, 0 } : Vector3{ 1, 0, 0 };
+	Vector3 perp = {
+		axis.y * up.z - axis.z * up.y,
+		axis.z * up.x - axis.x * up.z,
+		axis.x * up.y - axis.y * up.x,
+	};
+	float pl = sqrtf(perp.x * perp.x + perp.y * perp.y + perp.z * perp.z);
+	if (pl > 1e-4f) {
+		perp.x /= pl; perp.y /= pl; perp.z /= pl;
+	}
+	float amp = 0.08f;
+	Vector3 prev = a;
+	for (int i = 1; i <= segs; ++i) {
+		float t = (float)i / segs;
+		float side = ((i & 1) == 0) ? -amp : amp;
+		// Pinch amplitude near endpoints so the spring meets each anchor cleanly.
+		float pinch = (i == segs) ? 0.0f : 4.0f * t * (1.0f - t);
+		Vector3 pt = {
+			a.x + dx * t + perp.x * side * pinch,
+			a.y + dy * t + perp.y * side * pinch,
+			a.z + dz * t + perp.z * side * pinch,
+		};
+		DrawLine3D(prev, pt, c);
+		prev = pt;
+	}
+}
+
 static const char * capture_dir = nullptr;
 
 // Trigger-zone channel. Dynamic bodies clear this bit from their
@@ -107,7 +218,7 @@ template <typename T> void run() {
 
 	hop::simulator<T> sim;
 
-	// Room dimensions: 10x10x10, centered at origin, floor at z=0, ceiling at z=10
+	// Room dimensions: 6x6x6, centered at origin, floor at z=0, ceiling at z=6
 	const T half_size = tr::from_int(3);
 	const T size = tr::from_int(6);
 	const T wall_thick = tr::one();
@@ -119,45 +230,52 @@ template <typename T> void run() {
 	    hop::aa_box<T>(hop::vec3<T>(-half_size, -half_size, -wall_thick), hop::vec3<T>(half_size, half_size, zero)),
 	    hop::vec3<T>());
 
-	// Ceiling: z = 10 to 10+wall_thick
+	// Ceiling: z = 6 to 6+wall_thick
 	make_wall(
 	    sim,
 	    hop::aa_box<T>(hop::vec3<T>(-half_size, -half_size, zero), hop::vec3<T>(half_size, half_size, wall_thick)),
 	    hop::vec3<T>(zero, zero, size));
 
-	// Wall -X: x = -5-thick to -5
+	// Wall -X
 	make_wall(sim,
 	          hop::aa_box<T>(hop::vec3<T>(-wall_thick, -half_size, zero), hop::vec3<T>(zero, half_size, size)),
 	          hop::vec3<T>(-half_size, zero, zero));
 
-	// Wall +X: x = 5 to 5+thick
+	// Wall +X
 	make_wall(sim,
 	          hop::aa_box<T>(hop::vec3<T>(zero, -half_size, zero), hop::vec3<T>(wall_thick, half_size, size)),
 	          hop::vec3<T>(half_size, zero, zero));
 
-	// Wall -Y: y = -5-thick to -5
+	// Wall -Y
 	make_wall(sim,
 	          hop::aa_box<T>(hop::vec3<T>(-half_size, -wall_thick, zero), hop::vec3<T>(half_size, zero, size)),
 	          hop::vec3<T>(zero, -half_size, zero));
 
-	// Wall +Y: y = 5 to 5+thick
+	// Wall +Y
 	make_wall(sim,
 	          hop::aa_box<T>(hop::vec3<T>(-half_size, zero, zero), hop::vec3<T>(half_size, wall_thick, size)),
 	          hop::vec3<T>(zero, half_size, zero));
 
-	// Trigger zone: a sphere bodies pass straight through. Marked with
-	// TRIGGER_BIT on both broadcast (collision_scope) and trigger_scope, with
-	// collide_with_scope = 0 so the zone never sweeps. Dynamic bodies below
-	// clear TRIGGER_BIT from their collide_with_scope, so the simulator's
-	// normal trace filter discards the zone — no impulse, no bounce.
+	// Trigger zone: a thin pad in the -X/-Y floor corner. Bodies pass straight
+	// through it; the zone's TRIGGER_BIT bit shows up in trace_solid results
+	// whenever a body is overlapping. Marked with TRIGGER_BIT on both broadcast
+	// (collision_scope) and trigger_scope; collide_with_scope = 0 so the zone
+	// never sweeps. Dynamic bodies below clear TRIGGER_BIT from their
+	// collide_with_scope, so the simulator's normal trace filter discards the
+	// zone — no impulse, no bounce.
+	const T pad_half = tr::from_milli(1100);   // 1.1 m half-extent in XY
+	const T pad_height = tr::from_milli(200);  // 20 cm tall
+	const T pad_corner = -tr::from_milli(1700); // center at (-1.7, -1.7)
 	auto zone = std::make_shared<hop::solid<T>>();
 	zone->set_infinite_mass();
 	zone->set_coefficient_of_gravity(T {});
 	zone->set_collision_scope(TRIGGER_BIT);
 	zone->set_collide_with_scope(0);
 	zone->set_trigger_scope(TRIGGER_BIT);
-	zone->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(1200))));
-	zone->set_position(hop::vec3<T>(zero, zero, tr::from_int(3)));
+	zone->add_shape(std::make_shared<hop::shape<T>>(hop::aa_box<T>(
+	    hop::vec3<T>(-pad_half, -pad_half, zero),
+	    hop::vec3<T>(pad_half, pad_half, pad_height))));
+	zone->set_position(hop::vec3<T>(pad_corner, pad_corner, zero));
 	sim.add_solid(zone);
 
 	// Dynamic bodies pass through the zone but still bounce off everything
@@ -165,97 +283,124 @@ template <typename T> void run() {
 	// other channel.
 	const int normal_channels = ~TRIGGER_BIT;
 
-	T cor = tr::one();
-	T fric_zero = T {};
+	const T cor = tr::one();
+	const T fric_zero = T {};
 
-	// Dynamic box: 1x1x1, starts at (2, 0, 7)
+	auto set_common = [&](const std::shared_ptr<hop::solid<T>> & s) {
+		s->set_mass(tr::one());
+		s->set_coefficient_of_restitution(cor);
+		s->set_coefficient_of_restitution_override(true);
+		s->set_coefficient_of_static_friction(fric_zero);
+		s->set_coefficient_of_dynamic_friction(fric_zero);
+		s->set_collide_with_scope(normal_channels);
+	};
+
+	// ── Shape: aa_box ────────────────────────────────────────────────────────
+	// Free-bouncing 1x1x1 box. No constraint.
 	auto box_solid = std::make_shared<hop::solid<T>>();
-	box_solid->set_mass(tr::one());
-	box_solid->set_coefficient_of_restitution(cor);
-	box_solid->set_coefficient_of_restitution_override(true);
-	box_solid->set_coefficient_of_static_friction(fric_zero);
-	box_solid->set_coefficient_of_dynamic_friction(fric_zero);
-	box_solid->set_collide_with_scope(normal_channels);
+	set_common(box_solid);
 	box_solid->add_shape(std::make_shared<hop::shape<T>>(hop::aa_box<T>(
-	    hop::vec3<T>(-tr::half(), -tr::half(), -tr::half()), hop::vec3<T>(tr::half(), tr::half(), tr::half()))));
+	    hop::vec3<T>(-tr::half(), -tr::half(), -tr::half()),
+	    hop::vec3<T>(tr::half(), tr::half(), tr::half()))));
 	box_solid->set_position(hop::vec3<T>(tr::from_int(1), zero, tr::from_int(4)));
 	box_solid->set_velocity(hop::vec3<T>(tr::from_int(3), tr::from_int(-2), zero));
 	sim.add_solid(box_solid);
 
-	// Dynamic sphere: radius 0.5, starts at (-2, 1, 8)
-	auto sphere_solid = std::make_shared<hop::solid<T>>();
-	sphere_solid->set_mass(tr::one());
-	sphere_solid->set_coefficient_of_restitution(cor);
-	sphere_solid->set_coefficient_of_restitution_override(true);
-	sphere_solid->set_coefficient_of_static_friction(fric_zero);
-	sphere_solid->set_coefficient_of_dynamic_friction(fric_zero);
-	sphere_solid->set_collide_with_scope(normal_channels);
-	sphere_solid->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::half())));
-	sphere_solid->set_position(hop::vec3<T>(tr::from_int(-1), tr::from_int(1), tr::from_int(5)));
-	sphere_solid->set_velocity(hop::vec3<T>(tr::from_int(-1), tr::from_int(3), tr::from_int(2)));
-	sim.add_solid(sphere_solid);
+	// ── Shape: capsule + Constraint: spring → anchor ─────────────────────────
+	// Vertical capsule on a spring "pendulum" from the ceiling — bilateral
+	// force pulls when stretched, pushes when compressed.
+	auto pendulum_solid = std::make_shared<hop::solid<T>>();
+	set_common(pendulum_solid);
+	hop::capsule<T> pendulum_shape(hop::vec3<T>(), hop::vec3<T>(zero, zero, tr::from_milli(1500)), tr::from_milli(400));
+	pendulum_solid->add_shape(std::make_shared<hop::shape<T>>(pendulum_shape));
+	pendulum_solid->set_position(hop::vec3<T>(tr::from_int(2), zero, tr::from_int(3)));
+	pendulum_solid->set_velocity(hop::vec3<T>(-tr::from_int(2), tr::from_int(1), zero));
+	sim.add_solid(pendulum_solid);
 
-	// Dynamic capsule: radius 0.4, length 1.5 along Z, hangs from ceiling via spring constraint
-	auto capsule_solid = std::make_shared<hop::solid<T>>();
-	capsule_solid->set_mass(tr::one());
-	capsule_solid->set_coefficient_of_restitution(cor);
-	capsule_solid->set_coefficient_of_restitution_override(true);
-	capsule_solid->set_coefficient_of_static_friction(fric_zero);
-	capsule_solid->set_coefficient_of_dynamic_friction(fric_zero);
-	capsule_solid->set_collide_with_scope(normal_channels);
-	hop::capsule<T> cap_shape(hop::vec3<T>(), hop::vec3<T>(zero, zero, tr::from_milli(1500)), tr::from_milli(400));
-	capsule_solid->add_shape(std::make_shared<hop::shape<T>>(cap_shape));
-	capsule_solid->set_position(hop::vec3<T>(tr::from_int(2), zero, tr::from_int(4)));
-	capsule_solid->set_velocity(hop::vec3<T>(tr::from_int(-3), tr::from_int(2), zero));
-	sim.add_solid(capsule_solid);
+	hop::vec3<T> pendulum_anchor(tr::from_milli(1500), zero, size);
+	auto pendulum_spring = std::make_shared<hop::constraint<T>>(pendulum_solid, pendulum_anchor);
+	pendulum_spring->set_type(hop::constraint<T>::type::spring);
+	pendulum_spring->set_rest_length(tr::from_int(2));
+	pendulum_spring->set_spring_constant(tr::from_int(6));
+	pendulum_spring->set_damping_constant(T {});
+	sim.add_constraint(pendulum_spring);
 
-	// Spring constraint: capsule hangs from ceiling anchor point
-	hop::vec3<T> anchor(zero, zero, size);
-	auto rope = std::make_shared<hop::constraint<T>>(capsule_solid, anchor);
-	rope->set_spring_constant(tr::from_int(5));
-	rope->set_damping_constant(tr::from_milli(500));
-	rope->set_distance_threshold(tr::from_int(2));
-	sim.add_constraint(rope);
+	// ── Shape: capsule + Constraint: rope → anchor ───────────────────────────
+	// Horizontal capsule leashed to a ceiling anchor — falls and bounces freely
+	// until the rope hits its max length, then snaps back.
+	auto leash_capsule = std::make_shared<hop::solid<T>>();
+	set_common(leash_capsule);
+	hop::capsule<T> leash_shape(hop::vec3<T>(), hop::vec3<T>(tr::from_milli(1800), zero, zero), tr::from_milli(300));
+	leash_capsule->add_shape(std::make_shared<hop::shape<T>>(leash_shape));
+	leash_capsule->set_position(hop::vec3<T>(-tr::from_int(2), -tr::from_int(1), tr::from_int(2)));
+	leash_capsule->set_velocity(hop::vec3<T>(tr::one(), tr::from_int(2), tr::from_int(3)));
+	sim.add_solid(leash_capsule);
 
-	// Dynamic capsule 2: radius 0.3, length 2.0 along X (horizontal), starts at (1, 1, 2)
-	auto capsule2_solid = std::make_shared<hop::solid<T>>();
-	capsule2_solid->set_mass(tr::one());
-	capsule2_solid->set_coefficient_of_restitution(cor);
-	capsule2_solid->set_coefficient_of_restitution_override(true);
-	capsule2_solid->set_coefficient_of_static_friction(fric_zero);
-	capsule2_solid->set_coefficient_of_dynamic_friction(fric_zero);
-	capsule2_solid->set_collide_with_scope(normal_channels);
-	hop::capsule<T> cap2_shape(hop::vec3<T>(), hop::vec3<T>(tr::from_int(2), zero, zero), tr::from_milli(300));
-	capsule2_solid->add_shape(std::make_shared<hop::shape<T>>(cap2_shape));
-	capsule2_solid->set_position(hop::vec3<T>(tr::from_int(1), tr::from_int(1), tr::from_int(2)));
-	capsule2_solid->set_velocity(hop::vec3<T>(tr::from_int(-1), tr::from_int(2), tr::from_int(3)));
-	sim.add_solid(capsule2_solid);
+	hop::vec3<T> leash_anchor(-tr::from_milli(1500), -tr::from_milli(1000), size);
+	auto leash_rope = std::make_shared<hop::constraint<T>>(leash_capsule, leash_anchor);
+	leash_rope->set_type(hop::constraint<T>::type::rope);
+	leash_rope->set_rest_length(tr::from_int(3));
+	leash_rope->set_spring_constant(tr::from_int(20));
+	leash_rope->set_damping_constant(T {});
+	// Anchor the rope at the capsule's near end, not its centroid.
+	leash_rope->set_local_anchor_a(hop::vec3<T>());
+	sim.add_constraint(leash_rope);
 
-	// Compound dumbbell: two spheres on a single solid, offset in +x and -x via
-	// local_position. Demonstrates compound colliders (Phase 2: shape local_position).
-	auto dumbbell_solid = std::make_shared<hop::solid<T>>();
-	dumbbell_solid->set_mass(tr::one());
-	dumbbell_solid->set_coefficient_of_restitution(cor);
-	dumbbell_solid->set_coefficient_of_restitution_override(true);
-	dumbbell_solid->set_coefficient_of_static_friction(fric_zero);
-	dumbbell_solid->set_coefficient_of_dynamic_friction(fric_zero);
-	dumbbell_solid->set_collide_with_scope(normal_channels);
-	auto db_left = std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350)));
-	db_left->set_local_position(hop::vec3<T>(-tr::from_milli(700), zero, zero));
-	dumbbell_solid->add_shape(db_left);
-	auto db_right = std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350)));
-	db_right->set_local_position(hop::vec3<T>(tr::from_milli(700), zero, zero));
-	dumbbell_solid->add_shape(db_right);
-	dumbbell_solid->set_position(hop::vec3<T>(-tr::from_int(1), -tr::from_int(1), tr::from_int(4)));
-	dumbbell_solid->set_velocity(hop::vec3<T>(tr::from_int(2), tr::from_int(1), -tr::one()));
-	sim.add_solid(dumbbell_solid);
+	// ── Shape: convex_solid + sphere + Constraint: spring → solid ────────────
+	// Octahedron coupled to a sphere by a spring — the pair oscillates as
+	// they tumble around the room.
+	auto octa_solid = std::make_shared<hop::solid<T>>();
+	set_common(octa_solid);
+	octa_solid->add_shape(std::make_shared<hop::shape<T>>(make_octahedron<T>(tr::from_milli(500))));
+	octa_solid->set_position(hop::vec3<T>(-tr::from_int(1), tr::from_int(1), tr::from_int(5)));
+	octa_solid->set_velocity(hop::vec3<T>(tr::from_int(2), -tr::one(), zero));
+	sim.add_solid(octa_solid);
 
-	// Collision sparks
+	auto partner_sphere = std::make_shared<hop::solid<T>>();
+	set_common(partner_sphere);
+	partner_sphere->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(400))));
+	partner_sphere->set_position(hop::vec3<T>(tr::from_milli(500), tr::from_int(1), tr::from_int(5)));
+	partner_sphere->set_velocity(hop::vec3<T>(-tr::one(), tr::from_int(2), tr::from_int(1)));
+	sim.add_solid(partner_sphere);
+
+	auto pair_spring = std::make_shared<hop::constraint<T>>(octa_solid, partner_sphere);
+	pair_spring->set_type(hop::constraint<T>::type::spring);
+	pair_spring->set_rest_length(tr::from_milli(1500));
+	pair_spring->set_spring_constant(tr::from_int(8));
+	pair_spring->set_damping_constant(T {});
+	sim.add_constraint(pair_spring);
+
+	// ── Shape: sphere + Constraint: rope → solid ─────────────────────────────
+	// Two spheres tethered by a rope — a "bola" that swings around itself.
+	auto bola_a = std::make_shared<hop::solid<T>>();
+	set_common(bola_a);
+	bola_a->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350))));
+	bola_a->set_position(hop::vec3<T>(tr::from_int(1), tr::from_int(2), tr::from_int(2)));
+	bola_a->set_velocity(hop::vec3<T>(tr::from_int(3), -tr::from_int(2), tr::from_int(2)));
+	sim.add_solid(bola_a);
+
+	auto bola_b = std::make_shared<hop::solid<T>>();
+	set_common(bola_b);
+	bola_b->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350))));
+	bola_b->set_position(hop::vec3<T>(tr::from_int(2), tr::from_milli(1500), tr::from_int(2)));
+	bola_b->set_velocity(hop::vec3<T>(-tr::from_int(2), tr::from_int(3), tr::one()));
+	sim.add_solid(bola_b);
+
+	auto bola_rope = std::make_shared<hop::constraint<T>>(bola_a, bola_b);
+	bola_rope->set_type(hop::constraint<T>::type::rope);
+	bola_rope->set_rest_length(tr::from_milli(1400));
+	bola_rope->set_spring_constant(tr::from_int(25));
+	bola_rope->set_damping_constant(T {});
+	sim.add_constraint(bola_rope);
+
+	// Collision sparks — everything dynamic.
 	box_solid->set_collision_callback(spark_on_collision<T>);
-	sphere_solid->set_collision_callback(spark_on_collision<T>);
-	capsule_solid->set_collision_callback(spark_on_collision<T>);
-	capsule2_solid->set_collision_callback(spark_on_collision<T>);
-	dumbbell_solid->set_collision_callback(spark_on_collision<T>);
+	pendulum_solid->set_collision_callback(spark_on_collision<T>);
+	leash_capsule->set_collision_callback(spark_on_collision<T>);
+	octa_solid->set_collision_callback(spark_on_collision<T>);
+	partner_sphere->set_collision_callback(spark_on_collision<T>);
+	bola_a->set_collision_callback(spark_on_collision<T>);
+	bola_b->set_collision_callback(spark_on_collision<T>);
 
 	// Raylib window
 	int win_w = capture_dir ? 400 : 800;
@@ -271,9 +416,7 @@ template <typename T> void run() {
 	// Static-overlap probe: ask "is this body currently inside any solid that
 	// broadcasts on TRIGGER_BIT?" by tracing a zero-direction segment with the
 	// trigger channel as the only listened-for bit. The trace ignores walls
-	// and other dynamic bodies because their collision_scope doesn't include
-	// TRIGGER_BIT (default -1 does, but we don't care — those solids have
-	// trigger_scope = 0 so they contribute nothing to result.trigger_scope).
+	// and other dynamic bodies because their trigger_scope is 0.
 	auto in_trigger_zone = [&](const std::shared_ptr<hop::solid<T>> & body) -> bool {
 		hop::collision<T> r;
 		hop::segment<T> probe;
@@ -289,10 +432,12 @@ template <typename T> void run() {
 		sim.update(tr::from_milli(16));
 
 		bool box_in_zone = in_trigger_zone(box_solid);
-		bool sphere_in_zone = in_trigger_zone(sphere_solid);
-		bool capsule_in_zone = in_trigger_zone(capsule_solid);
-		bool capsule2_in_zone = in_trigger_zone(capsule2_solid);
-		bool dumbbell_in_zone = in_trigger_zone(dumbbell_solid);
+		bool pendulum_in_zone = in_trigger_zone(pendulum_solid);
+		bool leash_in_zone = in_trigger_zone(leash_capsule);
+		bool octa_in_zone = in_trigger_zone(octa_solid);
+		bool partner_in_zone = in_trigger_zone(partner_sphere);
+		bool bola_a_in_zone = in_trigger_zone(bola_a);
+		bool bola_b_in_zone = in_trigger_zone(bola_b);
 
 		// Orbiting camera looking at room center
 		cam_angle += 0.3f * GetFrameTime();
@@ -300,7 +445,7 @@ template <typename T> void run() {
 		float cam_height = 8.0f;
 		Camera3D camera = {};
 		camera.position = { cam_dist * cosf(cam_angle), cam_height, cam_dist * sinf(cam_angle) };
-		camera.target = { 0.0f, 3.0f, 0.0f }; // room center in raylib coords (Y-up)
+		camera.target = { 0.0f, 3.0f, 0.0f };
 		camera.up = { 0.0f, 1.0f, 0.0f };
 		camera.fovy = 50.0f;
 		camera.projection = CAMERA_PERSPECTIVE;
@@ -310,19 +455,20 @@ template <typename T> void run() {
 
 		BeginMode3D(camera);
 
-		// Draw room wireframe (raylib Y-up: room is 6x6x6, Y from 0 to 6)
+		// Room wireframe + semi-transparent floor
 		DrawCubeWires({ 0.0f, 3.0f, 0.0f }, 6.0f, 6.0f, 6.0f, DARKGRAY);
-		// Semi-transparent floor
 		DrawCube({ 0.0f, -0.05f, 0.0f }, 6.0f, 0.1f, 6.0f, { 60, 60, 80, 100 });
 
-		// Trigger zone: translucent yellow sphere at room-center, radius 1.2.
-		// Bodies pass through it freely; the only effect is the per-frame
-		// trigger_scope query below.
-		Vector3 zp = to_raylib(zone->get_position());
-		DrawSphere(zp, 1.2f, { 255, 220, 80, 40 });
-		DrawSphereWires(zp, 1.2f, 8, 8, { 255, 220, 80, 200 });
+		// Trigger pad: a low, faintly glowing tile on the floor.
+		{
+			float pad_w = 2.0f * hop::scalar_traits<T>::to_float(pad_half);
+			float pad_h = hop::scalar_traits<T>::to_float(pad_height);
+			Vector3 zp = to_raylib(zone->get_position());
+			Vector3 center = { zp.x, pad_h * 0.5f, zp.z };
+			DrawCube(center, pad_w, pad_h, pad_w, { 255, 220, 80, 50 });
+			DrawCubeWires(center, pad_w, pad_h, pad_w, { 255, 220, 80, 200 });
+		}
 
-		// Bodies tint yellow while inside the zone (trigger_scope query).
 		Color tint_in = YELLOW;
 
 		// Box
@@ -330,48 +476,53 @@ template <typename T> void run() {
 		DrawCube(bp, 1.0f, 1.0f, 1.0f, box_in_zone ? tint_in : RED);
 		DrawCubeWires(bp, 1.0f, 1.0f, 1.0f, MAROON);
 
-		// Sphere
-		Vector3 sp = to_raylib(sphere_solid->get_position());
-		DrawSphere(sp, 0.5f, sphere_in_zone ? tint_in : BLUE);
-		DrawSphereWires(sp, 0.5f, 8, 8, DARKBLUE);
+		// Spring pendulum capsule
+		{
+			auto & p = pendulum_solid->get_position();
+			hop::vec3<T> top = p;
+			top.z = top.z + tr::from_milli(1500);
+			Vector3 bot_rl = to_raylib(p);
+			Vector3 top_rl = to_raylib(top);
+			DrawCapsule(bot_rl, top_rl, 0.4f, 8, 8, pendulum_in_zone ? tint_in : GREEN);
+			DrawCapsuleWires(bot_rl, top_rl, 0.4f, 8, 8, DARKGREEN);
+			// Spring line: ceiling anchor to capsule top.
+			draw_constraint_line(to_raylib(pendulum_anchor), top_rl, 2.0f, /*spring*/ true);
+		}
 
-		// Capsule — origin + direction in hop Z-up, convert both endpoints
-		auto & cap_pos = capsule_solid->get_position();
-		hop::vec3<T> cap_top = cap_pos;
-		cap_top.z = cap_top.z + tr::from_milli(1500);
-		Vector3 cp_bot = to_raylib(cap_pos);
-		Vector3 cp_top = to_raylib(cap_top);
-		DrawCapsule(cp_bot, cp_top, 0.4f, 8, 8, capsule_in_zone ? tint_in : GREEN);
-		DrawCapsuleWires(cp_bot, cp_top, 0.4f, 8, 8, DARKGREEN);
+		// Rope-leashed horizontal capsule
+		{
+			auto & p = leash_capsule->get_position();
+			hop::vec3<T> end = p;
+			end.x = end.x + tr::from_milli(1800);
+			Vector3 a = to_raylib(p);
+			Vector3 b = to_raylib(end);
+			DrawCapsule(a, b, 0.3f, 8, 8, leash_in_zone ? tint_in : ORANGE);
+			DrawCapsuleWires(a, b, 0.3f, 8, 8, { 200, 100, 0, 255 });
+			// Rope from anchor to capsule near-end (the local_anchor_a is at the origin)
+			draw_constraint_line(to_raylib(leash_anchor), a, 3.0f, /*spring*/ false);
+		}
 
-		// Rope line from ceiling anchor to capsule
-		Vector3 anchor_rl = to_raylib(anchor);
-		DrawLine3D(anchor_rl, cp_bot, LIGHTGRAY);
+		// Octahedron + sphere spring pair
+		Vector3 octa_pos = to_raylib(octa_solid->get_position());
+		Vector3 sphere_pos = to_raylib(partner_sphere->get_position());
+		{
+			Color octa_color = octa_in_zone ? tint_in : SKYBLUE;
+			draw_octahedron(octa_pos, 0.5f, octa_color, DARKBLUE);
+			DrawSphere(sphere_pos, 0.4f, partner_in_zone ? tint_in : VIOLET);
+			DrawSphereWires(sphere_pos, 0.4f, 8, 8, DARKPURPLE);
+			draw_constraint_line(octa_pos, sphere_pos, 1.5f, /*spring*/ true);
+		}
 
-		// Capsule 2 — direction along X (2, 0, 0)
-		auto & cap2_pos = capsule2_solid->get_position();
-		hop::vec3<T> cap2_end = cap2_pos;
-		cap2_end.x = cap2_end.x + tr::from_int(2);
-		Vector3 cp2_bot = to_raylib(cap2_pos);
-		Vector3 cp2_top = to_raylib(cap2_end);
-		DrawCapsule(cp2_bot, cp2_top, 0.3f, 8, 8, capsule2_in_zone ? tint_in : ORANGE);
-		DrawCapsuleWires(cp2_bot, cp2_top, 0.3f, 8, 8, { 200, 100, 0, 255 });
-
-		// Dumbbell compound: draw each sphere at solid.position + shape.local_position
-		auto & db_pos = dumbbell_solid->get_position();
-		hop::vec3<T> db_l_world = db_pos;
-		db_l_world.x = db_l_world.x - tr::from_milli(700);
-		hop::vec3<T> db_r_world = db_pos;
-		db_r_world.x = db_r_world.x + tr::from_milli(700);
-		Vector3 dbl = to_raylib(db_l_world);
-		Vector3 dbr = to_raylib(db_r_world);
-		Color db_color = dumbbell_in_zone ? tint_in : PURPLE;
-		DrawSphere(dbl, 0.35f, db_color);
-		DrawSphereWires(dbl, 0.35f, 8, 8, DARKPURPLE);
-		DrawSphere(dbr, 0.35f, db_color);
-		DrawSphereWires(dbr, 0.35f, 8, 8, DARKPURPLE);
-		// Connecting rod (visual only — no collision geometry)
-		DrawLine3D(dbl, dbr, { 180, 120, 200, 255 });
+		// Bola: two roped spheres
+		Vector3 ba = to_raylib(bola_a->get_position());
+		Vector3 bb = to_raylib(bola_b->get_position());
+		{
+			DrawSphere(ba, 0.35f, bola_a_in_zone ? tint_in : PINK);
+			DrawSphereWires(ba, 0.35f, 8, 8, MAROON);
+			DrawSphere(bb, 0.35f, bola_b_in_zone ? tint_in : PINK);
+			DrawSphereWires(bb, 0.35f, 8, 8, MAROON);
+			draw_constraint_line(ba, bb, 1.4f, /*spring*/ false);
+		}
 
 		// Sparks
 		update_and_draw_sparks(frame_dt);
@@ -382,29 +533,13 @@ template <typename T> void run() {
 		DrawText(mode_label, 10, 10, 20, LIGHTGRAY);
 		DrawFPS(10, 40);
 
-		auto & bpos = box_solid->get_position();
-		std::string txt = "box:     " + std::to_string(tr::to_float(bpos.z));
-		if constexpr (std::is_same_v<T, hop::fixed16>)
-			txt += "  (raw: " + std::to_string(bpos.z.raw) + ")";
-		DrawText(txt.c_str(), 10, 70, 16, RED);
-
-		auto & spos = sphere_solid->get_position();
-		txt = "sphere:  " + std::to_string(tr::to_float(spos.z));
-		if constexpr (std::is_same_v<T, hop::fixed16>)
-			txt += "  (raw: " + std::to_string(spos.z.raw) + ")";
-		DrawText(txt.c_str(), 10, 90, 16, BLUE);
-
-		auto & cpos = capsule_solid->get_position();
-		txt = "capsule: " + std::to_string(tr::to_float(cpos.z));
-		if constexpr (std::is_same_v<T, hop::fixed16>)
-			txt += "  (raw: " + std::to_string(cpos.z.raw) + ")";
-		DrawText(txt.c_str(), 10, 110, 16, GREEN);
-
-		auto & c2pos = capsule2_solid->get_position();
-		txt = "capsule2:" + std::to_string(tr::to_float(c2pos.z));
-		if constexpr (std::is_same_v<T, hop::fixed16>)
-			txt += "  (raw: " + std::to_string(c2pos.z.raw) + ")";
-		DrawText(txt.c_str(), 10, 130, 16, ORANGE);
+		int y = 70;
+		DrawText("shapes: box, sphere, capsule, convex_solid",   10, y, 14, LIGHTGRAY); y += 18;
+		DrawText("spring -> anchor: green pendulum",              10, y, 14, GREEN);     y += 18;
+		DrawText("rope   -> anchor: orange leashed capsule",      10, y, 14, ORANGE);    y += 18;
+		DrawText("spring -> solid : octahedron + violet sphere",  10, y, 14, SKYBLUE);   y += 18;
+		DrawText("rope   -> solid : pink bola pair",              10, y, 14, PINK);      y += 18;
+		DrawText("trigger pad: yellow tint while overlapping",    10, y, 14, YELLOW);
 
 		EndDrawing();
 
