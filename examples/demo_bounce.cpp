@@ -342,8 +342,8 @@ template <typename T> void run() {
 	leash_rope->set_rest_length(tr::from_int(3));
 	leash_rope->set_spring_constant(tr::from_int(20));
 	leash_rope->set_damping_constant(T {});
-	// Anchor the rope at the capsule's near end, not its centroid.
-	leash_rope->set_local_anchor_a(hop::vec3<T>());
+	// Anchor the rope at the capsule's centroid.
+	leash_rope->set_local_anchor_a(hop::vec3<T>(tr::from_milli(900), zero, zero));
 	sim.add_constraint(leash_rope);
 
 	// ── Shape: convex_solid + sphere + Constraint: spring → solid ────────────
@@ -494,12 +494,15 @@ template <typename T> void run() {
 			auto & p = leash_capsule->get_position();
 			hop::vec3<T> end = p;
 			end.x = end.x + tr::from_milli(1800);
+			hop::vec3<T> mid = p;
+			mid.x = mid.x + tr::from_milli(900);
 			Vector3 a = to_raylib(p);
 			Vector3 b = to_raylib(end);
+			Vector3 m = to_raylib(mid);
 			DrawCapsule(a, b, 0.3f, 8, 8, leash_in_zone ? tint_in : ORANGE);
 			DrawCapsuleWires(a, b, 0.3f, 8, 8, { 200, 100, 0, 255 });
-			// Rope from anchor to capsule near-end (the local_anchor_a is at the origin)
-			draw_constraint_line(to_raylib(leash_anchor), a, 3.0f, /*spring*/ false);
+			// Rope from anchor to capsule centroid
+			draw_constraint_line(to_raylib(leash_anchor), m, 3.0f, /*spring*/ false);
 		}
 
 		// Octahedron + sphere spring pair
@@ -532,14 +535,6 @@ template <typename T> void run() {
 		// HUD
 		DrawText(mode_label, 10, 10, 20, LIGHTGRAY);
 		DrawFPS(10, 40);
-
-		int y = 70;
-		DrawText("shapes: box, sphere, capsule, convex_solid",   10, y, 14, LIGHTGRAY); y += 18;
-		DrawText("spring -> anchor: green pendulum",              10, y, 14, GREEN);     y += 18;
-		DrawText("rope   -> anchor: orange leashed capsule",      10, y, 14, ORANGE);    y += 18;
-		DrawText("spring -> solid : octahedron + violet sphere",  10, y, 14, SKYBLUE);   y += 18;
-		DrawText("rope   -> solid : pink bola pair",              10, y, 14, PINK);      y += 18;
-		DrawText("trigger pad: yellow tint while overlapping",    10, y, 14, YELLOW);
 
 		EndDrawing();
 
