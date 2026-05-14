@@ -310,6 +310,17 @@ private:
 	                           T radius);
 	void trace_convex_solid(collision<T> & c, const segment<T> & seg, const convex_solid<T> & cs);
 
+	// Build the exact Minkowski sum convex ⊕ (box centered at origin with
+	// half-extents `box_half`) into `out`. The sum has two families of faces:
+	// each of the convex's N faces, inflated by the box's support along that
+	// normal (= |n.x|*h.x + |n.y|*h.y + |n.z|*h.z); and the 6 axis-aligned box
+	// faces, each at distance `sup(convex, axis) + box_half[axis]`. Omitting
+	// the second family leaves the polytope unbounded along axis directions,
+	// producing false-positive static overlaps that freeze the swept trace.
+	static void build_convex_box_minkowski(convex_solid<T> & out,
+	                                       const convex_solid<T> & convex,
+	                                       const vec3<T> & box_half);
+
 	// Dispatch helpers for test_solid's convex-vs-* branches. `inflated_cs` is
 	// the target-side convex solid with its planes already inflated by the
 	// Minkowski-sum amount for the opposing shape (scalar radius, or per-plane
@@ -718,6 +729,10 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 					auto * con = solid_ptr->constraints_[j];
 					auto * start = con->start_solid_.get();
 					auto * end = con->end_solid_.get();
+					// Stay awake while the constraint is loaded — otherwise both
+					// endpoints can sleep at non-equilibrium and freeze the system.
+					if (con->is_loaded(deactivate_speed_))
+						break;
 					// Never deactivate a body constrained to a static/infinite-mass
 					// body — the constraint represents a persistent external force
 					// (e.g. spring anchored to the world).
@@ -957,16 +972,11 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::convex_solid) {
-				// Conservative: inflate sh2's planes by max half-extent of sh1's aa_box.
-				convex_solid<T> cs;
-				cs.set(*sh2->convex_solid_);
 				vec3<T> half;
 				sub(half, sh1->box_.maxs, sh1->box_.mins);
 				mul(half, tr::half());
-				T max_half = tr::max_val(half.x, tr::max_val(half.y, half.z));
-				for (auto & p : cs.planes)
-					p.distance = p.distance + max_half;
-				// sh1 reference = box center + lp1.
+				convex_solid<T> cs;
+				build_convex_box_minkowski(cs, *sh2->convex_solid_, half);
 				vec3<T> sh1_offset;
 				add(sh1_offset, sh1->box_.mins, sh1->box_.maxs);
 				mul(sh1_offset, tr::half());
@@ -1049,30 +1059,20 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				cap.set(origin, dir, sh1->capsule_.radius + sh2->sphere_.radius);
 				trace_capsule(col, seg, cap);
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::convex_solid) {
-				// Inflate sh2's planes by sh1's capsule radius, then trace sh1's
-				// two spine endpoints as separate segments. Conservative
-				// Minkowski-sum approximation.
+				// Capsule support relative to its A endpoint: r + max(0, n·D).
+				// Inflate each plane and sweep A through the resulting convex —
+				// same recipe as sphere/box/convex × convex. Wrong normal near
+				// edges/vertices of the polyhedron, but never misses contacts.
 				convex_solid<T> cs;
 				cs.set(*sh2->convex_solid_);
-				for (auto & p : cs.planes)
-					p.distance = p.distance + sh1->capsule_.radius;
-				vec3<T> bottom_offset;
-				add(bottom_offset, sh1->capsule_.origin, lp1);
-				vec3<T> top_offset;
-				add(top_offset, bottom_offset, sh1->capsule_.direction);
-				collision<T> col_bottom;
-				col_bottom.time = one;
-				trace_forward_convex(col_bottom, seg, s2, lp2, cs, bottom_offset);
-				collision<T> col_top;
-				col_top.time = one;
-				trace_forward_convex(col_top, seg, s2, lp2, cs, top_offset);
-				// Merge the earlier hit's fields without touching col.collider /
-				// col.trigger_scope (see test_solid preamble for why).
-				const collision<T> & hit = (col_bottom.time < col_top.time) ? col_bottom : col_top;
-				col.time = hit.time;
-				col.normal.set(hit.normal);
-				if (col.time < one)
-					col.point.set(hit.point);
+				const vec3<T> & D = sh1->capsule_.direction;
+				for (auto & p : cs.planes) {
+					T nd = dot(p.normal, D);
+					p.distance = p.distance + sh1->capsule_.radius + (nd > zero_val ? nd : zero_val);
+				}
+				vec3<T> sh1_offset;
+				add(sh1_offset, sh1->capsule_.origin, lp1);
+				trace_forward_convex(col, seg, s2, lp2, cs, sh1_offset);
 			} else if (sh1->type_ == shape_type::capsule && sh2->type_ == shape_type::capsule) {
 				vec3<T> base;
 				base.set(s2->position_);
@@ -1086,16 +1086,12 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				                      sh2->capsule_.direction,
 				                      sh1->capsule_.radius + sh2->capsule_.radius);
 			}
-			// Convex solid vs aa_box
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::box) {
-				convex_solid<T> cs;
-				cs.set(*sh1->convex_solid_);
 				vec3<T> half;
 				sub(half, sh2->box_.maxs, sh2->box_.mins);
 				mul(half, tr::half());
-				T max_half = tr::max_val(half.x, tr::max_val(half.y, half.z));
-				for (auto & p : cs.planes)
-					p.distance = p.distance + max_half;
+				convex_solid<T> cs;
+				build_convex_box_minkowski(cs, *sh1->convex_solid_, half);
 				vec3<T> sh2_offset;
 				add(sh2_offset, sh2->box_.mins, sh2->box_.maxs);
 				mul(sh2_offset, tr::half());
@@ -1109,37 +1105,42 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 					p.distance = p.distance + sh2->sphere_.radius;
 				trace_inverted_convex(col, seg, s1, s2, lp_delta, cs, sh2->sphere_.origin);
 			}
-			// Convex solid vs capsule
+			// Convex solid vs capsule (mirror of capsule × convex)
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::capsule) {
 				convex_solid<T> cs;
 				cs.set(*sh1->convex_solid_);
-				for (auto & p : cs.planes)
-					p.distance = p.distance + sh2->capsule_.radius;
-				collision<T> col_bottom;
-				col_bottom.time = one;
-				trace_inverted_convex(col_bottom, seg, s1, s2, lp_delta, cs, sh2->capsule_.origin);
-				vec3<T> top_offset;
-				add(top_offset, sh2->capsule_.origin, sh2->capsule_.direction);
-				collision<T> col_top;
-				col_top.time = one;
-				trace_inverted_convex(col_top, seg, s1, s2, lp_delta, cs, top_offset);
-				const collision<T> & hit = (col_bottom.time < col_top.time) ? col_bottom : col_top;
-				if (hit.time < one) {
-					col.time = hit.time;
-					col.normal.set(hit.normal);
-					col.point.set(hit.point);
-				}
-			}
-			// Convex solid vs convex solid (exact Minkowski sum: inflate sh2's planes per sh1's support)
-			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::convex_solid) {
-				convex_solid<T> cs;
-				cs.set(*sh2->convex_solid_);
+				const vec3<T> & D = sh2->capsule_.direction;
 				for (auto & p : cs.planes) {
-					vec3<T> sup;
-					support(sup, *sh1->convex_solid_, p.normal);
-					p.distance = p.distance + dot(sup, p.normal);
+					T nd = dot(p.normal, D);
+					p.distance = p.distance + sh2->capsule_.radius + (nd > zero_val ? nd : zero_val);
 				}
-				// sh1 reference point in s1's local frame = lp1 (sh1's convex origin sits there).
+				trace_inverted_convex(col, seg, s1, s2, lp_delta, cs, sh2->capsule_.origin);
+			}
+			// Minkowski difference sh2 ⊕ (-sh1) — locus of (sh1.pos - sh2.pos) at
+			// which the shapes overlap. Bounded by two plane families:
+			//   sh2's faces (n, d) inflated to (n, d + sup(sh1, -n))
+			//   sh1's faces (n, d) contributed as (-n, d + sup(sh2, -n))
+			// Both families are required: omitting the second leaves the polytope
+			// unbounded along sh1's face normals, the same false-positive static
+			// overlap that box-vs-convex hits without its axis planes.
+			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::convex_solid) {
+				const auto & a = *sh1->convex_solid_;
+				const auto & b = *sh2->convex_solid_;
+				convex_solid<T> cs;
+				cs.planes = b.planes;
+				cs.planes.reserve(b.planes.size() + a.planes.size());
+				vec3<T> sup;
+				vec3<T> neg_n;
+				for (auto & p : cs.planes) {
+					neg(neg_n, p.normal);
+					support(sup, a, neg_n);
+					p.distance = p.distance + dot(sup, neg_n);
+				}
+				for (const auto & p1 : a.planes) {
+					neg(neg_n, p1.normal);
+					support(sup, b, neg_n);
+					cs.planes.push_back(plane<T>(neg_n, p1.distance + dot(sup, neg_n)));
+				}
 				trace_forward_convex(col, seg, s2, lp2, cs, lp1);
 			}
 
@@ -1518,6 +1519,30 @@ void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, 
 }
 
 template <typename T>
+void simulator<T>::build_convex_box_minkowski(convex_solid<T> & out,
+                                              const convex_solid<T> & convex,
+                                              const vec3<T> & box_half) {
+	out.planes = convex.planes;
+	out.planes.reserve(convex.planes.size() + 6);
+	for (auto & p : out.planes)
+		p.distance = p.distance + tr::abs(p.normal.x) * box_half.x
+		                       + tr::abs(p.normal.y) * box_half.y
+		                       + tr::abs(p.normal.z) * box_half.z;
+	const T one = tr::one();
+	const vec3<T> axes[6] = {
+		{  one,    T {},   T {} }, { -one,    T {},   T {} },
+		{ T {},     one,   T {} }, { T {},    -one,   T {} },
+		{ T {},    T {},    one }, { T {},    T {},   -one },
+	};
+	const T half_along[6] = { box_half.x, box_half.x, box_half.y, box_half.y, box_half.z, box_half.z };
+	vec3<T> sup;
+	for (int i = 0; i < 6; ++i) {
+		support(sup, convex, axes[i]);
+		out.planes.push_back(plane<T>(axes[i], dot(sup, axes[i]) + half_along[i]));
+	}
+}
+
+template <typename T>
 void simulator<T>::trace_forward_convex(collision<T> & col,
                                         const segment<T> & seg,
                                         const solid<T> * s2,
@@ -1557,6 +1582,7 @@ void simulator<T>::trace_inverted_convex(collision<T> & col,
 	trace_convex_solid(icol, tmp, inflated_cs);
 	if (icol.time < tr::one()) {
 		col.time = icol.time;
+		col.depth = icol.depth;
 		col.normal.set(icol.normal);
 		neg(col.normal);
 		// Normalize col.point to s1's center at impact.
@@ -1653,6 +1679,8 @@ void simulator<T>::constraint_link(vec3<T> & result,
                                    solid<T> * s,
                                    const vec3<T> & solid_pos,
                                    const vec3<T> & solid_vel) {
+	vec3<T> start_world;
+	vec3<T> end_world;
 	vec3<T> tx;
 	vec3<T> tv;
 	result.reset();
@@ -1660,27 +1688,38 @@ void simulator<T>::constraint_link(vec3<T> & result,
 	for (auto * c : s->constraints_) {
 		if (!c->is_active())
 			continue;
-		else if (s == c->start_solid_.get()) {
+
+		// Resolve world-space anchor positions and relative velocity.
+		// Translation-only: anchor velocity equals solid velocity.
+		if (s == c->start_solid_.get()) {
+			add(start_world, solid_pos, c->local_anchor_a_);
 			if (c->end_solid_) {
-				sub(tx, c->end_solid_->position_, solid_pos);
+				add(end_world, c->end_solid_->position_, c->local_anchor_b_);
 				sub(tv, c->end_solid_->velocity_, solid_vel);
 			} else {
-				sub(tx, c->end_point_, solid_pos);
-				mul(tv, solid_vel, -tr::one());
+				end_world = c->end_point_;
+				neg(tv, solid_vel);
 			}
 		} else if (s == c->end_solid_.get()) {
-			sub(tx, c->start_solid_->position_, solid_pos);
+			add(start_world, solid_pos, c->local_anchor_b_);
+			add(end_world, c->start_solid_->position_, c->local_anchor_a_);
 			sub(tv, c->start_solid_->velocity_, solid_vel);
 		} else {
 			continue;
 		}
+
+		sub(tx, end_world, start_world);
 		T dist = length(tx);
-		if (dist > c->distance_threshold_) {
-			T scale = (dist - c->distance_threshold_) / dist;
+		// Spring: any nonzero displacement engages force (the dist > 0 guard
+		// just protects the divide). Rope: only stretched past rest engages.
+		T gate = (c->type_ == constraint<T>::type::spring) ? T {} : c->rest_length_;
+		if (dist > gate) {
+			T scale = (dist - c->rest_length_) / dist;
 			mul(tx, scale);
 		} else {
 			tx.reset();
 		}
+
 		mul(tx, c->spring_constant_);
 		mul(tv, c->damping_constant_);
 		add(result, tx);

@@ -350,7 +350,7 @@ template <typename T> static void test_scope_filtering(const char * label) {
 	printf("OK\n");
 }
 
-// Test: constraint (spring)
+// Test: constraint (rope — default: pulls only when stretched past rest_length)
 template <typename T> static void test_constraint(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  constraint[%s]: ", label);
@@ -382,6 +382,162 @@ template <typename T> static void test_constraint(const char * label) {
 	float dist = std::fabs(tr::to_float(s1->get_position().x) - tr::to_float(s2->get_position().x));
 	printf("dist=%.2f ", dist);
 	assert(dist < 4.0f);
+	printf("OK\n");
+}
+
+// Test: spring constraint (bilateral) — pushes apart when too close, pulls when too far.
+// Bodies start at distance 0.5, spring rest length is 2.0; they should end up roughly 2.0 apart.
+template <typename T> static void test_spring_constraint(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  spring_constraint[%s]: ", label);
+	simulator<T> sim;
+	sim.set_gravity({ T {}, T {}, T {} });
+
+	auto s1 = std::make_shared<solid<T>>();
+	s1->set_mass(tr::one());
+	s1->set_collide_with_scope(0);
+	s1->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	s1->set_position({ -tr::from_milli(250), T {}, T {} });
+	sim.add_solid(s1);
+
+	auto s2 = std::make_shared<solid<T>>();
+	s2->set_mass(tr::one());
+	s2->set_collide_with_scope(0);
+	s2->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	s2->set_position({ tr::from_milli(250), T {}, T {} });
+	sim.add_solid(s2);
+
+	auto c = std::make_shared<constraint<T>>(s1, s2);
+	c->set_type(constraint<T>::type::spring);
+	c->set_rest_length(tr::from_int(2));
+	c->set_spring_constant(tr::from_int(10));
+	c->set_damping_constant(tr::from_int(2));
+	sim.add_constraint(c);
+
+	for (int i = 0; i < 400; ++i)
+		sim.update(tr::from_milli(10));
+
+	float dist = std::fabs(tr::to_float(s1->get_position().x) - tr::to_float(s2->get_position().x));
+	printf("dist=%.2f ", dist);
+	// Started at 0.5 apart; spring (rest=2.0) must push them apart past the initial gap.
+	assert(dist > 1.5f && dist < 2.5f);
+	printf("OK\n");
+}
+
+// Test: local anchor offsets shift where the constraint attaches. Two bodies starting at the
+// same X, anchor_a at (+1,0,0) on s1 and anchor_b at (-1,0,0) on s2: rope with rest=0 should
+// pull anchors together, which equilibrates with the bodies' centers ~2 apart.
+template <typename T> static void test_constraint_anchors(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  constraint_anchors[%s]: ", label);
+	simulator<T> sim;
+	sim.set_gravity({ T {}, T {}, T {} });
+
+	auto s1 = std::make_shared<solid<T>>();
+	s1->set_mass(tr::one());
+	s1->set_collide_with_scope(0);
+	s1->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	s1->set_position({ -tr::from_int(3), T {}, T {} });
+	sim.add_solid(s1);
+
+	auto s2 = std::make_shared<solid<T>>();
+	s2->set_mass(tr::one());
+	s2->set_collide_with_scope(0);
+	s2->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	s2->set_position({ tr::from_int(3), T {}, T {} });
+	sim.add_solid(s2);
+
+	auto c = std::make_shared<constraint<T>>(s1, s2);
+	c->set_type(constraint<T>::type::spring);
+	c->set_rest_length(T {});
+	c->set_local_anchor_a({ tr::one(), T {}, T {} });   // +1 on s1 (toward s2)
+	c->set_local_anchor_b({ -tr::one(), T {}, T {} });  // -1 on s2 (toward s1)
+	c->set_spring_constant(tr::from_int(5));
+	c->set_damping_constant(tr::from_int(6));  // overdamped — fixed16 settles cleanly
+	sim.add_constraint(c);
+
+	for (int i = 0; i < 800; ++i)
+		sim.update(tr::from_milli(10));
+
+	// When anchors meet (rest=0), the centers are |anchor_a| + |anchor_b| = 2 apart.
+	float dist = std::fabs(tr::to_float(s1->get_position().x) - tr::to_float(s2->get_position().x));
+	printf("dist=%.2f ", dist);
+	assert(dist > 1.7f && dist < 2.3f);
+	printf("OK\n");
+}
+
+// Test: load-aware sleep. A sprung pair settling toward equilibrium can hit the sleep
+// velocity threshold simultaneously at non-rest — without the constraint::is_loaded check
+// in the deactivation loop, both bodies freeze mid-decay and the system never reaches its
+// rest length. With it, they stay awake until the spring is actually unloaded.
+template <typename T> static void test_spring_sleep_aware(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  spring_sleep_aware[%s]: ", label);
+	simulator<T> sim;
+	sim.set_gravity({ T {}, T {}, T {} });
+
+	auto s1 = std::make_shared<solid<T>>();
+	s1->set_mass(tr::one());
+	s1->set_collide_with_scope(0);
+	s1->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	s1->set_position({ -tr::from_int(3), T {}, T {} });
+	sim.add_solid(s1);
+
+	auto s2 = std::make_shared<solid<T>>();
+	s2->set_mass(tr::one());
+	s2->set_collide_with_scope(0);
+	s2->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	s2->set_position({ tr::from_int(3), T {}, T {} });
+	sim.add_solid(s2);
+
+	auto c = std::make_shared<constraint<T>>(s1, s2);
+	c->set_type(constraint<T>::type::spring);
+	c->set_rest_length(tr::from_int(2));
+	c->set_spring_constant(tr::from_int(5));
+	c->set_damping_constant(tr::from_int(6));  // overdamped — slow tail crosses the sleep gate before rest
+	sim.add_constraint(c);
+
+	for (int i = 0; i < 600; ++i)
+		sim.update(tr::from_milli(10));
+
+	float dist = std::fabs(tr::to_float(s1->get_position().x) - tr::to_float(s2->get_position().x));
+	printf("dist=%.2f ", dist);
+	assert(dist < 2.05f);
+	printf("OK\n");
+}
+
+// Test: a rope at rest (slack, below rest length) should still allow its endpoints to sleep —
+// load-aware sleep must not over-correct and pin every constrained body awake.
+template <typename T> static void test_rope_slack_sleeps(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  rope_slack_sleeps[%s]: ", label);
+	simulator<T> sim;
+	sim.set_gravity({ T {}, T {}, T {} });
+
+	auto s1 = std::make_shared<solid<T>>();
+	s1->set_mass(tr::one());
+	s1->set_collide_with_scope(0);
+	s1->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	s1->set_position({ -tr::half(), T {}, T {} });
+	sim.add_solid(s1);
+
+	auto s2 = std::make_shared<solid<T>>();
+	s2->set_mass(tr::one());
+	s2->set_collide_with_scope(0);
+	s2->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	s2->set_position({ tr::half(), T {}, T {} });
+	sim.add_solid(s2);
+
+	// Rope rest = 2; bodies 1 apart — well within slack, no force.
+	auto c = std::make_shared<constraint<T>>(s1, s2);
+	c->set_rest_length(tr::from_int(2));
+	sim.add_constraint(c);
+
+	for (int i = 0; i < 200; ++i)
+		sim.update(tr::from_milli(10));
+
+	assert(!s1->active());
+	assert(!s2->active());
 	printf("OK\n");
 }
 
@@ -698,6 +854,23 @@ template <typename T> static void test_sphere_convex_solid(const char * label) {
 	printf("OK\n");
 }
 
+// Helper: regular octahedron with vertices at ±r on each axis. 8 faces, plane
+// normals (±1, ±1, ±1)/√3 with distance r/√3.
+template <typename T> static hop::convex_solid<T> make_convex_octahedron(T r) {
+	using tr = scalar_traits<T>;
+	T sqrt3_inv = tr::one() / tr::sqrt(tr::three());
+	T d = r * sqrt3_inv;
+	hop::convex_solid<T> cs;
+	for (int sx = -1; sx <= 1; sx += 2)
+		for (int sy = -1; sy <= 1; sy += 2)
+			for (int sz = -1; sz <= 1; sz += 2)
+				cs.planes.push_back(hop::plane<T>(tr::from_int(sx) * sqrt3_inv,
+				                                  tr::from_int(sy) * sqrt3_inv,
+				                                  tr::from_int(sz) * sqrt3_inv,
+				                                  d));
+	return cs;
+}
+
 // Test: capsule drops onto convex_solid floor
 template <typename T> static void test_capsule_convex_solid(const char * label) {
 	using tr = scalar_traits<T>;
@@ -723,6 +896,54 @@ template <typename T> static void test_capsule_convex_solid(const char * label) 
 	float z = tr::to_float(cap->get_position().z);
 	printf("z=%.2f ", z);
 	assert(z > 0.2f);
+	printf("OK\n");
+}
+
+// Test: long thin capsule passing the cylinder-middle region of a small
+// octahedron does not get permanently stuck inside. The Minkowski-sum
+// inflation is conservative — it can over-detect near vertices/edges (wrong
+// face-normal there) but never misses contacts, so the capsule should never
+// settle inside the convex's AABB.
+template <typename T> static void test_capsule_octahedron_no_passthrough(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  capsule_octahedron_no_passthrough[%s]: ", label);
+	simulator<T> sim;
+	sim.set_gravity({ T {}, T {}, T {} });
+
+	auto oct = std::make_shared<solid<T>>();
+	oct->set_infinite_mass();
+	oct->set_coefficient_of_gravity(T {});
+	oct->set_coefficient_of_restitution(tr::one());
+	oct->add_shape(std::make_shared<shape<T>>(make_convex_octahedron(tr::from_milli(300))));
+	sim.add_solid(oct);
+
+	auto cap = std::make_shared<solid<T>>();
+	cap->set_mass(tr::one());
+	cap->set_coefficient_of_restitution(tr::one());
+	cap->set_coefficient_of_restitution_override(true);
+	cap->set_coefficient_of_gravity(T {});
+	cap->set_coefficient_of_static_friction(T {});
+	cap->set_coefficient_of_dynamic_friction(T {});
+	// Length-2 vertical capsule, radius 0.1. Spine spans z ∈ [-1, 1] which is
+	// much taller than the octahedron's z-extent of [-0.3, 0.3].
+	cap->add_shape(std::make_shared<shape<T>>(hop::capsule<T>(
+	    vec3<T>(T {}, T {}, -tr::one()),
+	    vec3<T>(T {}, T {}, tr::from_int(2)),
+	    tr::from_milli(100))));
+	cap->set_position({ -tr::from_int(3), T {}, T {} });
+	cap->set_velocity({ tr::from_int(5), T {}, T {} });
+	sim.add_solid(cap);
+
+	for (int i = 0; i < 250; ++i)
+		sim.update(tr::from_milli(10));
+
+	float x = tr::to_float(cap->get_position().x);
+	float y = tr::to_float(cap->get_position().y);
+	printf("x=%.2f y=%.2f ", x, y);
+	// Capsule center must not be inside the octahedron's bounding region
+	// (its xy-radius is 0.3, plus capsule radius 0.1 = 0.4).
+	float r2 = x * x + y * y;
+	assert(r2 > 0.16f);
 	printf("OK\n");
 }
 
@@ -1078,6 +1299,10 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_deactivation<T>(label);
 	test_scope_filtering<T>(label);
 	test_constraint<T>(label);
+	test_spring_constraint<T>(label);
+	test_constraint_anchors<T>(label);
+	test_spring_sleep_aware<T>(label);
+	test_rope_slack_sleeps<T>(label);
 	test_add_remove_solid<T>(label);
 	test_impact_sphere_on_floor<T>(label);
 	test_impact_segment_trace<T>(label);
@@ -1089,6 +1314,7 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_ray_convex_solid_miss<T>(label);
 	test_sphere_convex_solid<T>(label);
 	test_capsule_convex_solid<T>(label);
+	test_capsule_octahedron_no_passthrough<T>(label);
 	test_box_convex_solid<T>(label);
 	test_sphere_convex_wedge<T>(label);
 	test_convex_solid_vs_box<T>(label);

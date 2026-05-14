@@ -99,9 +99,12 @@ class HopConstraint {
 public:
 	explicit HopConstraint(std::shared_ptr<hop::constraint<float>> c) : c_(std::move(c)) {}
 
+	void setType(int t) { c_->set_type(static_cast<hop::constraint<float>::type>(t)); }
 	void setSpringConstant(float k) { c_->set_spring_constant(k); }
 	void setDampingConstant(float d) { c_->set_damping_constant(d); }
-	void setDistanceThreshold(float t) { c_->set_distance_threshold(t); }
+	void setRestLength(float r) { c_->set_rest_length(r); }
+	void setLocalAnchorA(float x, float y, float z) { c_->set_local_anchor_a(hop::vec3<float>(x, y, z)); }
+	void setLocalAnchorB(float x, float y, float z) { c_->set_local_anchor_b(hop::vec3<float>(x, y, z)); }
 	void setEndPoint(float x, float y, float z) { c_->set_end_point(hop::vec3<float>(x, y, z)); }
 
 	emscripten::val getEndPoint() { return vec3_to_val(c_->get_end_point()); }
@@ -154,9 +157,12 @@ EMSCRIPTEN_BINDINGS(hop) {
 	    .function("setCollisionCallback", &HopSolid::setCollisionCallback);
 
 	emscripten::class_<HopConstraint>("HopConstraint")
+	    .function("setType", &HopConstraint::setType)
 	    .function("setSpringConstant", &HopConstraint::setSpringConstant)
 	    .function("setDampingConstant", &HopConstraint::setDampingConstant)
-	    .function("setDistanceThreshold", &HopConstraint::setDistanceThreshold)
+	    .function("setRestLength", &HopConstraint::setRestLength)
+	    .function("setLocalAnchorA", &HopConstraint::setLocalAnchorA)
+	    .function("setLocalAnchorB", &HopConstraint::setLocalAnchorB)
 	    .function("setEndPoint", &HopConstraint::setEndPoint)
 	    .function("getEndPoint", &HopConstraint::getEndPoint);
 
