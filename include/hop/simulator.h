@@ -310,16 +310,16 @@ private:
 	                           T radius);
 	void trace_convex_solid(collision<T> & c, const segment<T> & seg, const convex_solid<T> & cs);
 
-	// Append the 6 axis-aligned planes of an aa_box (centered at origin with
-	// half-extents `half`) to an already-inflated Minkowski-sum convex.
-	// `original` is the un-inflated convex_solid whose vertices supply the
-	// support distances along ±x/±y/±z. These planes are what the convex's own
-	// face-normal inflation cannot represent, and they're what stop a body
-	// from being falsely flagged as "inside" the Minkowski sum along an axis
-	// where the face-normal hull is loose.
-	static void append_box_axis_planes(convex_solid<T> & cs,
-	                                   const convex_solid<T> & original,
-	                                   const vec3<T> & half);
+	// Build the exact Minkowski sum convex ⊕ (box centered at origin with
+	// half-extents `box_half`) into `out`. The sum has two families of faces:
+	// each of the convex's N faces, inflated by the box's support along that
+	// normal (= |n.x|*h.x + |n.y|*h.y + |n.z|*h.z); and the 6 axis-aligned box
+	// faces, each at distance `sup(convex, axis) + box_half[axis]`. Omitting
+	// the second family leaves the polytope unbounded along axis directions,
+	// producing false-positive static overlaps that freeze the swept trace.
+	static void build_convex_box_minkowski(convex_solid<T> & out,
+	                                       const convex_solid<T> & convex,
+	                                       const vec3<T> & box_half);
 
 	// Dispatch helpers for test_solid's convex-vs-* branches. `inflated_cs` is
 	// the target-side convex solid with its planes already inflated by the
@@ -972,33 +972,11 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				sub(box.mins, sh1->box_.maxs);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->type_ == shape_type::box && sh2->type_ == shape_type::convex_solid) {
-				// Build the exact Minkowski sum convex⊕(centered box) as a plane
-				// half-space intersection. The sum has two families of faces:
-				//   - each of the convex's N face planes, pushed out by the box's
-				//     support along that face normal (|n.x|*h.x + |n.y|*h.y +
-				//     |n.z|*h.z, since the centered box's support in n is exactly
-				//     that);
-				//   - the box's 6 axis-aligned faces, pushed out by the convex's
-				//     support along ±x/±y/±z.
-				// Without the second family the inflated polytope is unbounded
-				// along axis directions relative to the true sum (e.g. a thin tall
-				// floor slab gives 8 octahedron face planes that only constrain
-				// diagonal extents — the z-axis is over a factor of 2 too loose).
-				// That false-positive static overlap region traps any convex body
-				// that integrates into it: the swept trace fires at t=0 every
-				// tick, the loop limit kicks in at simulator.h:677, and the body
-				// freezes with growing velocity.
-				convex_solid<T> cs;
-				cs.set(*sh2->convex_solid_);
 				vec3<T> half;
 				sub(half, sh1->box_.maxs, sh1->box_.mins);
 				mul(half, tr::half());
-				for (auto & p : cs.planes)
-					p.distance = p.distance + tr::abs(p.normal.x) * half.x
-					                       + tr::abs(p.normal.y) * half.y
-					                       + tr::abs(p.normal.z) * half.z;
-				append_box_axis_planes(cs, *sh2->convex_solid_, half);
-				// sh1 reference = box center + lp1.
+				convex_solid<T> cs;
+				build_convex_box_minkowski(cs, *sh2->convex_solid_, half);
 				vec3<T> sh1_offset;
 				add(sh1_offset, sh1->box_.mins, sh1->box_.maxs);
 				mul(sh1_offset, tr::half());
@@ -1108,18 +1086,12 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				                      sh2->capsule_.direction,
 				                      sh1->capsule_.radius + sh2->capsule_.radius);
 			}
-			// Convex solid vs aa_box — exact Minkowski inflation (see box-vs-convex above).
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::box) {
-				convex_solid<T> cs;
-				cs.set(*sh1->convex_solid_);
 				vec3<T> half;
 				sub(half, sh2->box_.maxs, sh2->box_.mins);
 				mul(half, tr::half());
-				for (auto & p : cs.planes)
-					p.distance = p.distance + tr::abs(p.normal.x) * half.x
-					                       + tr::abs(p.normal.y) * half.y
-					                       + tr::abs(p.normal.z) * half.z;
-				append_box_axis_planes(cs, *sh1->convex_solid_, half);
+				convex_solid<T> cs;
+				build_convex_box_minkowski(cs, *sh1->convex_solid_, half);
 				vec3<T> sh2_offset;
 				add(sh2_offset, sh2->box_.mins, sh2->box_.maxs);
 				mul(sh2_offset, tr::half());
@@ -1144,39 +1116,31 @@ void simulator<T>::test_solid(collision<T> & result, solid<T> * s1, const segmen
 				}
 				trace_inverted_convex(col, seg, s1, s2, lp_delta, cs, sh2->capsule_.origin);
 			}
-			// Convex solid vs convex solid. The Minkowski "difference" sh2 ⊕ (-sh1)
-			// is the locus of (sh1.pos - sh2.pos) at which the shapes overlap.
-			// It is bounded by two families of half-spaces:
-			//   - sh2's face planes (n, d), each pushed out by sup(sh1, -n);
-			//   - sh1's face planes (n, d), contributed as (-n, d + sup(sh2, -n)).
-			// The earlier code only included the first family, which leaves the
-			// polytope loose along sh1's face-normal directions — the same
-			// false-positive static-overlap failure mode that box-vs-convex hit
-			// (see append_box_axis_planes above). It also used sup(sh1, +n)
-			// instead of sup(sh1, -n) in the first family; equal for shapes
-			// symmetric about their local origin, wrong otherwise.
+			// Minkowski difference sh2 ⊕ (-sh1) — locus of (sh1.pos - sh2.pos) at
+			// which the shapes overlap. Bounded by two plane families:
+			//   sh2's faces (n, d) inflated to (n, d + sup(sh1, -n))
+			//   sh1's faces (n, d) contributed as (-n, d + sup(sh2, -n))
+			// Both families are required: omitting the second leaves the polytope
+			// unbounded along sh1's face normals, the same false-positive static
+			// overlap that box-vs-convex hits without its axis planes.
 			else if (sh1->type_ == shape_type::convex_solid && sh2->type_ == shape_type::convex_solid) {
+				const auto & a = *sh1->convex_solid_;
+				const auto & b = *sh2->convex_solid_;
 				convex_solid<T> cs;
-				cs.set(*sh2->convex_solid_);
+				cs.planes = b.planes;
+				cs.planes.reserve(b.planes.size() + a.planes.size());
 				vec3<T> sup;
 				vec3<T> neg_n;
 				for (auto & p : cs.planes) {
-					neg_n.x = -p.normal.x;
-					neg_n.y = -p.normal.y;
-					neg_n.z = -p.normal.z;
-					support(sup, *sh1->convex_solid_, neg_n);
+					neg(neg_n, p.normal);
+					support(sup, a, neg_n);
 					p.distance = p.distance + dot(sup, neg_n);
 				}
-				for (const auto & p1 : sh1->convex_solid_->planes) {
-					plane<T> p;
-					p.normal.x = -p1.normal.x;
-					p.normal.y = -p1.normal.y;
-					p.normal.z = -p1.normal.z;
-					support(sup, *sh2->convex_solid_, p.normal);
-					p.distance = p1.distance + dot(sup, p.normal);
-					cs.planes.push_back(p);
+				for (const auto & p1 : a.planes) {
+					neg(neg_n, p1.normal);
+					support(sup, b, neg_n);
+					cs.planes.push_back(plane<T>(neg_n, p1.distance + dot(sup, neg_n)));
 				}
-				// sh1 reference point in s1's local frame = lp1 (sh1's convex origin sits there).
 				trace_forward_convex(col, seg, s2, lp2, cs, lp1);
 			}
 
@@ -1555,27 +1519,27 @@ void simulator<T>::trace_convex_solid(collision<T> & c, const segment<T> & seg, 
 }
 
 template <typename T>
-void simulator<T>::append_box_axis_planes(convex_solid<T> & cs,
-                                          const convex_solid<T> & original,
-                                          const vec3<T> & half) {
-	const T zero {};
+void simulator<T>::build_convex_box_minkowski(convex_solid<T> & out,
+                                              const convex_solid<T> & convex,
+                                              const vec3<T> & box_half) {
+	out.planes = convex.planes;
+	out.planes.reserve(convex.planes.size() + 6);
+	for (auto & p : out.planes)
+		p.distance = p.distance + tr::abs(p.normal.x) * box_half.x
+		                       + tr::abs(p.normal.y) * box_half.y
+		                       + tr::abs(p.normal.z) * box_half.z;
 	const T one = tr::one();
-	const T neg_one = -one;
-	vec3<T> sup;
-	auto push = [&](T nx, T ny, T nz, T h) {
-		vec3<T> n; n.x = nx; n.y = ny; n.z = nz;
-		support(sup, original, n);
-		plane<T> p;
-		p.normal = n;
-		p.distance = dot(sup, n) + h;
-		cs.planes.push_back(p);
+	const vec3<T> axes[6] = {
+		{  one,    T {},   T {} }, { -one,    T {},   T {} },
+		{ T {},     one,   T {} }, { T {},    -one,   T {} },
+		{ T {},    T {},    one }, { T {},    T {},   -one },
 	};
-	push(one,     zero,    zero,    half.x);
-	push(neg_one, zero,    zero,    half.x);
-	push(zero,    one,     zero,    half.y);
-	push(zero,    neg_one, zero,    half.y);
-	push(zero,    zero,    one,     half.z);
-	push(zero,    zero,    neg_one, half.z);
+	const T half_along[6] = { box_half.x, box_half.x, box_half.y, box_half.y, box_half.z, box_half.z };
+	vec3<T> sup;
+	for (int i = 0; i < 6; ++i) {
+		support(sup, convex, axes[i]);
+		out.planes.push_back(plane<T>(axes[i], dot(sup, axes[i]) + half_along[i]));
+	}
 }
 
 template <typename T>
