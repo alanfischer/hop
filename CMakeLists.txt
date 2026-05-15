@@ -25,6 +25,24 @@ if(HOP_BUILD_EXAMPLES)
     target_link_libraries(demo_stress PRIVATE hop raylib)
 endif()
 
+# ReactPhysics3D port of demo_bounce — side-by-side performance comparison.
+# Fetches ReactPhysics3D from GitHub at configure time.
+option(HOP_BUILD_RP3D_DEMO "Build ReactPhysics3D port of demo_bounce" OFF)
+if(HOP_BUILD_RP3D_DEMO)
+    find_package(raylib REQUIRED)
+    include(FetchContent)
+    FetchContent_Declare(
+        reactphysics3d
+        GIT_REPOSITORY https://github.com/DanielChappuis/reactphysics3d.git
+        GIT_TAG        v0.10.2
+    )
+    FetchContent_MakeAvailable(reactphysics3d)
+    add_executable(demo_bounce_rp3d examples/demo_bounce_rp3d.cpp)
+    target_link_libraries(demo_bounce_rp3d PRIVATE reactphysics3d raylib)
+    add_executable(demo_stress_rp3d examples/demo_stress_rp3d.cpp)
+    target_link_libraries(demo_stress_rp3d PRIVATE reactphysics3d raylib)
+endif()
+
 # Benchmarks — informational, not part of ctest.
 option(HOP_BUILD_BENCHMARKS "Build hop benchmarks" OFF)
 if(HOP_BUILD_BENCHMARKS)
