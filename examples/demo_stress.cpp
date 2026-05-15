@@ -36,6 +36,8 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	w->set_infinite_mass();
 	w->set_coefficient_of_gravity(T{});
 	w->set_coefficient_of_restitution(tr::one());
+	w->set_coefficient_of_static_friction(0);
+	w->set_coefficient_of_dynamic_friction(0);
 	w->add_shape(std::make_shared<hop::shape<T>>(box));
 	w->set_position(pos);
 	sim.add_solid(w);
@@ -105,6 +107,8 @@ template <typename T> static void run() {
 		s->set_mass(tr::one());
 		s->set_coefficient_of_restitution_override(true);
 		s->set_coefficient_of_restitution(ff(0.75f));
+		s->set_coefficient_of_static_friction(0);
+		s->set_coefficient_of_dynamic_friction(0);
 		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff(SPHERE_R))));
 
 		int   layer = i / (COLS * COLS);

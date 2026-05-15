@@ -323,6 +323,8 @@ template <typename T> void run() {
 	pendulum_spring->set_rest_length(tr::from_int(2));
 	pendulum_spring->set_spring_constant(tr::from_int(6));
 	pendulum_spring->set_damping_constant(T {});
+	// Anchor the spring at the capsule's centroid.
+	pendulum_spring->set_local_anchor_a(hop::vec3<T>(zero, zero, tr::from_milli(750)));
 	sim.add_constraint(pendulum_spring);
 
 	// ── Shape: capsule + Constraint: rope → anchor ───────────────────────────
@@ -481,12 +483,15 @@ template <typename T> void run() {
 			auto & p = pendulum_solid->get_position();
 			hop::vec3<T> top = p;
 			top.z = top.z + tr::from_milli(1500);
+			hop::vec3<T> mid = p;
+			mid.z = mid.z + tr::from_milli(750);
 			Vector3 bot_rl = to_raylib(p);
 			Vector3 top_rl = to_raylib(top);
+			Vector3 mid_rl = to_raylib(mid);
 			DrawCapsule(bot_rl, top_rl, 0.4f, 8, 8, pendulum_in_zone ? tint_in : GREEN);
 			DrawCapsuleWires(bot_rl, top_rl, 0.4f, 8, 8, DARKGREEN);
-			// Spring line: ceiling anchor to capsule top.
-			draw_constraint_line(to_raylib(pendulum_anchor), top_rl, 2.0f, /*spring*/ true);
+			// Spring line: ceiling anchor to capsule centroid.
+			draw_constraint_line(to_raylib(pendulum_anchor), mid_rl, 2.0f, /*spring*/ true);
 		}
 
 		// Rope-leashed horizontal capsule
