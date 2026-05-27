@@ -359,6 +359,7 @@ private:
 		T accum_n {};                // accumulated normal impulse magnitude (>= 0)
 		vec3<T> accum_t;             // accumulated friction impulse (a-side convention)
 		T impact_speed {};           // approach speed at TOI, for restitution
+		T vn0 {};                    // relative normal velocity entering the GS (after warm-start)
 		T cor {};                    // combined restitution
 		T mu_d {};                   // combined dynamic friction
 		T inv_ma {};
@@ -1066,6 +1067,16 @@ void simulator<T>::solve_contacts(T dt) {
 	}
 
 	// --- 3. Gauss–Seidel sweeps ---
+	// Snapshot vn0 (relative normal velocity entering the GS, after warm-start)
+	// before any constraints run. The restitution target is only activated for
+	// pairs that were closing at this moment; a pair that another constraint has
+	// already separated should not receive a bounce impulse based on stale data.
+	for (auto & p : contact_pairs_) {
+		vec3<T> vrel0;
+		sub(vrel0, p.b->velocity_, p.a->velocity_);
+		p.vn0 = dot(vrel0, p.normal);
+	}
+
 	// Each iteration solves the normal constraint (clamped accumulated
 	// impulse ≥ 0 → no sticky pull) and then the friction constraint
 	// (Coulomb cone clamped to the current accumulated normal). Order is
@@ -1081,10 +1092,12 @@ void simulator<T>::solve_contacts(T dt) {
 			sub(vrel, p.b->velocity_, p.a->velocity_);
 			T vn = dot(vrel, p.normal);
 			// Restitution target: only when this contact began with a true
-			// impact (closing speed above the micro threshold). Resting
-			// contacts get target = 0 so they settle without bouncing.
+			// impact (closing speed above the micro threshold) AND the pair
+			// was actually closing at the start of the GS. If another
+			// constraint already separated this pair, the stale impact_speed
+			// target would over-push and inject energy.
 			T target = zero_val;
-			if (p.impact_speed > micro_collision_threshold_) {
+			if (p.vn0 < zero_val && p.impact_speed > micro_collision_threshold_) {
 				target = p.cor * p.impact_speed;
 			}
 			T lambda_n = (target - vn) / inv_m_sum;

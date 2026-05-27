@@ -99,7 +99,7 @@ template <typename T> static void run() {
 	bvh.rebuild();
 
 	// 3D grid filling the room interior with random velocities in all directions.
-	// No gravity means there's no floor pile-up to worry about.
+	// Gravity is active; the ceiling keeps balls from escaping upward.
 	std::vector<std::shared_ptr<hop::solid<T>>> spheres;
 	spheres.reserve(COUNT);
 	for (int i = 0; i < COUNT; ++i) {
