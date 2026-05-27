@@ -119,7 +119,10 @@ template <typename T> static void run(int n_spheres, int steps) {
 		sim.update(tr::from_milli(16));
 		// Sample max partner count across all spheres this tick.
 		for (int i = 0; i < n_spheres; ++i) {
-			int pc = spheres[i]->get_impulse_partner_count();
+			// Count live (refreshed this tick is approximated by total slots
+			// for sleeping bodies, which is fine — the histogram targets
+			// active piles where every slot is fresh).
+			int pc = spheres[i]->get_touch_count();
 			if (pc > max_partners_ever) max_partners_ever = pc;
 			int idx = pc < 19 ? pc : 19;
 			partner_hist[idx]++;

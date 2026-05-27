@@ -19,6 +19,25 @@ public:
 	using ptr = std::shared_ptr<solid<T>>;
 	using tr = scalar_traits<T>;
 
+	// A single persistent contact slot. Populated by the simulator's TOI loop
+	// (one slot per partner this solid has hit recently) and consumed by the
+	// post-integration contact solver, which iterates Gauss–Seidel sweeps over
+	// every active body's slots. accum_n / accum_t carry the previous tick's
+	// accumulated impulses for warm-starting; impact_speed captures the
+	// approach velocity at TOI for restitution. last_tick is the refresh
+	// marker — slots whose last_tick falls behind the current tick are
+	// considered stale and dropped by the solver.
+	struct touch {
+		solid<T> * partner = nullptr;
+		vec3<T>    normal;            // points from partner toward this solid (the separating direction for self)
+		T          accum_n {};        // accumulated normal impulse magnitude (>= 0)
+		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
+		T          impact_speed {};   // approach speed at TOI; drives restitution target
+		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
+		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
+	};
+	static constexpr int max_touches = 12;
+
 	static T infinite_mass() { return -tr::one(); }
 
 	solid() { reset(); }
@@ -60,14 +79,16 @@ public:
 		user_data_ = nullptr;
 		active_ = true;
 		deactivate_count_ = 0;
-		impulse_partner_count_ = 0;
-		impulse_partner_tick_ = -1;
-		touched1_ = nullptr;
-		touched1_normal_.reset();
-		touched2_ = nullptr;
-		touched2_normal_.reset();
-		touching_ = nullptr;
-		touching_normal_.reset();
+		touch_count_ = 0;
+		for (int i = 0; i < max_touches; ++i) {
+			touches_[i].partner = nullptr;
+			touches_[i].normal.reset();
+			touches_[i].accum_n = T{};
+			touches_[i].accum_t.reset();
+			touches_[i].impact_speed = T{};
+			touches_[i].last_tick = -1;
+			touches_[i].pair_built_tick = -1;
+		}
 		simulator_ = nullptr;
 	}
 
@@ -180,8 +201,11 @@ public:
 	const aa_box<T> & get_local_bound() const { return local_bound_; }
 	const aa_box<T> & get_world_bound() const { return world_bound_; }
 
-	solid<T> * get_touching() const { return touching_; }
-	const vec3<T> & get_touching_normal() const { return touching_normal_; }
+	// Diagnostic: read the persistent contact cache. Slots whose last_tick
+	// matches the simulator's current tick are live contacts this step; older
+	// slots are stale (will be reaped on the next solver pass).
+	int get_touch_count() const { return touch_count_; }
+	const touch & get_touch(int i) const { return touches_[i]; }
 
 	using collision_fn = std::function<void(const collision<T> &)>;
 	void set_collision_callback(collision_fn fn) { collision_callback_ = std::move(fn); }
@@ -217,13 +241,6 @@ public:
 		deactivate_count_ = 0;
 	}
 	bool active() const { return active_ && simulator_ != nullptr; }
-
-	// Diagnostic: number of distinct partners this solid impulsed (or was
-	// impulsed by) during the most recent tick it participated in a collision.
-	// Returns 0 if the most recent tick recorded doesn't match the current
-	// simulator tick (no fresh data). Useful for tuning impulse_partners_[]
-	// capacity or for debugging cluster collision behavior.
-	int get_impulse_partner_count() const { return impulse_partner_count_; }
 
 	void update_local_bound() {
 		shape_types_ = 0;
@@ -286,31 +303,20 @@ private:
 	simulator<T> * simulator_ = nullptr;
 
 	// -- Cold: rarely accessed in the hot path --
-	// Per-tick set of partners with which this solid has exchanged a collision
-	// impulse. Used by the simulator's cross-update guard: when solid_ptr's
-	// update finds hit_solid and the pair is already in solid_ptr's set, the
-	// pair was impulsed in another solid's earlier update this tick — apply a
-	// position-only contact constraint instead of a second impulse, which
-	// would either inject energy (re-impulsing) or let solids penetrate
-	// (skipping outright).
+	// Persistent per-pair contact cache. Each slot remembers a body this solid
+	// is (or was very recently) in contact with, with the previous tick's
+	// accumulated normal/friction impulses for warm-starting. The simulator's
+	// post-integration solver walks every active solid's slots, builds a unique
+	// pair list, and runs Gauss–Seidel sweeps over it; this is what makes a
+	// settled stack transmit load through all support contacts in one tick.
 	//
-	// Inline fixed-size storage keeps this allocation-free per tick. 8 was
-	// chosen empirically: in bounce_stress the maximum observed at N=1000,
-	// 5000, and 10000 was 7–8, with the 99th percentile sitting at 3–4.
-	// Beyond capacity we silently drop further entries, which degrades to
-	// the simple-skip behavior — still correct, just less effective at
-	// suppressing duplicate detections for that one pair-tick.
-	static constexpr int max_impulse_partners_per_tick = 8;
-	solid<T> * impulse_partners_[max_impulse_partners_per_tick];
-	int impulse_partner_count_ = 0;
-	int impulse_partner_tick_ = -1;
-
-	solid<T> * touching_ = nullptr;
-	vec3<T> touching_normal_;
-	solid<T> * touched1_ = nullptr;
-	vec3<T> touched1_normal_;
-	solid<T> * touched2_ = nullptr;
-	vec3<T> touched2_normal_;
+	// 6 slots empirically covers the largest stable support set a sphere can
+	// have in 3D (a sphere wedged into the kissing arrangement has 6 neighbors).
+	// When a 7th distinct partner is hit, we evict whichever cached slot
+	// contributes least to gravity-aligned support (smallest dot(normal, -g)),
+	// tie-breaking by oldest last_tick.
+	touch touches_[max_touches];
+	int touch_count_ = 0;
 
 	std::vector<constraint<T> *> constraints_;
 
