@@ -1,0 +1,2 @@
+# Fix settling
+We are on stack-settling-prototype branch.  Trying to get us to a state where the demo_stress matches closer to demo_stress_rp3d.  Gemini did work that claimed to make demo_settle better.  However it regressed a LOT on the demo_pile, many balls deactivate when they should not have.  We also are much slower on demo_stress, and thats acceptable if demo_stress looks closer to demo_stress_rp3d.  However currently the jitter in demo_stress seems to be the same with what we have in main.  We need concrete ways of making progress on demo_stress.

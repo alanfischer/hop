@@ -285,8 +285,9 @@ private:
 		max_position_component_ = tr::default_max_position_component();
 		max_velocity_component_ = tr::default_max_velocity_component();
 		max_force_component_ = tr::default_max_force_component();
-		deactivate_speed_ = tr::default_deactivate_speed(epsilon_);
-		deactivate_count_ = 4;
+		deactivate_speed_ = tr::one() * tr::from_milli(200); // 0.2
+		deactivate_count_ = 32;
+		micro_collision_threshold_ = tr::one() * tr::from_milli(1000); // 1.0
 	}
 
 	void report_collisions();
@@ -635,34 +636,56 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		if (tr::abs(new_pos.x - solid_ptr->position_.x) < deactivate_speed_ &&
 		    tr::abs(new_pos.y - solid_ptr->position_.y) < deactivate_speed_ &&
 		    tr::abs(new_pos.z - solid_ptr->position_.z) < deactivate_speed_) {
-			solid_ptr->deactivate_count_++;
-			if (solid_ptr->deactivate_count_ > deactivate_count_) {
-				int j;
-				for (j = static_cast<int>(solid_ptr->constraints_.size()) - 1; j >= 0; --j) {
-					auto * con = solid_ptr->constraints_[j];
-					auto * start = con->start_solid_.get();
-					auto * end = con->end_solid_.get();
-					// Stay awake while the constraint is loaded — otherwise both
-					// endpoints can sleep at non-equilibrium and freeze the system.
-					if (con->is_loaded(deactivate_speed_))
+
+			// If gravity is non-zero, we only increment the deactivation count if
+			// we are actually supported by something (contact or constraint).
+			bool supported = false;
+			if (gravity_.x == T {} && gravity_.y == T {} && gravity_.z == T {}) {
+				supported = true;
+			} else {
+				for (int k = 0; k < solid_ptr->touch_count_; ++k) {
+					if (solid_ptr->touches_[k].last_tick == current_tick_) {
+						supported = true;
 						break;
-					// Never deactivate a body constrained to a static/infinite-mass
-					// body — the constraint represents a persistent external force
-					// (e.g. spring anchored to the world).
-					if (start != solid_ptr) {
-						if (start->mass_ == solid<T>::infinite_mass())
-							break;
-						if (start->active_ && start->deactivate_count_ <= deactivate_count_)
-							break;
-					} else if (end) {
-						if (end->mass_ == solid<T>::infinite_mass())
-							break;
-						if (end->active_ && end->deactivate_count_ <= deactivate_count_)
-							break;
 					}
 				}
-				if (j < 0)
-					solid_ptr->deactivate();
+				if (!supported && !solid_ptr->constraints_.empty()) {
+					supported = true; // existing code below will check if they are loaded
+				}
+			}
+
+			if (supported) {
+				solid_ptr->deactivate_count_++;
+				if (solid_ptr->deactivate_count_ > deactivate_count_) {
+					int j;
+					for (j = static_cast<int>(solid_ptr->constraints_.size()) - 1; j >= 0; --j) {
+						auto * con = solid_ptr->constraints_[j];
+						auto * start = con->start_solid_.get();
+						auto * end = con->end_solid_.get();
+						// Stay awake while the constraint is loaded — otherwise both
+						// endpoints can sleep at non-equilibrium and freeze the system.
+						if (con->is_loaded(deactivate_speed_))
+							break;
+						// Never deactivate a body constrained to a static/infinite-mass
+						// body — the constraint represents a persistent external force
+						// (e.g. spring anchored to the world).
+						if (start != solid_ptr) {
+							if (start->mass_ == solid<T>::infinite_mass())
+								break;
+							if (start->active_ && start->deactivate_count_ <= deactivate_count_)
+								break;
+						} else if (end) {
+							if (end->mass_ == solid<T>::infinite_mass())
+								break;
+							if (end->active_ && end->deactivate_count_ <= deactivate_count_)
+								break;
+						}
+					}
+					if (j < 0)
+						solid_ptr->deactivate();
+				}
+			} else {
+				solid_ptr->deactivate_count_ = 0;
 			}
 		} else {
 			solid_ptr->deactivate_count_ = 0;
@@ -1034,27 +1057,29 @@ void simulator<T>::solve_contacts(T dt) {
 	if (contact_pairs_.empty())
 		return;
 
-	// --- 2. Warm-start ---
-	// In hop bodies are stateful; their velocity already includes the
-	// effect of last tick's impulses. Warm-starting must therefore
-	// be incremental. We initialize p.accum_n from the cache but
-	// DO NOT apply it to the velocity (it's already there). The GS
-	// will then adjust it.
-	for (auto & p : contact_pairs_) {
-		// p.accum_n and p.accum_t are already set from slot
-	}
-
-	// --- 3. Gauss–Seidel sweeps ---
-	// Snapshot vn0 (relative normal velocity entering the GS, after warm-start)
-	// before any constraints run. The restitution target is only activated for
-	// pairs that were closing at this moment; a pair that another constraint has
-	// already separated should not receive a bounce impulse based on stale data.
+	// --- 2. Snapshot pre-solver velocities ---
+	// Snapshot vn0 (relative normal velocity before any impulses run this tick)
+	// to guard restitution. The restitution target is only activated for pairs
+	// that were closing at this moment; a pair that another constraint (or the
+	// warm-start boost) has already separated should not receive a bounce
+	// impulse based on stale data.
 	for (auto & p : contact_pairs_) {
 		vec3<T> vrel0;
 		sub(vrel0, p.b->velocity_, p.a->velocity_);
 		p.vn0 = dot(vrel0, p.normal);
 	}
 
+	// --- 3. Warm-start ---
+	// In hop bodies are stateful; their velocity already includes the
+	// effect of last tick's impulses. Warm-starting is therefore
+	// incremental: we keep p.accum_n and p.accum_t from the cache as 
+	// starting points for the GS solve, but DO NOT apply them to the 
+	// velocity again (which would double-count).
+	for (auto & p : contact_pairs_) {
+		// slot data already in p
+	}
+
+	// --- 4. Gauss–Seidel sweeps ---
 	// Each iteration solves the normal constraint (clamped accumulated
 	// impulse ≥ 0 → no sticky pull) and then the friction constraint
 	// (Coulomb cone clamped to the current accumulated normal). Order is
