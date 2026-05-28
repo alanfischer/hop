@@ -331,7 +331,7 @@ private:
 	vec3<T> fluid_velocity_;
 	vec3<T> gravity_;
 	T epsilon_ {};
-	bool average_normals_ = false;
+	bool average_normals_ = true;
 	T max_position_component_ {};
 	T max_velocity_component_ {};
 	T max_force_component_ {};
@@ -601,6 +601,15 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				sub(slide_vel, temp);
 			}
 
+			// Project leftover motion onto the tangent plane as well.
+			// Conserving the full magnitude of left_over (as the previous
+			// implementation did) injects energy during angled hits.
+			T dn = dot(left_over, c.normal);
+			if (dn < T {}) {
+				mul(temp, c.normal, dn);
+				sub(left_over, temp);
+			}
+
 			if (too_small(left_over, epsilon_)) {
 				new_pos.set(old_pos);
 				break;
@@ -612,13 +621,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				add(new_pos, old_pos, temp);
 				break;
 			} else {
-				if (!normalize_carefully(vel, slide_vel, epsilon_)) {
-					new_pos.set(old_pos);
-					break;
-				} else {
-					mul(vel, length(left_over));
-					add(new_pos, old_pos, vel);
-				}
+				add(new_pos, old_pos, left_over);
 				first = false;
 			}
 		} else {
@@ -995,8 +998,6 @@ void simulator<T>::solve_contacts(T dt) {
 				p.normal.set(slot.normal);
 			}
 			p.accum_n = slot.accum_n;
-			// slot.accum_t = impulse applied to self. pair.accum_t = impulse
-			// applied to b. If self == b, they match; if self == a, negate.
 			if (slot_is_a) {
 				neg(p.accum_t, slot.accum_t);
 			} else {
@@ -1034,36 +1035,13 @@ void simulator<T>::solve_contacts(T dt) {
 		return;
 
 	// --- 2. Warm-start ---
-	// Apply each pair's previous-tick accumulated impulses to seed velocities.
-	// For a resting stack this brings velocities back to the converged state
-	// in one shot; the iterations below then verify and apply nothing further.
+	// In hop bodies are stateful; their velocity already includes the
+	// effect of last tick's impulses. Warm-starting must therefore
+	// be incremental. We initialize p.accum_n from the cache but
+	// DO NOT apply it to the velocity (it's already there). The GS
+	// will then adjust it.
 	for (auto & p : contact_pairs_) {
-		if (p.accum_n != zero_val) {
-			vec3<T> dv;
-			mul(dv, p.normal, p.accum_n);
-			if (p.inv_ma > zero_val) {
-				vec3<T> da;
-				mul(da, dv, -p.inv_ma);
-				add(p.a->velocity_, da);
-			}
-			if (p.inv_mb > zero_val) {
-				vec3<T> db;
-				mul(db, dv, p.inv_mb);
-				add(p.b->velocity_, db);
-			}
-		}
-		if (length_squared(p.accum_t) > zero_val) {
-			if (p.inv_ma > zero_val) {
-				vec3<T> da;
-				mul(da, p.accum_t, -p.inv_ma);
-				add(p.a->velocity_, da);
-			}
-			if (p.inv_mb > zero_val) {
-				vec3<T> db;
-				mul(db, p.accum_t, p.inv_mb);
-				add(p.b->velocity_, db);
-			}
-		}
+		// p.accum_n and p.accum_t are already set from slot
 	}
 
 	// --- 3. Gauss–Seidel sweeps ---

@@ -43,20 +43,13 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 		auto pos_z = constants<T>::z_unit_vec3();
 
 		vec3<T> face_normal;
-		T depth;
-		if (dix <= diy && dix <= diz && dix <= dax && dix <= day && dix <= daz) {
-			face_normal.set(neg_x); depth = dix;
-		} else if (diy <= diz && diy <= dax && diy <= day && diy <= daz) {
-			face_normal.set(neg_y); depth = diy;
-		} else if (diz <= dax && diz <= day && diz <= daz) {
-			face_normal.set(neg_z); depth = diz;
-		} else if (dax <= day && dax <= daz) {
-			face_normal.set(pos_x); depth = dax;
-		} else if (day <= daz) {
-			face_normal.set(pos_y); depth = day;
-		} else {
-			face_normal.set(pos_z); depth = daz;
-		}
+		T depth = diz;
+		face_normal.set(neg_z);
+		if (daz < depth) { depth = daz; face_normal.set(pos_z); }
+		if (dix < depth) { depth = dix; face_normal.set(neg_x); }
+		if (dax < depth) { depth = dax; face_normal.set(pos_x); }
+		if (diy < depth) { depth = diy; face_normal.set(neg_y); }
+		if (day < depth) { depth = day; face_normal.set(pos_y); }
 
 		if (length_squared(seg.direction) > T {} && dot(seg.direction, face_normal) >= T {})
 			return;
