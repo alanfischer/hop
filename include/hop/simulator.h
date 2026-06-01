@@ -1108,14 +1108,24 @@ void simulator<T>::solve_contacts(T dt) {
 			vec3<T> vrel;
 			sub(vrel, p.b->velocity_, p.a->velocity_);
 			T vn = dot(vrel, p.normal);
-			// Restitution target: only when this contact began with a true
-			// impact (closing speed above the micro threshold) AND the pair
-			// was actually closing at the start of the GS. If another
-			// constraint already separated this pair, the stale impact_speed
-			// target would over-push and inject energy.
+			// Restitution target: separate at `cor` times the relative normal
+			// velocity the pair was *actually* closing at when the solver began
+			// (vn0, measured along this same pair normal). Because |target| =
+			// cor·|vn0| ≤ |vn0| for cor ≤ 1, the post-solve separation can never
+			// exceed the approach — restitution is guaranteed dissipative.
+			//
+			// Earlier this targeted cor·impact_speed, where impact_speed is the
+			// max approach seen over the tick's sub-steps measured along the
+			// per-contact TOI normal. That quantity can exceed |vn0| (different
+			// normal, max-over-sub-steps latch), so each contact separated faster
+			// than it closed — an effective COR > 1. In a deep frictionless pile
+			// the many contacts compounded that gain faster than the COR-0.75
+			// ball-ball collisions could bleed it, so energy ran away (KE → 1e7,
+			// balls flung through the floor). impact_speed is still recorded for
+			// the wake/callback logic; it must not drive the restitution target.
 			T target = zero_val;
-			if (p.vn0 < zero_val && p.impact_speed > micro_collision_threshold_) {
-				target = p.cor * p.impact_speed;
+			if (-p.vn0 > micro_collision_threshold_) {
+				target = -p.cor * p.vn0;
 			}
 			T lambda_n = (target - vn) / inv_m_sum;
 			T new_acc = p.accum_n + lambda_n;

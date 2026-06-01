@@ -83,7 +83,7 @@ int main(int argc, char ** argv) {
 	for (int i = 0; i < COUNT; ++i) {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
-		s->set_restitution_combine(hop::restitution_combine::minimum);
+		s->set_restitution_combine(hop::restitution_combine::maximum);  // match demo_stress / rp3d
 		s->set_coefficient_of_restitution(ff(COR));
 		s->set_coefficient_of_static_friction(ff(FR));
 		s->set_coefficient_of_dynamic_friction(ff(FR));
@@ -105,50 +105,37 @@ int main(int argc, char ** argv) {
 
 	printf("scene: COUNT=%d  COLS=%d  Z_LAYERS=%d  room=%dx%dx%d  iters=%d COR=%.2f\n",
 	       COUNT, COLS, Z_LAYERS, ROOM_HALF*2, ROOM_HALF*2, ROOM_HEIGHT, ITERS, COR);
-	printf("%5s %7s %7s %10s %8s %8s %8s %8s %6s\n",
-	       "tick", "active", "asleep", "KE", "maxV", "maxZ", "meanZ", "maxPen", "hang");
+	printf("%7s %7s %7s %12s %8s %8s %8s %8s %6s\n",
+	       "tick", "active", "asleep", "KE", "maxV", "minZ", "maxZ", "meanZ", "below");
 
-	const float diam = SPHERE_R * 2.0f;
-	double prevE = 0; double injPos = 0, injNeg = 0;
+	double prevKE = 0;
 	for (int t = 1; t <= TICKS; ++t) {
 		sim.update(tr::from_milli(16));
-		// per-tick total mechanical energy to track injection
-		double E = 0;
-		for (auto & s : spheres) { auto v=s->get_velocity(); auto p=s->get_position();
-			E += 0.5*(v.x*v.x+v.y*v.y+v.z*v.z) + 9.81*p.z; }
-		if (t > 1) { double d = E - prevE; if (d>0) injPos += d; else injNeg += d; }
-		prevE = E;
-		if (t % 60 == 0 || t == 1) {
-			float ke = 0, maxz = 0, sumz = 0, maxv = 0, maxpen = 0;
-			int hang = 0;
-			for (auto & s : spheres) {
-				auto p = s->get_position();
-				auto v = s->get_velocity();
-				float sp2 = v.x*v.x + v.y*v.y + v.z*v.z;
-				ke += 0.5f * sp2;
-				maxv = std::max(maxv, std::sqrt(sp2));
-				maxz = std::max(maxz, p.z);
-				sumz += p.z;
-				// nearest-neighbour overlap + support check
-				bool supported = p.z <= SPHERE_R + 0.08f;
-				for (auto & o : spheres) {
-					if (o.get() == s.get()) continue;
-					auto q = o->get_position();
-					float dx = q.x-p.x, dy = q.y-p.y, dz = q.z-p.z;
-					float d2 = dx*dx+dy*dy+dz*dz;
-					if (d2 < diam*diam) {
-						float pen = diam - std::sqrt(d2);
-						maxpen = std::max(maxpen, pen);
-					}
-					if (q.z < p.z && d2 <= (diam+0.05f)*(diam+0.05f)) supported = true;
-				}
-				if (sp2 <= 0.04f && !supported) hang++;
-			}
-			int active = sim.count_active_solids();
-			printf("%5d %7d %7d %10.2f %8.3f %8.3f %8.3f %8.4f %6d  E=%.0f  +inj=%.0f -dis=%.0f\n",
-			       t, active, COUNT - active, ke, maxv, maxz, sumz/spheres.size(), maxpen, hang,
-			       prevE, injPos, injNeg);
+
+		// Cheap O(n) stats every tick so a transient is never missed between samples.
+		float ke = 0, maxv = 0, maxz = -1e9f, minz = 1e9f, sumz = 0;
+		int below = 0;
+		for (auto & s : spheres) {
+			auto p = s->get_position();
+			auto v = s->get_velocity();
+			float sp2 = v.x*v.x + v.y*v.y + v.z*v.z;
+			ke += 0.5f * sp2;
+			maxv = std::max(maxv, std::sqrt(sp2));
+			maxz = std::max(maxz, p.z);
+			minz = std::min(minz, p.z);
+			sumz += p.z;
+			if (p.z < SPHERE_R - 0.05f) ++below;   // a sphere center this low has breached the floor
 		}
+
+		bool spike  = t > 120 && ke > prevKE * 1.5f && ke - prevKE > 100.0f;  // the "hotspot"
+		bool breach = below > 0;                                             // floor "broke"
+		if (t % 300 == 0 || t == 1 || spike || breach) {
+			int active = sim.count_active_solids();
+			printf("%7d %7d %7d %12.1f %8.3f %8.3f %8.3f %8.3f %6d%s%s\n",
+			       t, active, COUNT - active, ke, maxv, minz, maxz, sumz/spheres.size(), below,
+			       spike ? "  <-- KE SPIKE" : "", breach ? "  <-- FLOOR BREACH" : "");
+		}
+		prevKE = ke;
 	}
 	return 0;
 }
