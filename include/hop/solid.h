@@ -239,6 +239,13 @@ public:
 	void deactivate() {
 		active_ = false;
 		deactivate_count_ = 0;
+		// A sleeping body is at rest by definition. The deactivation test gates on
+		// positional stillness, but the swept-collision snap can leave a small
+		// residual velocity in velocity_ each tick (the body jitters in place
+		// without its position drifting). Freezing that residual would (a) make a
+		// "resting" pile carry phantom kinetic energy and (b) inject it back the
+		// instant a neighbour wakes the body. Zero it so sleep means rest.
+		velocity_.reset();
 	}
 	bool active() const { return active_ && simulator_ != nullptr; }
 

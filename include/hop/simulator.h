@@ -633,9 +633,17 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 
 	// Deactivation
 	if (deactivate_count_ > 0 && solid_ptr->deactivate_count_ >= 0) {
-		if (tr::abs(new_pos.x - solid_ptr->position_.x) < deactivate_speed_ &&
-		    tr::abs(new_pos.y - solid_ptr->position_.y) < deactivate_speed_ &&
-		    tr::abs(new_pos.z - solid_ptr->position_.z) < deactivate_speed_) {
+		// deactivate_speed_ is a speed, so the per-tick displacement it permits
+		// scales with dt: |Δx| < deactivate_speed_ · dt. Comparing the raw
+		// displacement against deactivate_speed_ directly (as this once did) made
+		// the effective velocity threshold 1/dt times too large — at dt = 16 ms a
+		// body drifting at ~12 m/s still counted as "still" and could be frozen
+		// in mid-air the instant it brushed a neighbour (the classic "ball hanging
+		// in the air"). Gating on true speed lets only genuinely slow bodies sleep.
+		T deactivate_disp = deactivate_speed_ * dt;
+		if (tr::abs(new_pos.x - solid_ptr->position_.x) < deactivate_disp &&
+		    tr::abs(new_pos.y - solid_ptr->position_.y) < deactivate_disp &&
+		    tr::abs(new_pos.z - solid_ptr->position_.z) < deactivate_disp) {
 
 			// If gravity is non-zero, we only increment the deactivation count if
 			// we are actually supported by something (contact or constraint).
@@ -664,7 +672,13 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 						auto * end = con->end_solid_.get();
 						// Stay awake while the constraint is loaded — otherwise both
 						// endpoints can sleep at non-equilibrium and freeze the system.
-						if (con->is_loaded(deactivate_speed_))
+						// is_loaded's argument is a *distance* tolerance (how far the
+						// constraint may sit from rest and still count as unloaded), so
+						// it must be a small length — epsilon_, not deactivate_speed_.
+						// deactivate_speed_ is a velocity; feeding it here let a spring
+						// freeze a full deactivate_speed_ away from rest (e.g. 0.2 m
+						// past a 2 m rest length) before its endpoints went to sleep.
+						if (con->is_loaded(epsilon_))
 							break;
 						// Never deactivate a body constrained to a static/infinite-mass
 						// body — the constraint represents a persistent external force

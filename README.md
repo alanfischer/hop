@@ -24,6 +24,7 @@ Rotational support is a work in progress — see `docs/rotation_plan.md` for the
 - **Swept collision detection** (continuous collision detection) for sphere, capsule, box, and convex solid shapes
 - **Multiple numerical integrators**: Euler, Improved Euler, Heun (default), Runge-Kutta
 - **Collision response** with coefficient of restitution, conservation of momentum, and friction
+- **Stacking contact solver** — a post-integration Gauss–Seidel pass over the touched-pair graph (warm-started, with restitution targets and Coulomb-cone friction at the velocity level) lets resting piles transmit load and settle; iteration count is tunable via `set_solver_iterations`
 - **Constraint system** with spring constants, damping, and distance thresholds
 - **Deactivation/sleeping** for inactive solids
 - **BVH spatial acceleration** — bounding volume hierarchy for broad-phase collision queries via `bvh_manager`
@@ -32,7 +33,6 @@ Rotational support is a work in progress — see `docs/rotation_plan.md` for the
 - **Fixed-point arithmetic** — `fixed16` & `fixed32` types with polynomial sin/cos/atan2, Newton-Raphson sqrt, and branchless min/max/abs
 - **JavaScript bindings** — WebAssembly build via Emscripten/embind for browser-based physics
 - **Zero external dependencies** — only the C++ standard library
-- **Zero-allocation hot paths** — the simulator runs a full tick without heap allocation; scratch state is stack-resident
 
 ## Overlap / Intersection Queries
 
@@ -143,9 +143,9 @@ auto sh = std::make_shared<shape<float>>(sphere<float>{{}, 1.0f});
 s->add_shape(sh);
 sim->add_solid(s);
 
-// Simulate 1 second in 10ms steps
+// Simulate 1 second in 10ms steps. dt is in seconds — match the gravity units.
 for (int i = 0; i < 100; ++i) {
-	sim->update(10);
+	sim->update(0.01f);
 }
 // s->get_position().z is now ~5.1 (freefall: 10 - 0.5 * 9.81 * 1^2)
 ```
@@ -199,6 +199,7 @@ include/hop/
   shape.h                # collision geometry (box, sphere, capsule, convex)
   constraint.h           # spring/damper constraints
   collision.h            # collision result data
+  collide.h              # swept-collision routines (shape-vs-segment + solid-pair dispatch)
   manager.h              # spatial partitioning interface
   bvh.h                  # bounding volume hierarchy
   bvh_manager.h          # BVH-based manager implementation
