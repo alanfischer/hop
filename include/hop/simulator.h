@@ -1041,19 +1041,19 @@ void simulator<T>::solve_contacts(T dt) {
 				p.accum_t.set(slot.accum_t);
 			}
 			p.impact_speed = slot.impact_speed;
-			// Honor the per-body `coefficient_of_restitution_override_` flag: when
-			// either side overrides, that side's COR wins; if both override, take the
-			// lower (more inelastic) so an "I never bounce" body can't be made bouncy
-			// by colliding with a perfectly elastic surface.
-			if (a->coefficient_of_restitution_override_ && b->coefficient_of_restitution_override_) {
-				p.cor = a->coefficient_of_restitution_ < b->coefficient_of_restitution_
-				            ? a->coefficient_of_restitution_ : b->coefficient_of_restitution_;
-			} else if (a->coefficient_of_restitution_override_) {
-				p.cor = a->coefficient_of_restitution_;
-			} else if (b->coefficient_of_restitution_override_) {
-				p.cor = b->coefficient_of_restitution_;
-			} else {
-				p.cor = (a->coefficient_of_restitution_ + b->coefficient_of_restitution_) * tr::half();
+			// Combine the two bodies' coefficients of restitution. Each body
+			// carries a combine mode; the higher-precedence mode governs the
+			// contact (average < minimum < multiply < maximum, per the enum
+			// order), so a single body can dictate the contact's bounciness
+			// regardless of its partner.
+			const T ca = a->coefficient_of_restitution_;
+			const T cb = b->coefficient_of_restitution_;
+			switch (a->restitution_combine_ > b->restitution_combine_ ? a->restitution_combine_ : b->restitution_combine_) {
+			case restitution_combine::minimum: p.cor = ca < cb ? ca : cb; break;
+			case restitution_combine::maximum: p.cor = ca > cb ? ca : cb; break;
+			case restitution_combine::multiply: p.cor = ca * cb; break;
+			case restitution_combine::average:
+			default: p.cor = (ca + cb) * tr::half(); break;
 			}
 			p.mu_d = (a->coefficient_of_dynamic_friction_ + b->coefficient_of_dynamic_friction_) * tr::half();
 			p.inv_ma = a->inv_mass_;

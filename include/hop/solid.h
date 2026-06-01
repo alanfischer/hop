@@ -14,6 +14,16 @@ template <typename T> class constraint;
 template <typename T> class simulator;
 template <typename T> class manager;
 
+// How two contacting bodies' coefficients of restitution are combined into the
+// single COR used to resolve the contact. Each body carries its own mode; when
+// the two disagree, the mode declared later in this enum wins (the enumerators
+// are ordered by ascending precedence: average < minimum < multiply < maximum).
+// This lets a single body dictate the contact's bounciness regardless of its
+// partner — e.g. a body set to `maximum` always bounces off a less-elastic
+// surface as if both were elastic, and a body set to `minimum` can never be
+// made bouncy by colliding with a perfectly elastic wall.
+enum class restitution_combine { average, minimum, multiply, maximum };
+
 template <typename T> class solid : public std::enable_shared_from_this<solid<T>> {
 public:
 	using ptr = std::shared_ptr<solid<T>>;
@@ -68,7 +78,7 @@ public:
 		force_.reset();
 		coefficient_of_gravity_ = tr::one();
 		coefficient_of_restitution_ = tr::half();
-		coefficient_of_restitution_override_ = false;
+		restitution_combine_ = restitution_combine::average;
 		coefficient_of_static_friction_ = tr::half();
 		coefficient_of_dynamic_friction_ = tr::half();
 		coefficient_of_effective_drag_ = T {};
@@ -166,8 +176,8 @@ public:
 	T get_coefficient_of_gravity() const { return coefficient_of_gravity_; }
 	void set_coefficient_of_restitution(T c) { coefficient_of_restitution_ = c; }
 	T get_coefficient_of_restitution() const { return coefficient_of_restitution_; }
-	void set_coefficient_of_restitution_override(bool o) { coefficient_of_restitution_override_ = o; }
-	bool get_coefficient_of_restitution_override() const { return coefficient_of_restitution_override_; }
+	void set_restitution_combine(restitution_combine m) { restitution_combine_ = m; }
+	restitution_combine get_restitution_combine() const { return restitution_combine_; }
 	void set_coefficient_of_static_friction(T c) { coefficient_of_static_friction_ = c; }
 	T get_coefficient_of_static_friction() const { return coefficient_of_static_friction_; }
 	void set_coefficient_of_dynamic_friction(T c) { coefficient_of_dynamic_friction_ = c; }
@@ -300,7 +310,7 @@ private:
 
 	// -- Warm: collision response (read on actual hits, not per pair) --
 	T coefficient_of_restitution_ {};
-	bool coefficient_of_restitution_override_ = false;
+	restitution_combine restitution_combine_ = restitution_combine::average;
 	T coefficient_of_static_friction_ {};
 	T coefficient_of_dynamic_friction_ {};
 	int collision_scope_ = -1;

@@ -83,7 +83,7 @@ int main(int argc, char ** argv) {
 	for (int i = 0; i < COUNT; ++i) {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
-		s->set_coefficient_of_restitution_override(true);
+		s->set_restitution_combine(hop::restitution_combine::minimum);
 		s->set_coefficient_of_restitution(ff(COR));
 		s->set_coefficient_of_static_friction(ff(FR));
 		s->set_coefficient_of_dynamic_friction(ff(FR));

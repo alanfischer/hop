@@ -81,7 +81,7 @@ template <typename T> static void run(int n_spheres, int steps) {
 	for (int i = 0; i < n_spheres; ++i) {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
-		s->set_coefficient_of_restitution_override(true);
+		s->set_restitution_combine(hop::restitution_combine::minimum);
 		s->set_coefficient_of_restitution(ff(cor));
 		s->set_coefficient_of_static_friction(ff(fric));
 		s->set_coefficient_of_dynamic_friction(ff(fric));

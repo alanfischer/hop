@@ -19,7 +19,7 @@ async function main() {
 		wall.addShape(Module.HopShape.box(hx, hy, hz));
 		wall.setCoefficientOfGravity(0);
 		wall.setCoefficientOfRestitution(1.0);
-		wall.setCoefficientOfRestitutionOverride(true);
+		wall.setRestitutionCombine(1);
 		wall.setFriction(0, 0);
 		wall.setPosition(px, py, pz);
 		return wall;
@@ -45,7 +45,7 @@ async function main() {
 		solid.setMass(1);
 		solid.addShape(shape);
 		solid.setCoefficientOfRestitution(COR);
-		solid.setCoefficientOfRestitutionOverride(true);
+		solid.setRestitutionCombine(1);
 		solid.setFriction(0, 0);
 		return solid;
 	}
@@ -80,7 +80,7 @@ async function main() {
 	const dumbbell = sim.addSolid();
 	dumbbell.setMass(1);
 	dumbbell.setCoefficientOfRestitution(COR);
-	dumbbell.setCoefficientOfRestitutionOverride(true);
+	dumbbell.setRestitutionCombine(1);
 	dumbbell.setFriction(0, 0);
 	const dbLeft = Module.HopShape.sphere(0.35);
 	dbLeft.setLocalPosition(-0.7, 0, 0);

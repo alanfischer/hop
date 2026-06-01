@@ -48,7 +48,7 @@ int main() {
                 auto s = std::make_shared<hop::solid<T>>();
                 s->set_mass(1.0f);
                 s->set_coefficient_of_restitution(0.5f);
-                s->set_coefficient_of_restitution_override(true);
+                s->set_restitution_combine(hop::restitution_combine::minimum);
                 s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(0.4f)));
                 s->set_position({ x * 1.0f - 2.0f, y * 1.0f - 2.0f, 2.0f + z * 1.2f });
                 sim.add_solid(s);

@@ -289,7 +289,7 @@ template <typename T> void run() {
 	auto set_common = [&](const std::shared_ptr<hop::solid<T>> & s) {
 		s->set_mass(tr::one());
 		s->set_coefficient_of_restitution(cor);
-		s->set_coefficient_of_restitution_override(true);
+		s->set_restitution_combine(hop::restitution_combine::minimum);
 		s->set_coefficient_of_static_friction(fric_zero);
 		s->set_coefficient_of_dynamic_friction(fric_zero);
 		s->set_collide_with_scope(normal_channels);

@@ -74,7 +74,8 @@ public:
 	emscripten::val getVelocity() { return vec3_to_val(s_->get_velocity()); }
 
 	void setCoefficientOfRestitution(float cor) { s_->set_coefficient_of_restitution(cor); }
-	void setCoefficientOfRestitutionOverride(bool override) { s_->set_coefficient_of_restitution_override(override); }
+	// Combine mode follows hop::restitution_combine: 0=average, 1=minimum, 2=multiply, 3=maximum.
+	void setRestitutionCombine(int mode) { s_->set_restitution_combine(static_cast<hop::restitution_combine>(mode)); }
 	void setCoefficientOfGravity(float cog) { s_->set_coefficient_of_gravity(cog); }
 	void setFriction(float static_f, float dynamic_f) {
 		s_->set_coefficient_of_static_friction(static_f);
@@ -151,7 +152,7 @@ EMSCRIPTEN_BINDINGS(hop) {
 	    .function("getPosition", &HopSolid::getPosition)
 	    .function("getVelocity", &HopSolid::getVelocity)
 	    .function("setCoefficientOfRestitution", &HopSolid::setCoefficientOfRestitution)
-	    .function("setCoefficientOfRestitutionOverride", &HopSolid::setCoefficientOfRestitutionOverride)
+	    .function("setRestitutionCombine", &HopSolid::setRestitutionCombine)
 	    .function("setCoefficientOfGravity", &HopSolid::setCoefficientOfGravity)
 	    .function("setFriction", &HopSolid::setFriction)
 	    .function("setCollisionCallback", &HopSolid::setCollisionCallback);

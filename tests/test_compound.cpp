@@ -42,7 +42,7 @@ template <typename T> static void test_sphere_local_position_equivalence(const c
 	auto sA = std::make_shared<solid<T>>();
 	sA->set_mass(tr::one());
 	sA->set_coefficient_of_restitution(tr::one());
-	sA->set_coefficient_of_restitution_override(true);
+	sA->set_restitution_combine(restitution_combine::minimum);
 	auto sphA = std::make_shared<shape<T>>(hop::sphere<T>(tr::half()));
 	sphA->set_local_position({ tr::from_int(3), T {}, T {} });
 	sA->add_shape(sphA);
@@ -67,7 +67,7 @@ template <typename T> static void test_sphere_local_position_equivalence(const c
 	auto sB = std::make_shared<solid<T>>();
 	sB->set_mass(tr::one());
 	sB->set_coefficient_of_restitution(tr::one());
-	sB->set_coefficient_of_restitution_override(true);
+	sB->set_restitution_combine(restitution_combine::minimum);
 	sB->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
 	sB->set_position({ tr::from_int(3), T {}, T {} });
 	simB.add_solid(sB);
@@ -100,7 +100,7 @@ template <typename T> static void test_box_local_position_equivalence(const char
 	auto sA = std::make_shared<solid<T>>();
 	sA->set_mass(tr::one());
 	sA->set_coefficient_of_restitution(tr::one());
-	sA->set_coefficient_of_restitution_override(true);
+	sA->set_restitution_combine(restitution_combine::minimum);
 	auto boxA = std::make_shared<shape<T>>(
 	    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()),
 	              vec3<T>(tr::half(), tr::half(), tr::half())));
@@ -127,7 +127,7 @@ template <typename T> static void test_box_local_position_equivalence(const char
 	auto sB = std::make_shared<solid<T>>();
 	sB->set_mass(tr::one());
 	sB->set_coefficient_of_restitution(tr::one());
-	sB->set_coefficient_of_restitution_override(true);
+	sB->set_restitution_combine(restitution_combine::minimum);
 	sB->add_shape(std::make_shared<shape<T>>(
 	    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()),
 	              vec3<T>(tr::half(), tr::half(), tr::half()))));
@@ -179,7 +179,7 @@ template <typename T> static void test_dumbbell_collides_both_sides(const char *
 	auto ballL = std::make_shared<solid<T>>();
 	ballL->set_mass(tr::one());
 	ballL->set_coefficient_of_restitution(tr::one());
-	ballL->set_coefficient_of_restitution_override(true);
+	ballL->set_restitution_combine(restitution_combine::minimum);
 	ballL->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
 	ballL->set_position({ -tr::from_int(5), T {}, T {} });
 	ballL->set_velocity({ tr::from_int(3), T {}, T {} });
@@ -209,7 +209,7 @@ template <typename T> static void test_dumbbell_collides_both_sides(const char *
 	auto ballR = std::make_shared<solid<T>>();
 	ballR->set_mass(tr::one());
 	ballR->set_coefficient_of_restitution(tr::one());
-	ballR->set_coefficient_of_restitution_override(true);
+	ballR->set_restitution_combine(restitution_combine::minimum);
 	ballR->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
 	ballR->set_position({ tr::from_int(5), T {}, T {} });
 	ballR->set_velocity({ -tr::from_int(3), T {}, T {} });
@@ -233,7 +233,7 @@ template <typename T> static void test_character_compound_lands_on_feet(const ch
 	auto ch = std::make_shared<solid<T>>();
 	ch->set_mass(tr::one());
 	ch->set_coefficient_of_restitution(T {});  // inelastic: settle on floor
-	ch->set_coefficient_of_restitution_override(true);
+	ch->set_restitution_combine(restitution_combine::minimum);
 	ch->set_coefficient_of_static_friction(T {});
 	ch->set_coefficient_of_dynamic_friction(T {});
 
@@ -325,7 +325,7 @@ template <typename T> static void test_impact_with_local_position(const char * l
 	auto s = std::make_shared<solid<T>>();
 	s->set_mass(tr::one());
 	s->set_coefficient_of_restitution(T {});
-	s->set_coefficient_of_restitution_override(true);
+	s->set_restitution_combine(restitution_combine::minimum);
 	auto sph = std::make_shared<shape<T>>(hop::sphere<T>(tr::half()));
 	sph->set_local_position({ T {}, T {}, tr::half() });  // sphere lifted 0.5 within solid
 	s->add_shape(sph);
@@ -380,7 +380,7 @@ template <typename T> static void test_capsule_vs_convex_preserves_collider(cons
 	auto mover = std::make_shared<solid<T>>();
 	mover->set_mass(tr::one());
 	mover->set_coefficient_of_restitution(tr::one());
-	mover->set_coefficient_of_restitution_override(true);
+	mover->set_restitution_combine(restitution_combine::minimum);
 	mover->add_shape(std::make_shared<shape<T>>(
 	    hop::capsule<T>(vec3<T>(), vec3<T>(T {}, T {}, tr::from_int(1)), tr::from_milli(300))));
 	mover->set_position({ T {}, T {}, T {} });

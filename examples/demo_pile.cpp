@@ -100,7 +100,7 @@ template <typename T> static void run() {
 		for (int i = 0; i < COUNT; ++i) {
 			auto s = std::make_shared<hop::solid<T>>();
 			s->set_mass(tr::one());
-			s->set_coefficient_of_restitution_override(true);
+			s->set_restitution_combine(hop::restitution_combine::minimum);
 			s->set_coefficient_of_restitution(ff(0.05f));
 			s->set_coefficient_of_static_friction(ff(0.4f));
 			s->set_coefficient_of_dynamic_friction(ff(0.4f));

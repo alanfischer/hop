@@ -24,7 +24,7 @@ static std::shared_ptr<hop::solid<T>> floor_solid(hop::simulator<T> & sim, float
 static std::shared_ptr<hop::solid<T>> ball(hop::simulator<T> & sim, hop::vec3<T> pos, float r=0.4f, float cor=0.5f) {
 	auto s = std::make_shared<hop::solid<T>>();
 	s->set_mass(1.0f);
-	s->set_coefficient_of_restitution_override(true);
+	s->set_restitution_combine(hop::restitution_combine::minimum);
 	s->set_coefficient_of_restitution(cor);
 	s->set_coefficient_of_static_friction(0);
 	s->set_coefficient_of_dynamic_friction(0);
@@ -101,7 +101,7 @@ static void test_box(int n, float cor) {
 	std::vector<std::shared_ptr<hop::solid<T>>> bs;
 	int i=0;
 	for(int z=0;z<n;z++)for(int y=0;y<n;y++)for(int x=0;x<n;x++,i++){
-		auto s=ball(sim,{0,0,0},r,cor); s->set_coefficient_of_restitution_override(true);
+		auto s=ball(sim,{0,0,0},r,cor); s->set_restitution_combine(hop::restitution_combine::minimum);
 		float px=-(half-spacing*0.5f)+x*spacing, py=-(half-spacing*0.5f)+y*spacing, pz=spacing*0.5f+z*spacing;
 		s->set_position({px,py,pz});
 		float vx=((i*7+3)%21-10)*0.5f, vy=((i*13+5)%21-10)*0.5f, vz=((i*17+9)%21-10)*0.5f;
@@ -128,7 +128,7 @@ static void test_gas(int n, float cor) {
 	std::vector<std::shared_ptr<hop::solid<T>>> bs;
 	int i=0;
 	for(int z=0;z<n;z++)for(int y=0;y<n;y++)for(int x=0;x<n;x++,i++){
-		auto s=ball(sim,{0,0,0},r,cor); s->set_coefficient_of_restitution_override(true);
+		auto s=ball(sim,{0,0,0},r,cor); s->set_restitution_combine(hop::restitution_combine::minimum);
 		float px=-(half-spacing*0.5f)+x*spacing, py=-(half-spacing*0.5f)+y*spacing, pz=spacing*0.5f+z*spacing;
 		s->set_position({px,py,pz});
 		float vx=((i*7+3)%21-10)*0.5f, vy=((i*13+5)%21-10)*0.5f, vz=((i*17+9)%21-10)*0.5f;
@@ -150,7 +150,7 @@ static void test_wedge(float cor) {
 	printf("\n=== wedge: dynamic ball into fixed-ball V, COR=%.2f ===\n", cor);
 	hop::simulator<T> sim;
 	float r=0.4f;
-	auto fixedb=[&](hop::vec3<T> p){ auto s=ball(sim,p,r,1.0f); s->set_infinite_mass(); s->set_coefficient_of_gravity(0); s->set_coefficient_of_restitution_override(false); };
+	auto fixedb=[&](hop::vec3<T> p){ auto s=ball(sim,p,r,1.0f); s->set_infinite_mass(); s->set_coefficient_of_gravity(0); };
 	fixedb({-0.5f,0,1}); fixedb({0.5f,0,1});  // two fixed balls forming a valley
 	auto d = ball(sim, {0.02f,0,2.2f}, r, cor); // slightly off-center so it isn't perfectly symmetric
 	for(int t=1;t<=400;t++){
@@ -166,7 +166,7 @@ static void test_sphere_on_sphere(float offset) {
 	printf("\n=== dynamic sphere dropped onto fixed sphere, x-offset=%.2f ===\n", offset);
 	hop::simulator<T> sim;
 	float r=0.4f;
-	auto fx = ball(sim,{0,0,1},r,1.0f); fx->set_infinite_mass(); fx->set_coefficient_of_gravity(0); fx->set_coefficient_of_restitution_override(false);
+	auto fx = ball(sim,{0,0,1},r,1.0f); fx->set_infinite_mass(); fx->set_coefficient_of_gravity(0);
 	auto d = ball(sim,{offset,0,2.5f},r,0.0f);
 	for(int t=1;t<=200;t++){
 		sim.update(1.0f/60.0f);

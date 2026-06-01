@@ -1,9 +1,5 @@
-// demo_stress.cpp — Stress test: a few thousand spheres dropped into a box.
-// Demonstrates BVH broad-phase performance under high object count, and the
-// contact solver settling a frictional heap (compare demo_stress_rp3d). The
-// spheres are given friction and modest restitution so the pile bounces off the
-// initial drop and then comes to rest instead of sloshing forever; see
-// docs/settling_plan.md for why the initial fill is kept shallow.
+// demo_stress.cpp — Stress test: box packed full of bouncing spheres.
+// Demonstrates BVH broad-phase performance under high object count.
 // Space : pause
 
 #include <chrono>
@@ -40,8 +36,8 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	w->set_infinite_mass();
 	w->set_coefficient_of_gravity(T{});
 	w->set_coefficient_of_restitution(tr::one());
-	w->set_coefficient_of_static_friction(tr::from_milli(600));
-	w->set_coefficient_of_dynamic_friction(tr::from_milli(600));
+	w->set_coefficient_of_static_friction(0);
+	w->set_coefficient_of_dynamic_friction(0);
 	w->add_shape(std::make_shared<hop::shape<T>>(box));
 	w->set_position(pos);
 	sim.add_solid(w);
@@ -58,16 +54,8 @@ template <typename T> static void run() {
 	// Grid spacing between centers: diameter + small gap
 	constexpr float SPACING     = SPHERE_R * 2.2f;
 	constexpr int   COLS        = (int)((ROOM_HALF * 2.0f) / SPACING);
-	// Spawn only the lower layers rather than packing the box solid to the
-	// ceiling. A pile dozens of spheres deep does not fully quiesce in a
-	// translation-only swept solver (resting load propagates one contact layer
-	// per solver iteration, and the velocity-only contact response injects a
-	// little energy per layer each tick — see docs/settling_plan.md). Keeping the
-	// initial pile shallow lets it settle into a stable heap with headroom above
-	// for the bounce, while still exercising the broad phase with a few thousand
-	// bodies.
-	constexpr int   FILL_LAYERS = 7;
-	constexpr int   COUNT       = COLS * COLS * FILL_LAYERS;
+	constexpr int   Z_LAYERS    = (int)(ROOM_HEIGHT / SPACING);
+	constexpr int   COUNT       = COLS * COLS * Z_LAYERS;
 
 	// float -> T
 	auto fi = [](int n) { return tr::from_int(n); };
@@ -77,11 +65,6 @@ template <typename T> static void run() {
 	hop::bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
 	sim.set_deactivate_count(32);
-	// Friction is what dissipates a frictionless sphere's only un-damped degree
-	// of freedom — tangential sliding — so a heap can actually come to rest
-	// instead of sloshing indefinitely. More solver iterations let resting load
-	// propagate through the pile in a single tick.
-	sim.set_solver_iterations(32);
 
 	T half  = fi(ROOM_HALF);
 	T hgt   = fi(ROOM_HEIGHT);
@@ -116,16 +99,18 @@ template <typename T> static void run() {
 	bvh.rebuild();
 
 	// 3D grid filling the room interior with random velocities in all directions.
-	// Gravity is active; the ceiling keeps balls from escaping upward.
+	// No gravity means there's no floor pile-up to worry about.
 	std::vector<std::shared_ptr<hop::solid<T>>> spheres;
 	spheres.reserve(COUNT);
 	for (int i = 0; i < COUNT; ++i) {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
-		s->set_coefficient_of_restitution_override(true);
-		s->set_coefficient_of_restitution(ff(0.6f));   // bouncy enough to rebound off the initial drop
-		s->set_coefficient_of_static_friction(ff(0.6f));
-		s->set_coefficient_of_dynamic_friction(ff(0.6f));
+		// Match demo_stress_rp3d: rp3d combines restitution by taking the max of
+		// the two materials, so a ball (0.75) hitting a wall (1.0) bounces at 1.0.
+		s->set_restitution_combine(hop::restitution_combine::maximum);
+		s->set_coefficient_of_restitution(ff(0.75f));
+		s->set_coefficient_of_static_friction(0);
+		s->set_coefficient_of_dynamic_friction(0);
 		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff(SPHERE_R))));
 
 		int   layer = i / (COLS * COLS);
@@ -172,7 +157,7 @@ template <typename T> static void run() {
 		// Orbiting camera — room center in raylib Y-up is (0, ROOM_HEIGHT/2, 0)
 		Camera3D cam  = {};
 		cam.position  = { 30.0f * cosf(cam_angle), 10.0f, 30.0f * sinf(cam_angle) };
-		cam.target    = { 0.0f, (float)ROOM_HEIGHT * 0.25f, 0.0f };  // pile sits low in the tall box
+		cam.target    = { 0.0f, (float)ROOM_HEIGHT * 0.5f, 0.0f };
 		cam.up        = { 0.0f, 1.0f, 0.0f };
 		cam.fovy      = 55.0f;
 		cam.projection = CAMERA_PERSPECTIVE;
