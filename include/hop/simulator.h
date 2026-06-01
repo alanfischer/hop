@@ -88,6 +88,16 @@ public:
 	void set_solver_iterations(int n) { solver_iterations_ = n > 0 ? n : 1; }
 	int get_solver_iterations() const { return solver_iterations_; }
 
+	// Per-body, per-tick budget for the swept-collision sub-step loop in
+	// update_solid. Each sub-step snaps to the earliest contact along the
+	// remaining motion and slides the leftover on; a body whose step crosses
+	// many colliders (a long path through a crowded scene) needs one sub-step
+	// per colliding layer. When the budget runs out the body is pushed off its
+	// last contact and left where it is for the tick — so too low a limit lets a
+	// fast body in a dense scene slip through geometry it never traced against.
+	void set_max_collision_iterations(int n) { max_collision_iterations_ = n > 0 ? n : 1; }
+	int get_max_collision_iterations() const { return max_collision_iterations_; }
+
 	// Solid management
 	void add_solid(std::shared_ptr<solid<T>> s) {
 		for (auto & existing : solids_) {
@@ -377,6 +387,10 @@ private:
 	// ticks settle in 1–2 sweeps regardless of pile depth, so the per-tick
 	// cost is dominated by the first tick after a perturbation.
 	int solver_iterations_ = 16;
+	// Sub-step budget for update_solid's swept-collision slide loop. Was a
+	// hard-coded 5; raised to give a fast body room to resolve more colliders
+	// along a long step before the loop gives up (see set_max_collision_iterations).
+	int max_collision_iterations_ = 16;
 };
 
 // ============================================================================
@@ -614,10 +628,16 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			if (too_small(left_over, epsilon_)) {
 				new_pos.set(old_pos);
 				break;
-			} else if (loop > 4) {
-				// Push the body out along the last contact normal rather
-				// than zeroing motion. Zeroing causes permanent overlap
-				// when two dynamic bodies collide at the loop limit.
+			} else if (loop >= max_collision_iterations_) {
+				// Hit the sub-step budget for resolving this body's motion this
+				// tick. Each iteration snaps to one contact and slides the
+				// remainder on, so a body crossing many colliders in a single
+				// step (a long path through a crowded scene, e.g. a fast body)
+				// needs more iterations to resolve them all; running out here can
+				// leave it lodged in — or past — geometry it never got to trace
+				// against. Push out along the last contact normal rather than
+				// zeroing motion (zeroing causes permanent overlap when two
+				// dynamic bodies collide at the limit) and give up for this tick.
 				mul(temp, c.normal, epsilon_ * tr::four());
 				add(new_pos, old_pos, temp);
 				break;
