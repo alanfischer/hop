@@ -1236,17 +1236,17 @@ void simulator<T>::solve_contacts(T dt) {
 			vec3<T> new_accum_t;
 			add(new_accum_t, p.accum_t, lambda_t);
 			// Coulomb stick/slip: the contact holds (static) as long as the
-			// tangential impulse it would take to cancel sliding stays within
-			// the static cone mu_s·N. Once that's exceeded the contact slips and
-			// friction drops to the kinetic cone mu_d·N. The clamp only ever
-			// scales the impulse down (the min() guards a degenerate mu_d > mu_s
-			// config from injecting energy).
+			// tangential impulse needed to cancel sliding stays within the
+			// static cone mu_s·N. Once that's exceeded the contact slips and
+			// friction drops to the kinetic cone mu_d·N. The `max_d < mag` guard
+			// scales down only — it skips the degenerate mu_d > mu_s case, which
+			// would otherwise scale the impulse *up* and inject energy.
 			T mag = length(new_accum_t);
 			T max_s = p.mu_s * p.accum_n;
 			if (mag > max_s && mag > zero_val) {
 				T max_d = p.mu_d * p.accum_n;
-				T limit = max_d < mag ? max_d : mag;
-				mul(new_accum_t, limit / mag);
+				if (max_d < mag)
+					mul(new_accum_t, max_d / mag);
 			}
 			vec3<T> delta;
 			sub(delta, new_accum_t, p.accum_t);
@@ -1271,31 +1271,26 @@ void simulator<T>::solve_contacts(T dt) {
 		}
 	}
 
-	// --- 5b. Cap solver-mutated velocities ---
-	// The per-body velocity cap in update_solid runs at integration time — a
-	// full tick before it would catch anything solve_contacts produced here.
-	// Without this pass a Gauss–Seidel overshoot (deep/stiff pile, near-singular
+	// --- 6. Cap solver-mutated velocities, then wake perturbed partners ---
+	// Cap: the per-body velocity cap in update_solid runs at integration time —
+	// a full tick before it would catch anything solve_contacts produced here.
+	// Without it a Gauss–Seidel overshoot (deep/stiff pile, near-singular
 	// inv_m_sum, or fixed-point round-off) ships into the next tick's integration
-	// at full magnitude and can tunnel a body through geometry. Cap here so the
-	// solver's output is bounded the same as integration's. Capping is idempotent,
-	// so touching a body once per pair it appears in is fine.
-	if (max_velocity_component_ > zero_val) {
-		for (auto & p : contact_pairs_) {
-			if (p.inv_ma > zero_val)
-				cap_vec3(p.a->velocity_, max_velocity_component_);
-			if (p.inv_mb > zero_val)
-				cap_vec3(p.b->velocity_, max_velocity_component_);
-		}
-	}
-
-	// --- 6. Wake partners that received non-trivial impulses ---
-	// A pile near rest can be perturbed by a single ball landing on top of
-	// it; without this, the perturbed ball pushes the pile down via the
-	// solver but the (sleeping) pile members never re-enter update_solid to
-	// notice their new velocity. Wake any body whose velocity changed by
-	// more than the deactivation threshold.
-	auto wake_if_moving = [this](solid<T> * s, T inv_m) {
-		if (inv_m > T{} && !s->active_ &&
+	// at full magnitude and can tunnel a body through geometry. Capping after the
+	// sweeps (rather than inside apply_pair_impulse, which runs per impulse) keeps
+	// the solver's output bounded like integration's for one cheap idempotent pass.
+	// Wake: a pile near rest can be perturbed by a single ball landing on top of
+	// it; without this the perturbed ball pushes the pile down via the solver but
+	// the (sleeping) members never re-enter update_solid to notice their new
+	// velocity. Both run over the same pair list, so do them in one walk; capping
+	// first means the wake threshold reads the final (capped) velocity.
+	const bool do_cap = max_velocity_component_ > zero_val;
+	auto finalize = [this, do_cap](solid<T> * s, T inv_m) {
+		if (inv_m <= T{})
+			return;
+		if (do_cap)
+			cap_vec3(s->velocity_, max_velocity_component_);
+		if (!s->active_ &&
 		    (tr::abs(s->velocity_.x) > deactivate_speed_ ||
 		     tr::abs(s->velocity_.y) > deactivate_speed_ ||
 		     tr::abs(s->velocity_.z) > deactivate_speed_)) {
@@ -1303,8 +1298,8 @@ void simulator<T>::solve_contacts(T dt) {
 		}
 	};
 	for (auto & p : contact_pairs_) {
-		wake_if_moving(p.a, p.inv_ma);
-		wake_if_moving(p.b, p.inv_mb);
+		finalize(p.a, p.inv_ma);
+		finalize(p.b, p.inv_mb);
 	}
 }
 

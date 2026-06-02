@@ -15,22 +15,15 @@ template <typename T> class simulator;
 template <typename T> class manager;
 
 // How two contacting bodies' coefficients of restitution are combined into the
-// single COR used to resolve the contact. Each body carries its own mode.
+// single COR used to resolve the contact. Each body carries its own mode; when
+// the two differ, the higher-precedence one governs, precedence being ascending
+// enum order (the numerically larger enumerator wins).
 //
-// Precedence contract: when the two bodies' modes differ, the contact resolves
-// with whichever mode has the higher precedence, where precedence is ascending
-// enum order — average < minimum < multiply < maximum — i.e. the numerically
-// larger enumerator wins. A body's mode therefore only governs the contact when
-// its precedence is >= the partner's.
-//
-// Lower-precedence modes are NOT an absolute per-body guarantee. Because
-// `maximum` outranks every other mode, a body set to `minimum` with COR 0 still
-// bounces elastically off a partner set to `maximum` with COR 1 (resolved
-// cor = max(0, 1) = 1). A body's `minimum` only holds against partners whose
-// mode is `average` or `minimum`. `maximum`, being top precedence, always wins,
-// so it IS an absolute guarantee. To make a contact's behavior independent of
-// the partner: use `maximum` to force bouncy, or keep the body at `minimum` and
-// ensure no partner uses `multiply`/`maximum` to force damped.
+// Precedence is asymmetric, so a lower mode is NOT an absolute per-body
+// guarantee: a `minimum`/COR-0 body still bounces fully off a `maximum`/COR-1
+// partner (resolved cor = max(0, 1) = 1). Only `maximum`, as the top mode,
+// always wins. To force behavior regardless of the partner, set `maximum` for
+// bouncy; for damped, set `minimum` and keep partners off `multiply`/`maximum`.
 enum class restitution_combine { average, minimum, multiply, maximum };
 
 template <typename T> class solid : public std::enable_shared_from_this<solid<T>> {
