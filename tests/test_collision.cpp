@@ -134,7 +134,7 @@ template <typename T> static void test_sphere_floor_bounce(const char * label) {
 	auto sphere = std::make_shared<solid<T>>();
 	sphere->set_mass(tr::one());
 	sphere->set_coefficient_of_restitution(tr::one());
-	sphere->set_coefficient_of_restitution_override(true);
+	sphere->set_restitution_combine(restitution_combine::minimum);
 	sphere->set_coefficient_of_static_friction(T {});
 	sphere->set_coefficient_of_dynamic_friction(T {});
 	sphere->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
@@ -160,7 +160,7 @@ template <typename T> static void test_box_box_collision(const char * label) {
 	auto box1 = std::make_shared<solid<T>>();
 	box1->set_mass(tr::one());
 	box1->set_coefficient_of_restitution(tr::one());
-	box1->set_coefficient_of_restitution_override(true);
+	box1->set_restitution_combine(restitution_combine::minimum);
 	box1->set_coefficient_of_static_friction(T {});
 	box1->set_coefficient_of_dynamic_friction(T {});
 	box1->add_shape(
@@ -172,7 +172,7 @@ template <typename T> static void test_box_box_collision(const char * label) {
 	auto box2 = std::make_shared<solid<T>>();
 	box2->set_mass(tr::one());
 	box2->set_coefficient_of_restitution(tr::one());
-	box2->set_coefficient_of_restitution_override(true);
+	box2->set_restitution_combine(restitution_combine::minimum);
 	box2->set_coefficient_of_static_friction(T {});
 	box2->set_coefficient_of_dynamic_friction(T {});
 	box2->add_shape(
@@ -202,7 +202,7 @@ template <typename T> static void test_sphere_sphere_collision(const char * labe
 	auto s1 = std::make_shared<solid<T>>();
 	s1->set_mass(tr::one());
 	s1->set_coefficient_of_restitution(tr::one());
-	s1->set_coefficient_of_restitution_override(true);
+	s1->set_restitution_combine(restitution_combine::minimum);
 	s1->set_coefficient_of_static_friction(T {});
 	s1->set_coefficient_of_dynamic_friction(T {});
 	s1->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
@@ -213,7 +213,7 @@ template <typename T> static void test_sphere_sphere_collision(const char * labe
 	auto s2 = std::make_shared<solid<T>>();
 	s2->set_mass(tr::one());
 	s2->set_coefficient_of_restitution(tr::one());
-	s2->set_coefficient_of_restitution_override(true);
+	s2->set_restitution_combine(restitution_combine::minimum);
 	s2->set_coefficient_of_static_friction(T {});
 	s2->set_coefficient_of_dynamic_friction(T {});
 	s2->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
@@ -243,7 +243,7 @@ template <typename T> static void test_capsule_box_collision(const char * label)
 	auto cap = std::make_shared<solid<T>>();
 	cap->set_mass(tr::one());
 	cap->set_coefficient_of_restitution(tr::from_milli(800));
-	cap->set_coefficient_of_restitution_override(true);
+	cap->set_restitution_combine(restitution_combine::minimum);
 	cap->set_coefficient_of_static_friction(T {});
 	cap->set_coefficient_of_dynamic_friction(T {});
 	cap->add_shape(std::make_shared<shape<T>>(hop::capsule<T>(vec3<T>(), vec3<T>(T {}, T {}, tr::one()), tr::from_milli(300))));
@@ -271,7 +271,7 @@ template <typename T> static void test_inelastic_collision(const char * label) {
 	auto sphere = std::make_shared<solid<T>>();
 	sphere->set_mass(tr::one());
 	sphere->set_coefficient_of_restitution(T {});
-	sphere->set_coefficient_of_restitution_override(true);
+	sphere->set_restitution_combine(restitution_combine::minimum);
 	sphere->set_coefficient_of_static_friction(T {});
 	sphere->set_coefficient_of_dynamic_friction(T {});
 	sphere->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
@@ -300,7 +300,7 @@ template <typename T> static void test_deactivation(const char * label) {
 	auto sphere = std::make_shared<solid<T>>();
 	sphere->set_mass(tr::one());
 	sphere->set_coefficient_of_restitution(T {});
-	sphere->set_coefficient_of_restitution_override(true);
+	sphere->set_restitution_combine(restitution_combine::minimum);
 	sphere->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
 	sphere->set_position({ T {}, T {}, tr::from_int(2) });
 	sim.add_solid(sphere);
@@ -583,7 +583,7 @@ template <typename T> static void test_impact_sphere_on_floor(const char * label
 	auto sph = std::make_shared<solid<T>>();
 	sph->set_mass(tr::one());
 	sph->set_coefficient_of_restitution(tr::one());
-	sph->set_coefficient_of_restitution_override(true);
+	sph->set_restitution_combine(restitution_combine::minimum);
 	sph->set_coefficient_of_static_friction(T {});
 	sph->set_coefficient_of_dynamic_friction(T {});
 	sph->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
@@ -642,7 +642,7 @@ template <typename T> static void test_impact_box_on_floor(const char * label) {
 	auto box = std::make_shared<solid<T>>();
 	box->set_mass(tr::one());
 	box->set_coefficient_of_restitution(tr::one());
-	box->set_coefficient_of_restitution_override(true);
+	box->set_restitution_combine(restitution_combine::minimum);
 	box->set_coefficient_of_static_friction(T {});
 	box->set_coefficient_of_dynamic_friction(T {});
 	box->add_shape(
@@ -685,7 +685,7 @@ template <typename T> static void test_sphere_capsule_collision(const char * lab
 	auto sph = std::make_shared<solid<T>>();
 	sph->set_mass(tr::one());
 	sph->set_coefficient_of_restitution(tr::one());
-	sph->set_coefficient_of_restitution_override(true);
+	sph->set_restitution_combine(restitution_combine::minimum);
 	sph->set_coefficient_of_static_friction(T {});
 	sph->set_coefficient_of_dynamic_friction(T {});
 	sph->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
@@ -721,7 +721,7 @@ template <typename T> static void test_capsule_capsule_perpendicular(const char 
 	auto c2 = std::make_shared<solid<T>>();
 	c2->set_mass(tr::one());
 	c2->set_coefficient_of_restitution(tr::one());
-	c2->set_coefficient_of_restitution_override(true);
+	c2->set_restitution_combine(restitution_combine::minimum);
 	c2->set_coefficient_of_static_friction(T {});
 	c2->set_coefficient_of_dynamic_friction(T {});
 	c2->add_shape(std::make_shared<shape<T>>(
@@ -751,7 +751,7 @@ template <typename T> static void test_capsule_capsule_parallel(const char * lab
 	auto c1 = std::make_shared<solid<T>>();
 	c1->set_mass(tr::one());
 	c1->set_coefficient_of_restitution(tr::one());
-	c1->set_coefficient_of_restitution_override(true);
+	c1->set_restitution_combine(restitution_combine::minimum);
 	c1->set_coefficient_of_static_friction(T {});
 	c1->set_coefficient_of_dynamic_friction(T {});
 	c1->add_shape(std::make_shared<shape<T>>(
@@ -763,7 +763,7 @@ template <typename T> static void test_capsule_capsule_parallel(const char * lab
 	auto c2 = std::make_shared<solid<T>>();
 	c2->set_mass(tr::one());
 	c2->set_coefficient_of_restitution(tr::one());
-	c2->set_coefficient_of_restitution_override(true);
+	c2->set_restitution_combine(restitution_combine::minimum);
 	c2->set_coefficient_of_static_friction(T {});
 	c2->set_coefficient_of_dynamic_friction(T {});
 	c2->add_shape(std::make_shared<shape<T>>(
@@ -838,7 +838,7 @@ template <typename T> static void test_sphere_convex_solid(const char * label) {
 	auto sph = std::make_shared<solid<T>>();
 	sph->set_mass(tr::one());
 	sph->set_coefficient_of_restitution(tr::one());
-	sph->set_coefficient_of_restitution_override(true);
+	sph->set_restitution_combine(restitution_combine::minimum);
 	sph->set_coefficient_of_static_friction(T {});
 	sph->set_coefficient_of_dynamic_friction(T {});
 	sph->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
@@ -882,7 +882,7 @@ template <typename T> static void test_capsule_convex_solid(const char * label) 
 	auto cap = std::make_shared<solid<T>>();
 	cap->set_mass(tr::one());
 	cap->set_coefficient_of_restitution(tr::from_milli(800));
-	cap->set_coefficient_of_restitution_override(true);
+	cap->set_restitution_combine(restitution_combine::minimum);
 	cap->set_coefficient_of_static_friction(T {});
 	cap->set_coefficient_of_dynamic_friction(T {});
 	cap->add_shape(std::make_shared<shape<T>>(
@@ -920,7 +920,7 @@ template <typename T> static void test_capsule_octahedron_no_passthrough(const c
 	auto cap = std::make_shared<solid<T>>();
 	cap->set_mass(tr::one());
 	cap->set_coefficient_of_restitution(tr::one());
-	cap->set_coefficient_of_restitution_override(true);
+	cap->set_restitution_combine(restitution_combine::minimum);
 	cap->set_coefficient_of_gravity(T {});
 	cap->set_coefficient_of_static_friction(T {});
 	cap->set_coefficient_of_dynamic_friction(T {});
@@ -958,7 +958,7 @@ template <typename T> static void test_box_convex_solid(const char * label) {
 	auto box = std::make_shared<solid<T>>();
 	box->set_mass(tr::one());
 	box->set_coefficient_of_restitution(tr::from_milli(800));
-	box->set_coefficient_of_restitution_override(true);
+	box->set_restitution_combine(restitution_combine::minimum);
 	box->set_coefficient_of_static_friction(T {});
 	box->set_coefficient_of_dynamic_friction(T {});
 	box->add_shape(std::make_shared<shape<T>>(
@@ -1003,7 +1003,7 @@ template <typename T> static void test_sphere_convex_wedge(const char * label) {
 	auto sph = std::make_shared<solid<T>>();
 	sph->set_mass(one);
 	sph->set_coefficient_of_restitution(one);
-	sph->set_coefficient_of_restitution_override(true);
+	sph->set_restitution_combine(restitution_combine::minimum);
 	sph->set_coefficient_of_static_friction(zero);
 	sph->set_coefficient_of_dynamic_friction(zero);
 	sph->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(300))));
@@ -1032,7 +1032,7 @@ template <typename T> static void test_convex_solid_vs_box(const char * label) {
 	auto conv = std::make_shared<solid<T>>();
 	conv->set_mass(tr::one());
 	conv->set_coefficient_of_restitution(tr::from_milli(800));
-	conv->set_coefficient_of_restitution_override(true);
+	conv->set_restitution_combine(restitution_combine::minimum);
 	conv->set_coefficient_of_static_friction(T {});
 	conv->set_coefficient_of_dynamic_friction(T {});
 	conv->add_shape(std::make_shared<shape<T>>(make_convex_cube(tr::half())));
@@ -1066,7 +1066,7 @@ template <typename T> static void test_convex_solid_vs_sphere(const char * label
 	auto conv = std::make_shared<solid<T>>();
 	conv->set_mass(tr::one());
 	conv->set_coefficient_of_restitution(tr::one());
-	conv->set_coefficient_of_restitution_override(true);
+	conv->set_restitution_combine(restitution_combine::minimum);
 	conv->set_coefficient_of_static_friction(T {});
 	conv->set_coefficient_of_dynamic_friction(T {});
 	conv->add_shape(std::make_shared<shape<T>>(make_convex_cube(tr::half())));
@@ -1102,7 +1102,7 @@ template <typename T> static void test_convex_solid_vs_capsule(const char * labe
 	auto conv = std::make_shared<solid<T>>();
 	conv->set_mass(tr::one());
 	conv->set_coefficient_of_restitution(tr::one());
-	conv->set_coefficient_of_restitution_override(true);
+	conv->set_restitution_combine(restitution_combine::minimum);
 	conv->set_coefficient_of_static_friction(T {});
 	conv->set_coefficient_of_dynamic_friction(T {});
 	conv->add_shape(std::make_shared<shape<T>>(make_convex_cube(tr::half())));
@@ -1164,7 +1164,7 @@ template <typename T> static void test_sphere_traceable_floor(const char * label
 	auto sph = std::make_shared<solid<T>>();
 	sph->set_mass(tr::one());
 	sph->set_coefficient_of_restitution(tr::one());
-	sph->set_coefficient_of_restitution_override(true);
+	sph->set_restitution_combine(restitution_combine::minimum);
 	sph->set_coefficient_of_static_friction(T {});
 	sph->set_coefficient_of_dynamic_friction(T {});
 	sph->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
@@ -1192,7 +1192,7 @@ template <typename T> static void test_box_traceable_floor(const char * label) {
 	auto box = std::make_shared<solid<T>>();
 	box->set_mass(tr::one());
 	box->set_coefficient_of_restitution(tr::one());
-	box->set_coefficient_of_restitution_override(true);
+	box->set_restitution_combine(restitution_combine::minimum);
 	box->set_coefficient_of_static_friction(T {});
 	box->set_coefficient_of_dynamic_friction(T {});
 	box->add_shape(std::make_shared<shape<T>>(
@@ -1221,7 +1221,7 @@ template <typename T> static void test_capsule_traceable_floor(const char * labe
 	auto cap = std::make_shared<solid<T>>();
 	cap->set_mass(tr::one());
 	cap->set_coefficient_of_restitution(tr::from_milli(800));
-	cap->set_coefficient_of_restitution_override(true);
+	cap->set_restitution_combine(restitution_combine::minimum);
 	cap->set_coefficient_of_static_friction(T {});
 	cap->set_coefficient_of_dynamic_friction(T {});
 	cap->add_shape(std::make_shared<shape<T>>(
@@ -1250,7 +1250,7 @@ template <typename T> static void test_convex_solid_traceable_floor(const char *
 	auto conv = std::make_shared<solid<T>>();
 	conv->set_mass(tr::one());
 	conv->set_coefficient_of_restitution(tr::from_milli(800));
-	conv->set_coefficient_of_restitution_override(true);
+	conv->set_restitution_combine(restitution_combine::minimum);
 	conv->set_coefficient_of_static_friction(T {});
 	conv->set_coefficient_of_dynamic_friction(T {});
 	conv->add_shape(std::make_shared<shape<T>>(make_convex_cube(tr::half())));

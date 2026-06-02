@@ -99,13 +99,17 @@ template <typename T> static void run() {
 	bvh.rebuild();
 
 	// 3D grid filling the room interior with random velocities in all directions.
-	// No gravity means there's no floor pile-up to worry about.
+	// The simulator runs under default gravity (-9.81 Z) and these spheres keep
+	// the default gravity coefficient, so they fall and settle into a pile on the
+	// floor — this is a settling-under-load stress test, not a zero-g gas.
 	std::vector<std::shared_ptr<hop::solid<T>>> spheres;
 	spheres.reserve(COUNT);
 	for (int i = 0; i < COUNT; ++i) {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
-		s->set_coefficient_of_restitution_override(true);
+		// Match demo_stress_rp3d: rp3d combines restitution by taking the max of
+		// the two materials, so a ball (0.75) hitting a wall (1.0) bounces at 1.0.
+		s->set_restitution_combine(hop::restitution_combine::maximum);
 		s->set_coefficient_of_restitution(ff(0.75f));
 		s->set_coefficient_of_static_friction(0);
 		s->set_coefficient_of_dynamic_friction(0);
@@ -115,8 +119,9 @@ template <typename T> static void run() {
 		int   rem   = i % (COLS * COLS);
 		int   col   = rem % COLS;
 		int   row   = rem / COLS;
-		float x     = -(ROOM_HALF - SPACING * 0.5f) + col * SPACING;
-		float y     = -(ROOM_HALF - SPACING * 0.5f) + row * SPACING;
+		// Center the grid in the room (COLS columns span (COLS-1)*SPACING).
+		float x     = (col - (COLS - 1) * 0.5f) * SPACING;
+		float y     = (row - (COLS - 1) * 0.5f) * SPACING;
 		float z     = SPACING * 0.5f + layer * SPACING;
 		// Pseudo-random velocity in all three axes
 		float vx    = ((i * 7  + 3) % 21 - 10) * 0.5f;

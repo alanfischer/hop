@@ -14,10 +14,41 @@ template <typename T> class constraint;
 template <typename T> class simulator;
 template <typename T> class manager;
 
+// How two contacting bodies' coefficients of restitution are combined into the
+// single COR used to resolve the contact. Each body carries its own mode; when
+// the two differ, the higher-precedence one governs, precedence being ascending
+// enum order (the numerically larger enumerator wins).
+//
+// Precedence is asymmetric, so a lower mode is NOT an absolute per-body
+// guarantee: a `minimum`/COR-0 body still bounces fully off a `maximum`/COR-1
+// partner (resolved cor = max(0, 1) = 1). Only `maximum`, as the top mode,
+// always wins. To force behavior regardless of the partner, set `maximum` for
+// bouncy; for damped, set `minimum` and keep partners off `multiply`/`maximum`.
+enum class restitution_combine { average, minimum, multiply, maximum };
+
 template <typename T> class solid : public std::enable_shared_from_this<solid<T>> {
 public:
 	using ptr = std::shared_ptr<solid<T>>;
 	using tr = scalar_traits<T>;
+
+	// A single persistent contact slot. Populated by the simulator's TOI loop
+	// (one slot per partner this solid has hit recently) and consumed by the
+	// post-integration contact solver, which iterates Gauss–Seidel sweeps over
+	// every active body's slots. accum_n / accum_t carry the previous tick's
+	// accumulated impulses for warm-starting; impact_speed captures the
+	// approach velocity at TOI for restitution. last_tick is the refresh
+	// marker — slots whose last_tick falls behind the current tick are
+	// considered stale and dropped by the solver.
+	struct touch {
+		solid<T> * partner = nullptr;
+		vec3<T>    normal;            // points from partner toward this solid (the separating direction for self)
+		T          accum_n {};        // accumulated normal impulse magnitude (>= 0)
+		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
+		T          impact_speed {};   // approach speed at TOI; drives restitution target
+		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
+		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
+	};
+	static constexpr int max_touches = 12;
 
 	static T infinite_mass() { return -tr::one(); }
 
@@ -49,7 +80,7 @@ public:
 		force_.reset();
 		coefficient_of_gravity_ = tr::one();
 		coefficient_of_restitution_ = tr::half();
-		coefficient_of_restitution_override_ = false;
+		restitution_combine_ = restitution_combine::average;
 		coefficient_of_static_friction_ = tr::half();
 		coefficient_of_dynamic_friction_ = tr::half();
 		coefficient_of_effective_drag_ = T {};
@@ -60,14 +91,9 @@ public:
 		user_data_ = nullptr;
 		active_ = true;
 		deactivate_count_ = 0;
-		impulse_partner_count_ = 0;
-		impulse_partner_tick_ = -1;
-		touched1_ = nullptr;
-		touched1_normal_.reset();
-		touched2_ = nullptr;
-		touched2_normal_.reset();
-		touching_ = nullptr;
-		touching_normal_.reset();
+		touch_count_ = 0;
+		for (auto & slot : touches_)
+			slot = touch{};  // restore every slot to its in-class defaults
 		simulator_ = nullptr;
 	}
 
@@ -145,8 +171,8 @@ public:
 	T get_coefficient_of_gravity() const { return coefficient_of_gravity_; }
 	void set_coefficient_of_restitution(T c) { coefficient_of_restitution_ = c; }
 	T get_coefficient_of_restitution() const { return coefficient_of_restitution_; }
-	void set_coefficient_of_restitution_override(bool o) { coefficient_of_restitution_override_ = o; }
-	bool get_coefficient_of_restitution_override() const { return coefficient_of_restitution_override_; }
+	void set_restitution_combine(restitution_combine m) { restitution_combine_ = m; }
+	restitution_combine get_restitution_combine() const { return restitution_combine_; }
 	void set_coefficient_of_static_friction(T c) { coefficient_of_static_friction_ = c; }
 	T get_coefficient_of_static_friction() const { return coefficient_of_static_friction_; }
 	void set_coefficient_of_dynamic_friction(T c) { coefficient_of_dynamic_friction_ = c; }
@@ -180,8 +206,11 @@ public:
 	const aa_box<T> & get_local_bound() const { return local_bound_; }
 	const aa_box<T> & get_world_bound() const { return world_bound_; }
 
-	solid<T> * get_touching() const { return touching_; }
-	const vec3<T> & get_touching_normal() const { return touching_normal_; }
+	// Diagnostic: read the persistent contact cache. Slots whose last_tick
+	// matches the simulator's current tick are live contacts this step; older
+	// slots are stale (will be reaped on the next solver pass).
+	int get_touch_count() const { return touch_count_; }
+	const touch & get_touch(int i) const { return touches_[i]; }
 
 	using collision_fn = std::function<void(const collision<T> &)>;
 	void set_collision_callback(collision_fn fn) { collision_callback_ = std::move(fn); }
@@ -215,15 +244,15 @@ public:
 	void deactivate() {
 		active_ = false;
 		deactivate_count_ = 0;
+		// A sleeping body is at rest by definition. The deactivation test gates on
+		// positional stillness, but the swept-collision snap can leave a small
+		// residual velocity in velocity_ each tick (the body jitters in place
+		// without its position drifting). Freezing that residual would (a) make a
+		// "resting" pile carry phantom kinetic energy and (b) inject it back the
+		// instant a neighbour wakes the body. Zero it so sleep means rest.
+		velocity_.reset();
 	}
 	bool active() const { return active_ && simulator_ != nullptr; }
-
-	// Diagnostic: number of distinct partners this solid impulsed (or was
-	// impulsed by) during the most recent tick it participated in a collision.
-	// Returns 0 if the most recent tick recorded doesn't match the current
-	// simulator tick (no fresh data). Useful for tuning impulse_partners_[]
-	// capacity or for debugging cluster collision behavior.
-	int get_impulse_partner_count() const { return impulse_partner_count_; }
 
 	void update_local_bound() {
 		shape_types_ = 0;
@@ -276,7 +305,7 @@ private:
 
 	// -- Warm: collision response (read on actual hits, not per pair) --
 	T coefficient_of_restitution_ {};
-	bool coefficient_of_restitution_override_ = false;
+	restitution_combine restitution_combine_ = restitution_combine::average;
 	T coefficient_of_static_friction_ {};
 	T coefficient_of_dynamic_friction_ {};
 	int collision_scope_ = -1;
@@ -284,33 +313,30 @@ private:
 	int trigger_scope_ = 0;
 	int deactivate_count_ = 0;
 	simulator<T> * simulator_ = nullptr;
+	// Stable, monotonic id assigned by the simulator at add time. The contact
+	// solver canonicalizes each pair as a<b by this id rather than by raw
+	// pointer: heap addresses vary run-to-run (ASLR), and in low-precision
+	// fixed-point the resulting flip in impulse-application order diverges into
+	// different trajectories. An insertion id makes the solve order — and thus
+	// the result — reproducible across runs.
+	std::size_t solve_id_ = 0;
 
 	// -- Cold: rarely accessed in the hot path --
-	// Per-tick set of partners with which this solid has exchanged a collision
-	// impulse. Used by the simulator's cross-update guard: when solid_ptr's
-	// update finds hit_solid and the pair is already in solid_ptr's set, the
-	// pair was impulsed in another solid's earlier update this tick — apply a
-	// position-only contact constraint instead of a second impulse, which
-	// would either inject energy (re-impulsing) or let solids penetrate
-	// (skipping outright).
+	// Persistent per-pair contact cache. Each slot remembers a body this solid
+	// is (or was very recently) in contact with, with the previous tick's
+	// accumulated normal/friction impulses for warm-starting. The simulator's
+	// post-integration solver walks every active solid's slots, builds a unique
+	// pair list, and runs Gauss–Seidel sweeps over it; this is what makes a
+	// settled stack transmit load through all support contacts in one tick.
 	//
-	// Inline fixed-size storage keeps this allocation-free per tick. 8 was
-	// chosen empirically: in bounce_stress the maximum observed at N=1000,
-	// 5000, and 10000 was 7–8, with the 99th percentile sitting at 3–4.
-	// Beyond capacity we silently drop further entries, which degrades to
-	// the simple-skip behavior — still correct, just less effective at
-	// suppressing duplicate detections for that one pair-tick.
-	static constexpr int max_impulse_partners_per_tick = 8;
-	solid<T> * impulse_partners_[max_impulse_partners_per_tick];
-	int impulse_partner_count_ = 0;
-	int impulse_partner_tick_ = -1;
-
-	solid<T> * touching_ = nullptr;
-	vec3<T> touching_normal_;
-	solid<T> * touched1_ = nullptr;
-	vec3<T> touched1_normal_;
-	solid<T> * touched2_ = nullptr;
-	vec3<T> touched2_normal_;
+	// max_touches slots cover the simultaneous support set a body can hold in a
+	// dense pile (floor + neighbors + a wall), with headroom past the 6-neighbor
+	// kissing arrangement a sphere can wedge into. When a further distinct partner
+	// is hit with the cache full, we evict whichever cached slot contributes least
+	// to gravity-aligned support (smallest dot(normal, -g)), tie-breaking by oldest
+	// last_tick.
+	touch touches_[max_touches];
+	int touch_count_ = 0;
 
 	std::vector<constraint<T> *> constraints_;
 

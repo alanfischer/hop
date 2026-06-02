@@ -81,7 +81,7 @@ template <typename T> static void run(int n_spheres, int steps) {
 	for (int i = 0; i < n_spheres; ++i) {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
-		s->set_coefficient_of_restitution_override(true);
+		s->set_restitution_combine(hop::restitution_combine::minimum);
 		s->set_coefficient_of_restitution(ff(cor));
 		s->set_coefficient_of_static_friction(ff(fric));
 		s->set_coefficient_of_dynamic_friction(ff(fric));
@@ -119,7 +119,10 @@ template <typename T> static void run(int n_spheres, int steps) {
 		sim.update(tr::from_milli(16));
 		// Sample max partner count across all spheres this tick.
 		for (int i = 0; i < n_spheres; ++i) {
-			int pc = spheres[i]->get_impulse_partner_count();
+			// Count live (refreshed this tick is approximated by total slots
+			// for sleeping bodies, which is fine — the histogram targets
+			// active piles where every slot is fresh).
+			int pc = spheres[i]->get_touch_count();
 			if (pc > max_partners_ever) max_partners_ever = pc;
 			int idx = pc < 19 ? pc : 19;
 			partner_hist[idx]++;

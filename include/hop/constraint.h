@@ -129,8 +129,11 @@ public:
 
 	bool is_active() const { return simulator_ != nullptr; }
 
-	// True if the constraint is producing force above `tolerance` — used by the sleep
-	// heuristic so both endpoints don't freeze at non-equilibrium displacement.
+	// True if the constraint's length sits more than `tolerance` from where it
+	// produces no force (rest length for a spring; rest length on the long side
+	// for a rope). `tolerance` is a *distance*, not a force or a speed — pass a
+	// small length such as the simulator's epsilon. Used by the sleep heuristic
+	// so both endpoints don't freeze at a non-equilibrium displacement.
 	bool is_loaded(T tolerance) const {
 		if (!start_solid_)
 			return false;

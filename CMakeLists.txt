@@ -23,6 +23,12 @@ if(HOP_BUILD_EXAMPLES)
     target_link_libraries(demo_bounce PRIVATE hop raylib)
     add_executable(demo_stress examples/demo_stress.cpp)
     target_link_libraries(demo_stress PRIVATE hop raylib)
+
+    add_executable(demo_settling examples/demo_settling.cpp)
+    target_link_libraries(demo_settling PRIVATE hop raylib)
+
+    add_executable(demo_pile examples/demo_pile.cpp)
+    target_link_libraries(demo_pile PRIVATE hop raylib)
 endif()
 
 # ReactPhysics3D port of demo_bounce — side-by-side performance comparison.
