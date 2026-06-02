@@ -311,6 +311,13 @@ private:
 	int trigger_scope_ = 0;
 	int deactivate_count_ = 0;
 	simulator<T> * simulator_ = nullptr;
+	// Stable, monotonic id assigned by the simulator at add time. The contact
+	// solver canonicalizes each pair as a<b by this id rather than by raw
+	// pointer: heap addresses vary run-to-run (ASLR), and in low-precision
+	// fixed-point the resulting flip in impulse-application order diverges into
+	// different trajectories. An insertion id makes the solve order — and thus
+	// the result — reproducible across runs.
+	std::size_t solve_id_ = 0;
 
 	// -- Cold: rarely accessed in the hot path --
 	// Persistent per-pair contact cache. Each slot remembers a body this solid

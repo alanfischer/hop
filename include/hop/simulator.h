@@ -106,6 +106,7 @@ public:
 		}
 		solids_.push_back(s);
 		s->internal_set_simulator(this);
+		s->solve_id_ = next_solve_id_++;  // stable canonical-ordering key (see solid::solve_id_)
 		s->activate();
 		spacial_collection_.resize(solids_.size());
 	}
@@ -360,6 +361,7 @@ private:
 	int deactivate_count_ = 0;
 	manager<T> * manager_ = nullptr;
 	int current_tick_ = 0;  // increments per update(); also stamps touch slot refresh
+	std::size_t next_solve_id_ = 1;  // monotonic; assigned to each solid at add (see solid::solve_id_)
 
 	// Pass B (post-integration contact solver) working set. The pair list is
 	// rebuilt every tick from the union of all active solids' touch caches,
@@ -1052,13 +1054,15 @@ void simulator<T>::solve_contacts(T dt) {
 			if (!partner)
 				continue;
 
-			// Canonicalize by pointer so we have a stable "a < b" within
-			// the pair. The actual slot.normal / accum_t conventions then
-			// depend on whether the iterating side ended up as a or b.
+			// Canonicalize by the solids' stable insertion ids so we have a
+			// reproducible "a < b" within the pair (a raw pointer compare would
+			// reorder run-to-run under ASLR; see solid::solve_id_). The actual
+			// slot.normal / accum_t conventions then depend on whether the
+			// iterating side ended up as a or b.
 			solid<T> * a;
 			solid<T> * b;
 			bool slot_is_a;
-			if (s < partner) {
+			if (s->solve_id_ < partner->solve_id_) {
 				a = s; b = partner; slot_is_a = true;
 			} else {
 				a = partner; b = s; slot_is_a = false;
