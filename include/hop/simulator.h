@@ -1092,11 +1092,11 @@ void simulator<T>::solve_contacts(T dt) {
 				p.accum_t.set(slot.accum_t);
 			}
 			p.impact_speed = slot.impact_speed;
-			// Combine the two bodies' coefficients of restitution. Each body
-			// carries a combine mode; the higher-precedence mode governs the
-			// contact (average < minimum < multiply < maximum, per the enum
-			// order), so a single body can dictate the contact's bounciness
-			// regardless of its partner.
+			// Combine the two bodies' coefficients of restitution. When the
+			// bodies' modes differ the higher-precedence one governs (larger
+			// enumerator: average < minimum < multiply < maximum). See the
+			// restitution_combine precedence contract in solid.h — notably a
+			// `minimum` body is NOT immune to a `maximum` partner.
 			const T ca = a->coefficient_of_restitution_;
 			const T cb = b->coefficient_of_restitution_;
 			switch (a->restitution_combine_ > b->restitution_combine_ ? a->restitution_combine_ : b->restitution_combine_) {
