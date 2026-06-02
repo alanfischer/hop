@@ -40,6 +40,7 @@ static std::shared_ptr<hop::solid<T2>> make_wall(hop::simulator<T2> & sim,
 }
 
 int main(int argc, char ** argv) {
+	setvbuf(stdout, nullptr, _IOLBF, 0);  // line-buffer so streamed/redirected output is live
 	int TICKS = argc > 1 ? atoi(argv[1]) : 600;
 	int ROOM_HALF = argc > 2 ? atoi(argv[2]) : 6;
 	int ROOM_HEIGHT = argc > 3 ? atoi(argv[3]) : 12;
@@ -89,8 +90,8 @@ int main(int argc, char ** argv) {
 		s->set_coefficient_of_dynamic_friction(ff(FR));
 		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff(SPHERE_R))));
 		int layer = i / (COLS * COLS), rem = i % (COLS * COLS), col = rem % COLS, row = rem / COLS;
-		float x = -(ROOM_HALF - SPACING * 0.5f) + col * SPACING;
-		float y = -(ROOM_HALF - SPACING * 0.5f) + row * SPACING;
+		float x = (col - (COLS - 1) * 0.5f) * SPACING;
+		float y = (row - (COLS - 1) * 0.5f) * SPACING;
 		float z = SPACING * 0.5f + layer * SPACING;
 		float vx = ((i * 7 + 3) % 21 - 10) * 0.5f;
 		float vy = ((i * 13 + 5) % 21 - 10) * 0.5f;
@@ -106,34 +107,40 @@ int main(int argc, char ** argv) {
 	printf("scene: COUNT=%d  COLS=%d  Z_LAYERS=%d  room=%dx%dx%d  iters=%d COR=%.2f\n",
 	       COUNT, COLS, Z_LAYERS, ROOM_HALF*2, ROOM_HALF*2, ROOM_HEIGHT, ITERS, COR);
 	printf("%7s %7s %7s %12s %8s %8s %8s %8s %6s\n",
-	       "tick", "active", "asleep", "KE", "maxV", "minZ", "maxZ", "meanZ", "below");
+	       "tick", "active", "asleep", "KE", "maxV", "minZ", "maxZ", "E", "inj/dis");
 
-	double prevKE = 0;
+	double prevKE = 0, prevE = 0, injPos = 0, injNeg = 0;
 	for (int t = 1; t <= TICKS; ++t) {
 		sim.update(tr::from_milli(16));
 
 		// Cheap O(n) stats every tick so a transient is never missed between samples.
-		float ke = 0, maxv = 0, maxz = -1e9f, minz = 1e9f, sumz = 0;
+		float ke = 0, maxv = 0, maxz = -1e9f, minz = 1e9f, sumz = 0, sumx = 0, sumy = 0;
+		double pe = 0;
 		int below = 0;
 		for (auto & s : spheres) {
 			auto p = s->get_position();
 			auto v = s->get_velocity();
 			float sp2 = v.x*v.x + v.y*v.y + v.z*v.z;
 			ke += 0.5f * sp2;
+			pe += 9.81 * tr::to_float(p.z);
 			maxv = std::max(maxv, std::sqrt(sp2));
 			maxz = std::max(maxz, p.z);
 			minz = std::min(minz, p.z);
-			sumz += p.z;
+			sumz += p.z; sumx += tr::to_float(p.x); sumy += tr::to_float(p.y);
 			if (p.z < SPHERE_R - 0.05f) ++below;   // a sphere center this low has breached the floor
 		}
+		float comx = sumx/spheres.size(), comy = sumy/spheres.size();
+		double E = ke + pe;
+		if (t > 1) { double d = E - prevE; if (d > 0) injPos += d; else injNeg += d; }
+		prevE = E;
 
 		bool spike  = t > 120 && ke > prevKE * 1.5f && ke - prevKE > 100.0f;  // the "hotspot"
 		bool breach = below > 0;                                             // floor "broke"
-		if (t % 300 == 0 || t == 1 || spike || breach) {
+		if (t % 300 == 0 || t == 1 || spike) {
 			int active = sim.count_active_solids();
-			printf("%7d %7d %7d %12.1f %8.3f %8.3f %8.3f %8.3f %6d%s%s\n",
-			       t, active, COUNT - active, ke, maxv, minz, maxz, sumz/spheres.size(), below,
-			       spike ? "  <-- KE SPIKE" : "", breach ? "  <-- FLOOR BREACH" : "");
+			printf("%7d  KE=%9.1f maxV=%6.2f  COM=(%+.3f,%+.3f) meanZ=%.3f  E=%9.0f%s\n",
+			       t, ke, maxv, comx, comy, sumz/spheres.size(), E,
+			       spike ? "  <-- KE SPIKE" : "");
 		}
 		prevKE = ke;
 	}

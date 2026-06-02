@@ -117,8 +117,9 @@ template <typename T> static void run() {
 		int   rem   = i % (COLS * COLS);
 		int   col   = rem % COLS;
 		int   row   = rem / COLS;
-		float x     = -(ROOM_HALF - SPACING * 0.5f) + col * SPACING;
-		float y     = -(ROOM_HALF - SPACING * 0.5f) + row * SPACING;
+		// Center the grid in the room (COLS columns span (COLS-1)*SPACING).
+		float x     = (col - (COLS - 1) * 0.5f) * SPACING;
+		float y     = (row - (COLS - 1) * 0.5f) * SPACING;
 		float z     = SPACING * 0.5f + layer * SPACING;
 		// Pseudo-random velocity in all three axes
 		float vx    = ((i * 7  + 3) % 21 - 10) * 0.5f;

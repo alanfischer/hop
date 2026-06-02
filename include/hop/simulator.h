@@ -177,7 +177,9 @@ public:
 		assert(!order || order->size() == solids_.size());
 
 		const size_t num = target ? 1 : (order ? order->size() : solids_.size());
-		for (size_t i = 0; i < num; ++i) {
+		const bool flip = !target && (current_tick_ & 1);
+		for (size_t ii = 0; ii < num; ++ii) {
+			size_t i = flip ? num - 1 - ii : ii;
 			solid<T> * s;
 			if (target)
 				s = target;
@@ -1011,8 +1013,13 @@ void simulator<T>::solve_contacts(T dt) {
 	// b"; the slot we iterate from is always the authoritative source for
 	// the refreshed normal / impact data, since the partner may not have a
 	// refreshed slot (typical for dynamic→static contacts).
-	for (auto & s_ptr : solids_) {
-		auto * s = s_ptr.get();
+	// Flip traversal each tick to match update()'s alternation (cancels the
+	// order-induced directional drift; the canonical a<b pair convention is
+	// unaffected — only the build/solve order changes).
+	const bool flip = (current_tick_ & 1) != 0;
+	const int nsolids = static_cast<int>(solids_.size());
+	for (int si = 0; si < nsolids; ++si) {
+		auto * s = solids_[flip ? nsolids - 1 - si : si].get();
 		if (!s->active_)
 			continue;
 		for (int i = 0; i < s->touch_count_; ++i) {
@@ -1104,13 +1111,26 @@ void simulator<T>::solve_contacts(T dt) {
 	}
 
 	// --- 3. Warm-start ---
-	// In hop bodies are stateful; their velocity already includes the
-	// effect of last tick's impulses. Warm-starting is therefore
-	// incremental: we keep p.accum_n and p.accum_t from the cache as 
-	// starting points for the GS solve, but DO NOT apply them to the 
-	// velocity again (which would double-count).
+	// In hop bodies are stateful; their velocity already includes the effect of
+	// last tick's impulses. Warm-starting is therefore incremental: we keep
+	// p.accum_n / p.accum_t from the cache as GS starting points but DO NOT
+	// re-apply them to velocity (that would double-count).
+	//
+	// Exception: a pair that is *separating* this tick (vn0 > 0) carries no
+	// sustained load — typically the tick right after a bounce. The clamp
+	// new_acc >= 0 normally stops the normal constraint from pulling bodies
+	// together, but a non-zero warm-started accum_n gives the GS a budget it can
+	// spend pulling the pair back: with target 0 and a separating vn, lambda_n is
+	// negative, and as long as accum_n stays >= 0 that negative impulse is applied
+	// — cancelling the separation and freezing the body it just bounced off of.
+	// (Most visible in fixed-point, where the post-bounce snap can land a hair
+	// inside the contact, so it gets re-recorded while separating.) Drop the warm
+	// start for separating pairs so they can only push, never pull back.
 	for (auto & p : contact_pairs_) {
-		// slot data already in p
+		if (p.vn0 > zero_val) {
+			p.accum_n = zero_val;
+			p.accum_t.reset();
+		}
 	}
 
 	// --- 4. Gauss–Seidel sweeps ---
@@ -1119,9 +1139,11 @@ void simulator<T>::solve_contacts(T dt) {
 	// (Coulomb cone clamped to the current accumulated normal). Order is
 	// normal-then-friction so friction sees a meaningful normal load even
 	// on the very first iteration.
+	const int npairs = static_cast<int>(contact_pairs_.size());
 	for (int iter = 0; iter < solver_iterations_; ++iter) {
-		// Normal sweep
-		for (auto & p : contact_pairs_) {
+		// Normal sweep (flip direction each tick — see the build-loop comment)
+		for (int k = 0; k < npairs; ++k) {
+			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
 			T inv_m_sum = p.inv_ma + p.inv_mb;
 			if (inv_m_sum <= zero_val)
 				continue;
@@ -1168,8 +1190,9 @@ void simulator<T>::solve_contacts(T dt) {
 				}
 			}
 		}
-		// Friction sweep
-		for (auto & p : contact_pairs_) {
+		// Friction sweep (same per-tick flip)
+		for (int k = 0; k < npairs; ++k) {
+			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
 			T inv_m_sum = p.inv_ma + p.inv_mb;
 			if (inv_m_sum <= zero_val)
 				continue;
