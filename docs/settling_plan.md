@@ -2,8 +2,9 @@
 
 Why a deep pile of spheres in `demo_stress` misbehaves, what has been fixed,
 and what remains. Compare against ReactPhysics3D (`demo_stress_rp3d`). Updated
-June 2026 after a round of measurement that overturned the original plan's
-premise (see "Course correction" below).
+2026-06-02 after a round of measurement that overturned the original plan's
+premise (see "Course correction" below) and after the symmetric-push-out work
+that closed out the original "real remaining work" item.
 
 ## Status at a glance
 
@@ -16,7 +17,11 @@ premise (see "Course correction" below).
 | Sticky-contact warm-start on separating pairs | **fixed** (`simulator.h`) |
 | Velocity cap on solver output + configurable sub-step budget | **done** (backstops) |
 | Per-tick iteration flip + centered spawn (directional drift) | **done** — ~halves the drift |
-| Order-independent multi-contact corner resolution | **next** — the real remaining work |
+| Symmetric (COM-preserving) frame-start push-out | **done** — drift ~0.085 → ~0.03 |
+| Contact pairs canonicalized by stable id (fixed16 determinism) | **done** (`simulator.h`) |
+| Static-friction coefficient honored; velocity cap on solver output | **done** (`simulator.h`) |
+| `restitution_combine` precedence contract documented | **done** (`solid.h`) |
+| Residual slow COM creep (~0.03–0.05 over 1500 ticks) | **bounded, documented** — see drift section |
 
 ## Harnesses
 
@@ -52,61 +57,82 @@ split-impulse is not the lever. What the measurements actually showed:
   per-body sub-step loop ran out of budget. Backstops added: the velocity cap is
   now enforced on solver output too, and the sub-step budget is configurable
   (`set_max_collision_iterations`, default raised 5→16).
-- **The residual ~70–110k KE is undissipated frictionless tangential sloshing**,
-  not injection. Total mechanical energy *does* trend down; KE plateaus because
-  the normal-only solver removes approach velocity but nothing removes the
-  sliding DOF, and gravity keeps stirring. Friction is the physical dissipation
-  lever — the demo runs frictionless to match rp3d, so the pile stays lively.
-  The sticky-contact fix also lowered this floor (~108k→~71k) by no longer
-  holding energy in spuriously-stuck contacts.
+- **The residual KE is undissipated frictionless tangential sloshing**, not
+  injection. Total mechanical energy *does* settle (E≈277–279k, roughly flat
+  across 1500 ticks); KE plateaus because the normal-only solver removes approach
+  velocity but nothing removes the sliding DOF, and gravity keeps stirring.
+  Friction is the physical dissipation lever — the demo runs frictionless to
+  match rp3d, so the pile stays lively. Successive fixes have walked this floor
+  down: the sticky-contact fix (~108k→~71k) by no longer holding energy in
+  spuriously-stuck contacts, and the symmetric push-out plus solver-output
+  velocity cap further to ~30–35k in the current default scene.
 
 ## The directional drift (pile leans into +X+Y corner)
 
-Measured: COM drifts monotonically to ≈(+0.15, +0.15) and plateaus — a bounded
-lean, not unbounded migration. It is an **order-dependence** in hop's
-incremental swept update: bodies update in a fixed order and commit positions
-immediately, so a body collides against earlier bodies' already-advanced
-positions while they saw its stale one. Mitigations applied:
+Originally measured: COM drifted monotonically to ≈(+0.15, +0.15) and plateaued
+— a bounded lean, not unbounded migration. It is an **order-dependence** in
+hop's incremental swept update: bodies update in a fixed order and commit
+positions immediately, so a body collides against earlier bodies'
+already-advanced positions while they saw its stale one. Three fixes, in order
+of impact:
 
+- **Symmetric frame-start push-out** (`update_solid`, commit `1f27130`). The
+  largest source. When a sweep starts already penetrating a dynamic partner, the
+  overlap is now resolved by moving *both* bodies ±depth/2 in one shot, rather
+  than each body self-pushing half during its own update. The old self-only
+  split was order-dependent — the body updated second saw an already-reduced
+  overlap and pushed less, so each pair's center of mass crept toward whichever
+  body updated first, and over a fixed-order grid of contacts that summed into
+  the lean. The ±depth/2 correction is center-of-mass preserving and
+  order-independent, removing the drift at its source. (See also the
+  `hop_pushout_symmetry` note: the asymmetric self-only version also injected
+  energy.)
+- **Contact pairs canonicalized by stable id, not pointer** (`solve_contacts`,
+  commit `0af69be`). The a<b side of each pair was chosen by raw pointer compare;
+  ASLR varied heap addresses run-to-run, so the order impulses applied within a
+  pair changed between runs. Float absorbed it but fixed16 amplified the
+  different operation order into divergent trajectories. Now keyed on stable id,
+  so identical builds reproduce identical energy.
 - **Per-tick iteration flip** (body update loop, contact-pair build, GS sweeps
-  all alternate direction by tick parity). Cancels the order-induced component;
-  drift ~0.15 → ~0.085. This only became safe after the sticky-contact fix —
-  before it, flipping tipped a fixed-point case into a stuck contact and broke
-  `test_sphere_capsule_collision`.
-- **Centered spawn grid** in the demo/harness (it was spawning at x∈[−5.69,+5.40],
-  centre −0.145, so the scene literally started biased).
+  all alternate direction by tick parity) and a **centered spawn grid**. The flip
+  cancels the residual order-induced component; it only became safe after the
+  sticky-contact fix (before it, flipping tipped a fixed-point case into a stuck
+  contact and broke `test_sphere_capsule_collision`). The centered grid fixes a
+  scene that literally started biased (was spawning at x∈[−5.69,+5.40], centre
+  −0.145).
 
-The remaining ~0.085 lean is **not** removable by reordering: it lives in the
-within-ball corner resolution, where a body's simultaneous contacts are collapsed
-into one merged normal+depth per sub-step. The merge takes the first contact's
-depth (order-dependent); making it order-independent naively (max depth along the
-averaged corner normal) over-pushes and explodes. Flipping the within-ball order
-also explodes. So the single-merged-contact model can't be made symmetric with a
-local rule.
+Current measurement (`headless_stress 1500`, defaults): COM reaches only
+≈(+0.03, +0.05) by tick 1500 and is still creeping very slowly rather than fully
+plateaued — down from the ~0.085 that the per-tick flip alone left, and an order
+of magnitude below the original ~0.15. The symmetric push-out, not reordering,
+is what closed most of the gap; the old claim that the residual lived
+irreducibly in a within-ball merged-contact resolution no longer holds.
 
-## Remaining work: order-independent multi-contact resolution
+## Remaining work
 
-The one item that would remove the residual drift (and is the honest "real fix"):
-resolve a body's *simultaneous* contacts together rather than one merged contact
-per sub-step. Two shapes it could take:
+The original "real remaining work" — making the frame-start overlap correction
+order-independent — is **done**: the symmetric ±depth/2 push-out is the
+per-contact-symmetric resolution that the earlier plan proposed (option 1), and
+it took the drift from ~0.085 to ~0.03 without exploding. What is left is
+smaller and largely optional:
 
-1. **Per-contact push-out.** In `update_solid`, when a sweep starts already
-   penetrating multiple colliders, push out against each contact's own
-   normal/depth (a small projected-Gauss–Seidel over that body's live contacts)
-   instead of collapsing them via `merge_collision`. Order-independent and
-   geometrically correct in corners; the current single-merge is the lossy step.
-2. **Double-buffered positions.** Read all bodies' start-of-tick positions,
-   compute new positions, commit at the end — so update order can't affect
-   outcomes at all. Cleaner in principle but changes the swept loop's contract
-   (later bodies currently *rely* on seeing earlier bodies' updated positions),
-   and is the larger change.
+1. **Residual slow creep.** COM still inches toward the +X+Y corner (~0.03→0.05
+   over 1200→1500 ticks) rather than fully plateauing. This is the *remaining*
+   order-dependence: the symmetric push-out fixes overlap correction, but later
+   bodies still sweep against earlier bodies' already-committed positions within
+   a tick. The clean (and only fully order-free) fix is **double-buffered
+   positions** — read all bodies' start-of-tick positions, compute new
+   positions, commit at the end. It changes the swept loop's contract (later
+   bodies currently *rely* on seeing earlier bodies' updated positions) and is
+   the larger change; deferred while the creep stays this small and bounded.
+2. **Frictionless slosh / genuine rest.** KE plateaus at ~30–35k because nothing
+   removes the sliding DOF. Friction is the physical dissipation lever; the demo
+   runs frictionless to match rp3d. A genuinely-at-rest pile without friction
+   would need a sleeping scheme on top — but per the team that should not just
+   mask an injection, and with the runaway fixed there is no longer a net
+   injection to mask.
 
-Either is a careful change to the core swept loop and must be validated in
-fixed-point as well as float (the sticky-contact bug is a reminder that
-precision interacts with contact persistence). Until then the drift is a bounded,
-documented limitation.
-
-Friction remains the only real dissipation path for the frictionless slosh; if a
-genuinely-at-rest pile is wanted without it, that needs the above plus a sleeping
-scheme — but per the team that should not just mask an underlying injection, and
-with the runaway fixed there is no longer a net injection to mask.
+Any change here is a careful change to the core swept loop and must be validated
+in fixed-point as well as float (the sticky-contact and pointer-canonicalization
+bugs are both reminders that precision and address-stability interact with
+contact persistence). Until then both items are bounded, documented limitations.
