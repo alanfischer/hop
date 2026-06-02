@@ -90,15 +90,8 @@ public:
 		active_ = true;
 		deactivate_count_ = 0;
 		touch_count_ = 0;
-		for (int i = 0; i < max_touches; ++i) {
-			touches_[i].partner = nullptr;
-			touches_[i].normal.reset();
-			touches_[i].accum_n = T{};
-			touches_[i].accum_t.reset();
-			touches_[i].impact_speed = T{};
-			touches_[i].last_tick = -1;
-			touches_[i].pair_built_tick = -1;
-		}
+		for (auto & slot : touches_)
+			slot = touch{};  // restore every slot to its in-class defaults
 		simulator_ = nullptr;
 	}
 
@@ -327,11 +320,12 @@ private:
 	// pair list, and runs Gauss–Seidel sweeps over it; this is what makes a
 	// settled stack transmit load through all support contacts in one tick.
 	//
-	// 6 slots empirically covers the largest stable support set a sphere can
-	// have in 3D (a sphere wedged into the kissing arrangement has 6 neighbors).
-	// When a 7th distinct partner is hit, we evict whichever cached slot
-	// contributes least to gravity-aligned support (smallest dot(normal, -g)),
-	// tie-breaking by oldest last_tick.
+	// max_touches slots cover the simultaneous support set a body can hold in a
+	// dense pile (floor + neighbors + a wall), with headroom past the 6-neighbor
+	// kissing arrangement a sphere can wedge into. When a further distinct partner
+	// is hit with the cache full, we evict whichever cached slot contributes least
+	// to gravity-aligned support (smallest dot(normal, -g)), tie-breaking by oldest
+	// last_tick.
 	touch touches_[max_touches];
 	int touch_count_ = 0;
 

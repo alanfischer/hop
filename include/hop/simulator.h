@@ -377,6 +377,9 @@ private:
 		T mu_d {};                   // combined dynamic friction
 		T inv_ma {};
 		T inv_mb {};
+		T inv_m_sum {};              // inv_ma + inv_mb, precomputed once at build
+		T target {};                 // restitution target normal velocity, precomputed once
+		T friction_scale {};         // -1 / inv_m_sum (friction λ scale), precomputed once
 		typename solid<T>::touch * slot_a = nullptr;   // writeback target (may be null if a never observed b)
 		typename solid<T>::touch * slot_b = nullptr;
 	};
@@ -541,15 +544,31 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		if (c.time < one) {
 			sub(left_over, c.point, old_pos);
 			if (c.time == T {} && c.depth > T {}) {
-				// Penetration at frame start: push old_pos out along the contact
-				// normal by the full overlap depth. Split evenly if both bodies
-				// are dynamic so each side's update contributes half the correction.
-				T push = c.depth;
-				if (c.collider && !c.collider->has_infinite_mass())
-					push = c.depth * tr::half();
+				// Penetration at frame start: separate along the contact normal by
+				// the full overlap depth. Against a dynamic partner the correction
+				// is split — but it must be applied to BOTH bodies here, in one
+				// shot, rather than each body pushing only itself by half during
+				// its own update. The old self-only split was order dependent: the
+				// body updated second saw an already-reduced overlap and pushed
+				// less, so the pair's center of mass crept toward whichever body
+				// updated first. Over a grid of contacts that fixed iteration order
+				// summed into a steady lateral drift (a settling pile sliding into
+				// one corner). Moving both bodies ±depth/2 is center-of-mass
+				// preserving and order-independent, killing the drift at its source.
+				bool split = c.collider && !c.collider->has_infinite_mass() && c.collider->active_;
+				T push = split ? c.depth * tr::half() : c.depth;
 				vec3<T> correction;
 				mul(correction, c.normal, push);
 				add(old_pos, correction);
+				if (split) {
+					// Partner moves the opposite way by the same amount. Done via
+					// the swept-snap path's recovery branch invariant: this only
+					// fires when bodies already overlap, so nudging the partner out
+					// reduces penetration rather than creating it.
+					vec3<T> partner_pos(c.collider->position_);
+					sub(partner_pos, correction);
+					c.collider->set_position_direct(partner_pos);
+				}
 			} else {
 				calculate_epsilon_offset(old_pos, left_over, c.normal);
 				add(old_pos, c.point);
@@ -1085,6 +1104,7 @@ void simulator<T>::solve_contacts(T dt) {
 			p.mu_d = (a->coefficient_of_dynamic_friction_ + b->coefficient_of_dynamic_friction_) * tr::half();
 			p.inv_ma = a->inv_mass_;
 			p.inv_mb = b->inv_mass_;
+			p.inv_m_sum = p.inv_ma + p.inv_mb;
 			p.slot_a = slot_is_a ? &slot : other_slot;
 			p.slot_b = slot_is_a ? other_slot : &slot;
 
@@ -1108,6 +1128,11 @@ void simulator<T>::solve_contacts(T dt) {
 		vec3<T> vrel0;
 		sub(vrel0, p.b->velocity_, p.a->velocity_);
 		p.vn0 = dot(vrel0, p.normal);
+		// Restitution target and the λ mass-scale are constant across all GS
+		// sweeps for this pair, so derive them once here rather than per
+		// iteration in the hot loop below.
+		p.target = (-p.vn0 > micro_collision_threshold_) ? -p.cor * p.vn0 : zero_val;
+		p.friction_scale = (p.inv_m_sum > zero_val) ? -one / p.inv_m_sum : zero_val;
 	}
 
 	// --- 3. Warm-start ---
@@ -1139,37 +1164,42 @@ void simulator<T>::solve_contacts(T dt) {
 	// (Coulomb cone clamped to the current accumulated normal). Order is
 	// normal-then-friction so friction sees a meaningful normal load even
 	// on the very first iteration.
+	// Apply a constraint impulse `delta` (a-side convention) split across the
+	// pair by inverse mass — the split-impulse step shared by both sweeps.
+	auto apply_pair_impulse = [zero_val](contact_pair & p, const vec3<T> & delta) {
+		if (p.inv_ma > zero_val) {
+			vec3<T> da;
+			mul(da, delta, -p.inv_ma);
+			add(p.a->velocity_, da);
+		}
+		if (p.inv_mb > zero_val) {
+			vec3<T> db;
+			mul(db, delta, p.inv_mb);
+			add(p.b->velocity_, db);
+		}
+	};
+
+	// Restitution note: p.target separates the pair at `cor` times the relative
+	// normal velocity it was *actually* closing at when the solver began (vn0,
+	// measured along this same pair normal). Because |target| = cor·|vn0| ≤ |vn0|
+	// for cor ≤ 1, the post-solve separation can never exceed the approach —
+	// restitution is guaranteed dissipative. Earlier this targeted cor·impact_speed
+	// (max approach over the tick's sub-steps, per-contact TOI normal); that can
+	// exceed |vn0|, giving an effective COR > 1 that compounded across a deep
+	// frictionless pile and ran energy away (KE → 1e7, balls flung through the
+	// floor). impact_speed is still recorded for wake/callback logic; it must not
+	// drive the restitution target.
 	const int npairs = static_cast<int>(contact_pairs_.size());
 	for (int iter = 0; iter < solver_iterations_; ++iter) {
 		// Normal sweep (flip direction each tick — see the build-loop comment)
 		for (int k = 0; k < npairs; ++k) {
 			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
-			T inv_m_sum = p.inv_ma + p.inv_mb;
-			if (inv_m_sum <= zero_val)
+			if (p.inv_m_sum <= zero_val)
 				continue;
 			vec3<T> vrel;
 			sub(vrel, p.b->velocity_, p.a->velocity_);
 			T vn = dot(vrel, p.normal);
-			// Restitution target: separate at `cor` times the relative normal
-			// velocity the pair was *actually* closing at when the solver began
-			// (vn0, measured along this same pair normal). Because |target| =
-			// cor·|vn0| ≤ |vn0| for cor ≤ 1, the post-solve separation can never
-			// exceed the approach — restitution is guaranteed dissipative.
-			//
-			// Earlier this targeted cor·impact_speed, where impact_speed is the
-			// max approach seen over the tick's sub-steps measured along the
-			// per-contact TOI normal. That quantity can exceed |vn0| (different
-			// normal, max-over-sub-steps latch), so each contact separated faster
-			// than it closed — an effective COR > 1. In a deep frictionless pile
-			// the many contacts compounded that gain faster than the COR-0.75
-			// ball-ball collisions could bleed it, so energy ran away (KE → 1e7,
-			// balls flung through the floor). impact_speed is still recorded for
-			// the wake/callback logic; it must not drive the restitution target.
-			T target = zero_val;
-			if (-p.vn0 > micro_collision_threshold_) {
-				target = -p.cor * p.vn0;
-			}
-			T lambda_n = (target - vn) / inv_m_sum;
+			T lambda_n = (p.target - vn) / p.inv_m_sum;
 			T new_acc = p.accum_n + lambda_n;
 			if (new_acc < zero_val)
 				new_acc = zero_val;
@@ -1178,23 +1208,13 @@ void simulator<T>::solve_contacts(T dt) {
 			if (effective != zero_val) {
 				vec3<T> delta;
 				mul(delta, p.normal, effective);
-				if (p.inv_ma > zero_val) {
-					vec3<T> da;
-					mul(da, delta, -p.inv_ma);
-					add(p.a->velocity_, da);
-				}
-				if (p.inv_mb > zero_val) {
-					vec3<T> db;
-					mul(db, delta, p.inv_mb);
-					add(p.b->velocity_, db);
-				}
+				apply_pair_impulse(p, delta);
 			}
 		}
 		// Friction sweep (same per-tick flip)
 		for (int k = 0; k < npairs; ++k) {
 			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
-			T inv_m_sum = p.inv_ma + p.inv_mb;
-			if (inv_m_sum <= zero_val)
+			if (p.inv_m_sum <= zero_val)
 				continue;
 			if (p.accum_n <= zero_val || p.mu_d <= zero_val)
 				continue;
@@ -1206,8 +1226,7 @@ void simulator<T>::solve_contacts(T dt) {
 			vec3<T> vt;
 			sub(vt, vrel, vn_vec);  // tangential relative velocity
 			vec3<T> lambda_t;
-			T sum_inv = inv_m_sum;
-			mul(lambda_t, vt, -one / sum_inv);
+			mul(lambda_t, vt, p.friction_scale);
 			vec3<T> new_accum_t;
 			add(new_accum_t, p.accum_t, lambda_t);
 			T mag = length(new_accum_t);
@@ -1219,21 +1238,12 @@ void simulator<T>::solve_contacts(T dt) {
 			sub(delta, new_accum_t, p.accum_t);
 			p.accum_t.set(new_accum_t);
 			if (length_squared(delta) > zero_val) {
-				if (p.inv_ma > zero_val) {
-					vec3<T> da;
-					mul(da, delta, -p.inv_ma);
-					add(p.a->velocity_, da);
-				}
-				if (p.inv_mb > zero_val) {
-					vec3<T> db;
-					mul(db, delta, p.inv_mb);
-					add(p.b->velocity_, db);
-				}
+				apply_pair_impulse(p, delta);
 			}
 		}
 	}
 
-	// --- 4. Writeback ---
+	// --- 5. Writeback ---
 	// Store the converged per-pair impulses back into both sides' cache slots
 	// so next tick's warm-start picks up where we left off.
 	for (auto & p : contact_pairs_) {
@@ -1247,27 +1257,23 @@ void simulator<T>::solve_contacts(T dt) {
 		}
 	}
 
-	// --- 5. Wake partners that received non-trivial impulses ---
+	// --- 6. Wake partners that received non-trivial impulses ---
 	// A pile near rest can be perturbed by a single ball landing on top of
 	// it; without this, the perturbed ball pushes the pile down via the
 	// solver but the (sleeping) pile members never re-enter update_solid to
 	// notice their new velocity. Wake any body whose velocity changed by
 	// more than the deactivation threshold.
+	auto wake_if_moving = [this](solid<T> * s, T inv_m) {
+		if (inv_m > T{} && !s->active_ &&
+		    (tr::abs(s->velocity_.x) > deactivate_speed_ ||
+		     tr::abs(s->velocity_.y) > deactivate_speed_ ||
+		     tr::abs(s->velocity_.z) > deactivate_speed_)) {
+			s->activate();
+		}
+	};
 	for (auto & p : contact_pairs_) {
-		if (p.inv_ma > zero_val && !p.a->active_) {
-			if (tr::abs(p.a->velocity_.x) > deactivate_speed_ ||
-			    tr::abs(p.a->velocity_.y) > deactivate_speed_ ||
-			    tr::abs(p.a->velocity_.z) > deactivate_speed_) {
-				p.a->activate();
-			}
-		}
-		if (p.inv_mb > zero_val && !p.b->active_) {
-			if (tr::abs(p.b->velocity_.x) > deactivate_speed_ ||
-			    tr::abs(p.b->velocity_.y) > deactivate_speed_ ||
-			    tr::abs(p.b->velocity_.z) > deactivate_speed_) {
-				p.b->activate();
-			}
-		}
+		wake_if_moving(p.a, p.inv_ma);
+		wake_if_moving(p.b, p.inv_mb);
 	}
 }
 
