@@ -346,6 +346,11 @@ private:
 	vec3<T> gravity_;
 	T epsilon_ {};
 	bool average_normals_ = true;
+	// Set by trace_solid_with_current_spacials: the un-blended normal of the
+	// contact's first collider (c.collider). When average_normals blends several
+	// colliders into c.normal, this still carries c.collider's true normal, which
+	// the contact solver needs to avoid the settling drift (see update_solid).
+	vec3<T> solid_trace_pair_normal_;
 	T max_position_component_ {};
 	T max_velocity_component_ {};
 	T max_force_component_ {};
@@ -546,25 +551,18 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 
 		if (c.time < one) {
 			sub(left_over, c.point, old_pos);
-			// Per-pair contact normal/depth for c.collider. With average_normals on,
-			// the swept trace blends every simultaneous collider's normal into c.normal;
-			// that blend carries a net horizontal bias in an asymmetric pile and, applied
-			// coherently every tick, sums into a steady lean (the settling drift). Re-test
-			// the single pair for its true normal/depth and use it for BOTH the push-out
-			// and the solver cache, so position and velocity corrections stay along the
-			// same direction (a mismatch between them injects energy). c.normal/c.point
-			// still drive the multi-collider TOI slide in the else branch below.
-			vec3<T> pair_normal(c.normal);
-			T pair_depth = c.depth;
-			if (c.collider) {
-				collision<T> pc;
-				pc.time = one;
-				test_solid(pc, solid_ptr, path, c.collider);
-				if (pc.time < one) {
-					pair_normal.set(pc.normal);
-					pair_depth = pc.depth;
-				}
-			}
+			// Per-pair contact normal for c.collider. With average_normals on, the
+			// swept trace blends every simultaneous collider's normal into c.normal;
+			// that blend carries a net horizontal bias in an asymmetric pile and,
+			// applied coherently every tick, sums into a steady lean (the settling
+			// drift). Use c.collider's UN-blended normal — captured for free during the
+			// trace (merge_collision blends only the normal, so c.depth/c.point are
+			// already the first collider's) — for BOTH the push-out and the solver
+			// cache, so position and velocity corrections stay along the same direction
+			// (a mismatch between them injects energy). c.normal/c.point still drive the
+			// multi-collider TOI slide in the else branch below.
+			vec3<T> pair_normal(c.collider ? solid_trace_pair_normal_ : c.normal);
+			const T pair_depth = c.depth;
 			if (c.time == T {} && c.depth > T {}) {
 				// Penetration at frame start: separate along the contact normal by
 				// the full overlap depth. Against a dynamic partner the correction
@@ -871,14 +869,14 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 		    s2->should_collide(s)) {
 			col.time = tr::one();
 			test_solid(col, s, seg, s2);
-			hop::merge_collision(result, col, epsilon_, average_normals_);
+			hop::merge_collision(result, col, epsilon_, average_normals_, &solid_trace_pair_normal_);
 		}
 	}
 
 	if (manager_) {
 		col.time = tr::one();
 		manager_->trace_solid(col, s, seg, collide_with_bits);
-		hop::merge_collision(result, col, epsilon_, average_normals_);
+		hop::merge_collision(result, col, epsilon_, average_normals_, &solid_trace_pair_normal_);
 	}
 
 	if (result.time == tr::one()) {
