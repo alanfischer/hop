@@ -546,6 +546,25 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 
 		if (c.time < one) {
 			sub(left_over, c.point, old_pos);
+			// Per-pair contact normal/depth for c.collider. With average_normals on,
+			// the swept trace blends every simultaneous collider's normal into c.normal;
+			// that blend carries a net horizontal bias in an asymmetric pile and, applied
+			// coherently every tick, sums into a steady lean (the settling drift). Re-test
+			// the single pair for its true normal/depth and use it for BOTH the push-out
+			// and the solver cache, so position and velocity corrections stay along the
+			// same direction (a mismatch between them injects energy). c.normal/c.point
+			// still drive the multi-collider TOI slide in the else branch below.
+			vec3<T> pair_normal(c.normal);
+			T pair_depth = c.depth;
+			if (c.collider) {
+				collision<T> pc;
+				pc.time = one;
+				test_solid(pc, solid_ptr, path, c.collider);
+				if (pc.time < one) {
+					pair_normal.set(pc.normal);
+					pair_depth = pc.depth;
+				}
+			}
 			if (c.time == T {} && c.depth > T {}) {
 				// Penetration at frame start: separate along the contact normal by
 				// the full overlap depth. Against a dynamic partner the correction
@@ -559,9 +578,9 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// one corner). Moving both bodies ±depth/2 is center-of-mass
 				// preserving and order-independent, killing the drift at its source.
 				bool split = c.collider && !c.collider->has_infinite_mass() && c.collider->active_;
-				T push = split ? c.depth * tr::half() : c.depth;
+				T push = split ? pair_depth * tr::half() : pair_depth;
 				vec3<T> correction;
-				mul(correction, c.normal, push);
+				mul(correction, pair_normal, push);
 				add(old_pos, correction);
 				if (split) {
 					// Partner moves the opposite way by the same amount. Done via
@@ -619,7 +638,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			}
 
 			if (hit_solid && !responded) {
-				add_or_refresh_touch(solid_ptr, hit_solid, c.normal, impact_speed, current_tick_);
+				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, impact_speed, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly.
 				if ((hit_solid->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
