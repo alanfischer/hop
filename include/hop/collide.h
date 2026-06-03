@@ -782,18 +782,20 @@ void merge_collision(collision<T> & result, const collision<T> & col, T epsilon,
                      vec3<T> * unblended_normal = nullptr) {
 	using tr = scalar_traits<T>;
 	int trigger_scope = result.trigger_scope;
+	// Adopt col as the contact and, in lockstep, capture its un-blended normal —
+	// keeps the out-param tracking exactly the result.set(col) paths.
+	auto adopt = [&] {
+		result.set(col);
+		if (unblended_normal)
+			unblended_normal->set(col.normal);
+	};
 	if (col.time < tr::one()) {
 		if (col.time < result.time) {
-			result.set(col);
-			if (unblended_normal)
-				unblended_normal->set(col.normal);
+			adopt();
 		} else if (average_normals && result.time == col.time) {
 			add(result.normal, col.normal);
-			if (!normalize_carefully(result.normal, epsilon)) {
-				result.set(col);
-				if (unblended_normal)
-					unblended_normal->set(col.normal);
-			}
+			if (!normalize_carefully(result.normal, epsilon))
+				adopt();
 		}
 	}
 	result.trigger_scope = trigger_scope | col.trigger_scope;
