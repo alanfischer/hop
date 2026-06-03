@@ -21,7 +21,7 @@ that closed out the original "real remaining work" item.
 | Contact pairs canonicalized by stable id (fixed16 determinism) | **done** (`simulator.h`) |
 | Static-friction coefficient honored; velocity cap on solver output | **done** (`simulator.h`) |
 | `restitution_combine` precedence contract documented | **done** (`solid.h`) |
-| Residual slow COM creep (~0.03–0.05 over 1500 ticks) | **bounded, documented** — see drift section |
+| Residual slow COM creep (~0.03–0.05 over 1500 ticks) | **fixed** — per-pair (un-averaged) contact normal for push-out + solver cache (`simulator.h`); see Remaining work §1 |
 
 ## Harnesses
 
@@ -116,15 +116,58 @@ per-contact-symmetric resolution that the earlier plan proposed (option 1), and
 it took the drift from ~0.085 to ~0.03 without exploding. What is left is
 smaller and largely optional:
 
-1. **Residual slow creep.** COM still inches toward the +X+Y corner (~0.03→0.05
-   over 1200→1500 ticks) rather than fully plateauing. This is the *remaining*
-   order-dependence: the symmetric push-out fixes overlap correction, but later
-   bodies still sweep against earlier bodies' already-committed positions within
-   a tick. The clean (and only fully order-free) fix is **double-buffered
-   positions** — read all bodies' start-of-tick positions, compute new
-   positions, commit at the end. It changes the swept loop's contract (later
-   bodies currently *rely* on seeing earlier bodies' updated positions) and is
-   the larger change; deferred while the creep stays this small and bounded.
+1. **Residual slow creep — FIXED (2026-06-02).** COM used to inch toward the
+   +X+Y corner (~0.03→0.05 over 1200→1500 ticks, still climbing). The fix is a
+   25-line change in `update_solid` (`simulator.h`); the root cause was **not**
+   what this plan assumed. Trajectory of the investigation:
+
+   **Dead end — double-buffered positions.** The plan blamed within-tick sweep
+   ordering (later bodies sweeping against earlier bodies' already-committed
+   positions) and prescribed double-buffering: read all start-of-tick positions,
+   commit at end of `update()`. Built it fully (deferred commit + a post-commit
+   contact-discovery pass so the velocity solver sees committed geometry +
+   self-only ±depth/2 push-out). Outcome: it *works* (stacks settle, tests pass)
+   but **does not reduce the drift** (≈0.058 at tick 1500 vs 0.032 baseline —
+   comparable to worse) and adds a long-horizon dense-pile instability (maxV
+   8→378 over 4800 ticks). So the plan's premise was wrong: **the drift is not
+   caused by sweep ordering.** (A naive deferral with stale contacts fed to the
+   solver diverges catastrophically, KE→6e7 — see git history; that confirmed
+   the swept-snap response is tightly coupled to immediate commit.) The
+   double-buffering work was abandoned.
+
+   **Real cause — `average_normals` blends the contact normal.** With the
+   ordering ruled out, direct measurement on baseline localized the drift: with
+   `average_normals` OFF, drift drops ~3–4× (0.048→0.012). When a body's swept
+   trace hits several colliders at the same TOI, `merge_collision` sums and
+   normalizes their normals into one `c.normal` (keeping the first collider).
+   That blended normal carries a small net horizontal bias in an asymmetric
+   pile, and — stored in the solver touch-cache and used by the push-out — it is
+   applied coherently every tick and sums into the lean. (Turning averaging off
+   entirely is not viable: it injects energy, because the blend is what keeps the
+   multi-contact swept response stable.)
+
+   **Fix — true per-pair normal for push-out + cache.** In `update_solid`, when a
+   contact is found, re-test the single pair (`test_solid(pc, self, path,
+   c.collider)`) for its *unblended* normal and depth, and use that for **both**
+   the frame-start push-out and the `add_or_refresh_touch` cache entry.
+   `average_normals` still governs the multi-collider TOI slide (movement
+   stability); only the solver/push-out normal is de-biased. Using the same
+   per-pair normal for position correction *and* the velocity solve is essential
+   — a mismatch between them injects energy (measured: averaged push-out + per-
+   pair cache → E rises to ~370k). Results on `headless_stress` (frictionless):
+   - **Drift eliminated:** COM stays ≈(0, 0) (≤0.017, no trend) through 10000
+     ticks, vs baseline's 0.05-and-climbing.
+   - Energy **bounded** (oscillates ~320–360k, no upward trend over 10k ticks),
+     maxV bounded (~20–30, no tunneling), all 11 tests pass incl. fixed16, all
+     `headless_micro` cases settle/sleep at correct spacing.
+   - Cost: residual frictionless KE rises ~2.5× (≈34k→~90k). It is genuine
+     frictionless slosh, not injection — adding friction (FR=0.5) dissipates it
+     to ~30k. The blended normal had been *artificially damping* by aiming
+     impulses slightly off-true; the per-pair normal does honest tangential work.
+   - Follow-up (optional): the re-test runs for every contact; it only matters
+     when the trace actually blended multiple colliders, so it can be gated on
+     that (have `merge_collision` flag a blend) to remove the extra narrow-phase
+     in the common single-contact case.
 2. **Frictionless slosh / genuine rest.** KE plateaus at ~30–35k because nothing
    removes the sliding DOF. Friction is the physical dissipation lever; the demo
    runs frictionless to match rp3d. A genuinely-at-rest pile without friction
