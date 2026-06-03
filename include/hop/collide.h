@@ -771,17 +771,29 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 // equal-time hits average normals when `average_normals` is on. trigger_scope
 // bits OR in regardless of whether `col` is the closer hit — `result.set(col)`
 // would overwrite trigger_scope, so we save/restore it around the merge.
+// `unblended_normal` (optional) receives the contact's first/earliest collider's
+// true normal. result.normal can become a blend of several equal-time colliders'
+// normals when average_normals is on, but result.collider/.depth/.point stay the
+// first collider's; this hands callers (the contact solver) that collider's
+// un-blended normal so they can resolve along the true pair direction without
+// re-testing. Kept in lockstep with result.collider — set on every result.set(col).
 template <typename T>
-void merge_collision(collision<T> & result, const collision<T> & col, T epsilon, bool average_normals) {
+void merge_collision(collision<T> & result, const collision<T> & col, T epsilon, bool average_normals,
+                     vec3<T> * unblended_normal = nullptr) {
 	using tr = scalar_traits<T>;
 	int trigger_scope = result.trigger_scope;
 	if (col.time < tr::one()) {
 		if (col.time < result.time) {
 			result.set(col);
+			if (unblended_normal)
+				unblended_normal->set(col.normal);
 		} else if (average_normals && result.time == col.time) {
 			add(result.normal, col.normal);
-			if (!normalize_carefully(result.normal, epsilon))
+			if (!normalize_carefully(result.normal, epsilon)) {
 				result.set(col);
+				if (unblended_normal)
+					unblended_normal->set(col.normal);
+			}
 		}
 	}
 	result.trigger_scope = trigger_scope | col.trigger_scope;
