@@ -164,17 +164,35 @@ because it shuffles positions using the same incomplete contact set — it was
 reverted. Conclusion: **omnidirectional contact discovery is the prerequisite**,
 and the next real step, not the position pass.
 
-**Next step — margin-shell discovery.** Discovery must enumerate every contact
-within a small margin in *all* directions, not just along Δ. Options:
-- inflate the body's collision shape by `spec_margin_` for the discovery query so
-  near-contacts register as overlaps (standard speculative-margin approach), with
-  `separation = reported_depth − margin`; or
-- add a closest-distance / proximity query per nearby pair (hop is swept-only
-  today, so this is new narrow-phase surface area).
+**Margin-shell discovery — DONE (Option A, commit 2f84e3b).** A `margin`
+parameter is threaded through the narrow phase (`hop::test_solid` + the simulator
+wrapper, default 0 = exact shapes). It Minkowski-inflates every shape pair
+uniformly — AABB Minkowski grows, sphere/capsule combined radii gain the margin,
+convex planes shift out — so a near-resting contact registers as an overlap and
+discovery recovers the true signed gap as `margin − reported_depth`. Discovery
+now enumerates contacts in **all** directions, not just along Δ.
 
-Once discovery is complete, re-introduce the (already-designed) position backstop
-and re-run the matrix. The Phase 1+2 velocity machinery and the speculative
-target are believed correct — they are starved of contacts, not wrong.
+Effect: the dense pile is now **stable** — the incomplete-discovery collapse and
+ejection (a sphere reaching z = −94) are gone, and the 40× KE-injection win holds
+(demo_stress KE ~1300 vs 55223). Default path untouched (11/11); box stack rests,
+drop lands, 300 m/s sphere doesn't tunnel.
+
+**Still open — deep-load penetration & the position solver.** Two findings:
+1. Re-adding the position-only backstop on top of complete discovery is
+   **unstable on dense piles**: a summed per-contact projection over ~12
+   contacts/body over-displaces and ejects bodies through the floor. It stays
+   out. Velocity Baumgarte recovery is the robust handler for now.
+2. Velocity Baumgarte alone leaves steady-state floor penetration under the
+   19-layer load (~215 spheres below the breach line at baumgarte 0.2, ~45 at
+   0.9; energy trades up as recovery strengthens, KE 1257 → 3790).
+
+The real remaining step is a **proper iterative NGS position solver**: re-derive
+each contact's separation from current body positions per iteration (not the
+cached frame-start gap), apply small clamped corrections, and iterate a few
+times so multi-contact corrections converge instead of summing — the standard
+Box2D/Bullet split-position solve. That is what closes the deep-load penetration
+without the naive backstop's ejection. The velocity machinery, speculative
+target, and now discovery are believed correct.
 
 ## Determinism / fixed-point
 
