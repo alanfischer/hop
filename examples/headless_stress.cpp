@@ -1,13 +1,16 @@
 // headless_stress.cpp — headless diagnostics for the demo_stress settling scene.
-// Mirrors demo_stress.cpp's setup but runs without a window and prints stats.
+// Mirrors demo_stress.cpp's setup (dissipative COR-0.5 walls, contact damping
+// 0.8) but runs without a window and prints stats.
 //
 // Usage: headless_stress [ticks] [room_half] [room_height] [iters] [COR]
 //                        [friction] [avg_normals] [deactivate_speed]
+//                        [deactivate_count]
 //
-// Reports per-second: active/asleep counts, total KE, max speed, max/mean ball
-// height, max inter-sphere penetration, "hanging" count (balls at rest with
-// empty space directly below), total mechanical energy E=KE+PE, and the running
-// injected(+)/dissipated(-) energy split. E must never trend up for this scene.
+// Per sample (every 300 ticks, plus tick 1 and any KE spike) prints asleep
+// count, total KE, max speed, and mean ball height. A final DONE line reports
+// wall-clock time, asleep/total, final KE, mean height, and how many ticks had
+// a floor breach. Used to sweep the sleep (deactivation) thresholds against
+// settling cost — see the "Contact Solver, Settling & Sleep" README section.
 
 #include <chrono>
 #include <cmath>
@@ -29,7 +32,7 @@ static std::shared_ptr<hop::solid<T2>> make_wall(hop::simulator<T2> & sim,
 	auto w = std::make_shared<hop::solid<T2>>();
 	w->set_infinite_mass();
 	w->set_coefficient_of_gravity(T2{});
-	w->set_coefficient_of_restitution(hop::scalar_traits<T2>::one());
+	w->set_coefficient_of_restitution(hop::scalar_traits<T2>::from_milli(500));  // COR 0.5, match demo_stress
 	w->set_coefficient_of_static_friction(WALL_FRICTION);
 	w->set_coefficient_of_dynamic_friction(WALL_FRICTION);
 	w->add_shape(std::make_shared<hop::shape<T2>>(box));
@@ -49,6 +52,7 @@ int main(int argc, char ** argv) {
 	float FR  = argc > 6 ? atof(argv[6]) : 0.0f;
 	int   AN  = argc > 7 ? atoi(argv[7]) : 1;
 	float DS  = argc > 8 ? atof(argv[8]) : 0.2f;
+	int   DC  = argc > 9 ? atoi(argv[9]) : 32;
 	WALL_FRICTION = FR;
 
 	const float SPHERE_R = 0.28f;
@@ -63,10 +67,11 @@ int main(int argc, char ** argv) {
 	hop::simulator<T> sim;
 	hop::bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
-	sim.set_deactivate_count(32);
+	sim.set_deactivate_count(DC);
 	sim.set_deactivate_speed(tr::from_milli((int)(DS*1000)));
 	sim.set_solver_iterations(ITERS);
 	sim.set_average_normals(AN != 0);
+	sim.set_contact_damping(ff(0.8f));  // match demo_stress
 
 	T half = fi(ROOM_HALF), hgt = fi(ROOM_HEIGHT), thick = fi(1), zero = T{};
 	T outer = half + thick;
@@ -109,14 +114,17 @@ int main(int argc, char ** argv) {
 	printf("%7s %7s %7s %12s %8s %8s %8s %8s %6s\n",
 	       "tick", "active", "asleep", "KE", "maxV", "minZ", "maxZ", "E", "inj/dis");
 
+	printf("%7s %7s %12s %8s %8s %6s\n", "tick", "asleep", "KE", "maxV", "meanZ", "");
 	double prevKE = 0, prevE = 0, injPos = 0, injNeg = 0;
+	int finalAsleep = 0, totalBreach = 0; float finalKE = 0, finalMeanZ = 0;
+	auto t0 = std::chrono::high_resolution_clock::now();
 	for (int t = 1; t <= TICKS; ++t) {
 		sim.update(tr::from_milli(16));
 
 		// Cheap O(n) stats every tick so a transient is never missed between samples.
 		float ke = 0, maxv = 0, maxz = -1e9f, minz = 1e9f, sumz = 0, sumx = 0, sumy = 0;
 		double pe = 0;
-		int below = 0;
+		int below = 0, asleep = 0;
 		for (auto & s : spheres) {
 			auto p = s->get_position();
 			auto v = s->get_velocity();
@@ -128,21 +136,26 @@ int main(int argc, char ** argv) {
 			minz = std::min(minz, p.z);
 			sumz += p.z; sumx += tr::to_float(p.x); sumy += tr::to_float(p.y);
 			if (p.z < SPHERE_R - 0.05f) ++below;   // a sphere center this low has breached the floor
+			if (!s->active()) ++asleep;
 		}
 		float comx = sumx/spheres.size(), comy = sumy/spheres.size();
 		double E = ke + pe;
 		if (t > 1) { double d = E - prevE; if (d > 0) injPos += d; else injNeg += d; }
 		prevE = E;
+		if (below > 0) ++totalBreach;
 
 		bool spike  = t > 120 && ke > prevKE * 1.5f && ke - prevKE > 100.0f;  // the "hotspot"
-		bool breach = below > 0;                                             // floor "broke"
 		if (t % 300 == 0 || t == 1 || spike) {
-			int active = sim.count_active_solids();
-			printf("%7d  KE=%9.1f maxV=%6.2f  COM=(%+.3f,%+.3f) meanZ=%.3f  E=%9.0f%s\n",
-			       t, ke, maxv, comx, comy, sumz/spheres.size(), E,
+			printf("%7d  %6d  KE=%9.1f maxV=%6.2f meanZ=%.3f %s\n",
+			       t, asleep, ke, maxv, sumz/spheres.size(),
 			       spike ? "  <-- KE SPIKE" : "");
 		}
 		prevKE = ke;
+		finalAsleep = asleep; finalKE = ke; finalMeanZ = sumz/spheres.size();
 	}
+	auto t1 = std::chrono::high_resolution_clock::now();
+	double secs = std::chrono::duration<double>(t1 - t0).count();
+	printf("DONE  time=%.2fs  asleep=%d/%d  finalKE=%.2f  meanZ=%.3f  breachTicks=%d\n",
+	       secs, finalAsleep, COUNT, finalKE, finalMeanZ, totalBreach);
 	return 0;
 }

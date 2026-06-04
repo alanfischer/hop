@@ -74,6 +74,24 @@ Traceable-vs-Traceable is not supported. Segment traces (raycasting) work agains
 
 **No cylinder primitive**: a cylinder's flat cap meets its curved side at a sharp circular edge. Sweeping any shape against that edge requires finding the intersection with a quarter-torus, which is a degree-4 polynomial — inconsistent with the quadratic math used everywhere else in hop, and impractical in fixed-point. Use a **capsule** instead: it is geometrically equivalent for collision purposes, and its hemispherical caps turn the hard rim problem into a smooth sphere test. If flat caps are required, a `convex_solid` approximation is available.
 
+## Contact Solver, Settling & Sleep
+
+Hop's tick runs in the **reverse of the textbook sequential-impulse order**. A standard rigid-body engine solves velocity constraints *first* and then integrates positions; hop integrates positions *first* (in `update_solid`, including gravity and the swept push-out that snaps a body to its earliest time-of-impact), and *then* runs the contact solver (`solve_contacts`, "Pass B") to fix up velocities. This ordering is what makes the swept/continuous-collision and fixed-point-deterministic design fall out cleanly — position is always advanced by an exact TOI snap rather than a predicted-then-corrected step.
+
+The cost of that ordering is a small, structural **energy injection at contacts**. Every tick a resting body first sinks slightly into its neighbor under gravity, the push-out lifts it back out, and only afterward does the velocity solver run — so a little energy leaks back in, worst at angled contacts and low coefficients of restitution. For one or a few contacts this is invisible. For a deep pile it accumulates into a permanent low-grade churn: the stack transmits load and *looks* settled, but its kinetic energy plateaus instead of decaying to zero.
+
+The visible symptom is in `examples/demo_stress.cpp` (~6859 spheres). It never fully goes to sleep. With the headless harness (`examples/headless_stress.cpp`), KE plateaus around ~55k and only a handful of bodies ever fall below the deactivation threshold — and switching the walls between elastic and dissipative barely moves it, confirming the residual is **endogenous** (sphere-to-sphere), not wall bounces.
+
+**Knobs that exist today** (all symptomatic — they damp or hide the churn, they don't remove its source):
+
+- `set_contact_damping(d)` — viscous tangential damping applied only at touching pairs (used by `demo_stress`); calms the pile without slowing free fall.
+- `set_deactivate_speed(s)` / `set_deactivate_count(n)` — how slow, and for how many consecutive ticks, before a body sleeps. Raising the speed / lowering the count sleeps far more of the pile (a sweep took the stress demo from ~55s to ~40s at `speed≈1.0, count=16` with no visible change, and to ~5s if pushed hard) — but past a point it *freezes bodies mid-motion*, leaving the pile puffed up with frozen-in voids. It buys speed by trading away settling accuracy.
+- `set_solver_iterations(n)` — Pass B Gauss–Seidel sweeps (default 16). Lower is correct for shallow/single contacts; deep stacks need the full count. Note this is **not** a performance fast path: the bottleneck is the swept narrow-phase, not the solver, and fewer iterations leave the pile churning so *more* bodies stay awake — in practice lowering it makes the stress scene slower, not faster.
+
+**What an actual fix would require — the pipeline reorder.** To let a large pile dissipate to true rest (and then sleep at the default threshold, for free), hop would need to move to the standard order: integrate to a *predicted* position, build contacts against that prediction, solve the velocity constraints, and only then commit the position — i.e. **speculative/swept-reconciled contacts** rather than the current integrate-then-snap-then-solve. This is the reconciliation that mainstream engines use to combine continuous collision with a sequential-impulse solver.
+
+It is deliberately **not** implemented. The current swept push-out and per-tick TOI snapping are entangled with the existing order, so the reorder is a substantial rewrite that puts hop's two differentiators — exact swept collision and fixed-point determinism — at risk for a payoff (thousand-body piles going fully to sleep) that the translation-only, game-object use case rarely needs. The tradeoff is tracked and chosen against, not overlooked.
+
 ## Scope Bitmasks
 
 Each `solid` carries four independent `int` bitmasks. They serve different purposes — keeping them straight is easier with one sentence per role:
