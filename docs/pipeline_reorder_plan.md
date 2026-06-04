@@ -177,22 +177,35 @@ ejection (a sphere reaching z = −94) are gone, and the 40× KE-injection win h
 (demo_stress KE ~1300 vs 55223). Default path untouched (11/11); box stack rests,
 drop lands, 300 m/s sphere doesn't tunnel.
 
-**Still open — deep-load penetration & the position solver.** Two findings:
-1. Re-adding the position-only backstop on top of complete discovery is
-   **unstable on dense piles**: a summed per-contact projection over ~12
-   contacts/body over-displaces and ejects bodies through the floor. It stays
-   out. Velocity Baumgarte recovery is the robust handler for now.
-2. Velocity Baumgarte alone leaves steady-state floor penetration under the
-   19-layer load (~215 spheres below the breach line at baumgarte 0.2, ~45 at
-   0.9; energy trades up as recovery strengthens, KE 1257 → 3790).
+**Iterative NGS position solver — DONE (commit 2edb1ef).** `correct_positions()`
+runs after the velocity solve: it accumulates a per-body pseudo-position
+(`solid::pos_correction_`, zeroed in Pass A, folded into the commit), never
+touching velocity, so it removes penetration without adding energy (the velocity
+Baumgarte term is dropped). It is *non-linear* — each pair's separation is
+re-derived from the running correction every visit
+(`sep = discovery_gap + dot(Δb − Δa, n)`), so a body's several contacts converge
+instead of summing. Two ejection sources were found and fixed along the way: the
+naive one-shot summed projection (over-displaces; the reason iteration +
+re-derivation are required), and **stale corrections on sleeping partners** —
+sleeping/static bodies are now treated as immovable supports (zeroed first, inverse
+mass forced to 0), so awake bodies take the whole correction.
 
-The real remaining step is a **proper iterative NGS position solver**: re-derive
-each contact's separation from current body positions per iteration (not the
-cached frame-start gap), apply small clamped corrections, and iterate a few
-times so multi-contact corrections converge instead of summing — the standard
-Box2D/Bullet split-position solve. That is what closes the deep-load penetration
-without the naive backstop's ejection. The velocity machinery, speculative
-target, and now discovery are believed correct.
+Result (demo_stress headless, speculative, baumgarte 0.8 × 8 iters + gated contact
+damping): deep-load floor penetration essentially gone (finalBelow 316 → ~2, no
+ejection), KE ~1000 vs default 55223 (~50×), ~140 asleep vs 6, floor clean.
+Default path untouched (11/11).
+
+**Still open — full sleep.** A low ~0.7 m/s churn keeps most bodies from fully
+sleeping (a position-solve / velocity-solve interaction: NGS shifts positions, the
+velocities don't quite reach zero against the shifted configuration). The pile is
+stable and ~50× calmer than default but not fully at rest. Next tuning targets:
+expose the NGS knobs (`spec_pos_baumgarte_`, `spec_pos_iters_`, `spec_margin_`,
+`spec_slop_`) as setters; consider relaxing the velocity solve's restitution
+gating at rest, or a small post-NGS velocity projection; then add the full-sleep +
+tunneling tests to the suite and re-tune before flipping the default. With NGS in
+place, modest contact damping is beneficial again (drains the residual churn) and
+no longer hovers (it is gated to real contacts) — so contact_damping does NOT need
+to be 0 with speculative+NGS.
 
 ## Determinism / fixed-point
 
