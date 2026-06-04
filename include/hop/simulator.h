@@ -298,8 +298,8 @@ public:
 	void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s) {
 		hop::test_segment(result, seg, s, epsilon_);
 	}
-	void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2) {
-		hop::test_solid(result, s1, seg, s2, epsilon_);
+	void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T margin = T {}) {
+		hop::test_solid(result, s1, seg, s2, epsilon_, margin);
 	}
 
 	// Utility
@@ -882,16 +882,13 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	num_spacial_collection_ =
 	    find_solids_in_aa_box(box, spacial_collection_.data(), static_cast<int>(spacial_collection_.size()));
 
-	// Sweep the predicted motion, extended by the speculative margin so a contact
-	// about to be reached is discovered before it penetrates.
+	// Sweep the predicted motion. The speculative margin is applied as a uniform
+	// shape inflation in the test below (margin-shell discovery), not as a
+	// directional path extension — that is what catches the lateral/omnidirectional
+	// resting contacts a bare directional sweep misses. The swept path still spans
+	// the full predicted motion, preserving anti-tunneling for fast bodies.
 	vec3<T> sweep_end;
 	add(sweep_end, old_pos, delta);
-	T len = length(delta);
-	if (len > zero) {
-		vec3<T> ext;
-		mul(ext, delta, spec_margin_ / len);
-		add(sweep_end, ext);
-	}
 	segment<T> path;
 	path.set_start_end(old_pos, sweep_end);
 
@@ -908,19 +905,23 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 		col.reset();
 		col.time = one;
-		test_solid(col, solid_ptr, path, s2);
+		test_solid(col, solid_ptr, path, s2, spec_margin_);
 		if (col.time >= one && col.depth <= zero)
-			continue; // no contact within reach
+			continue; // not within the inflated shell and not swept into this tick
 
 		// Normal points from partner toward self (the cache convention).
 		const vec3<T> & n = col.normal;
 
-		// Signed gap along the normal at the body's current (start) position:
-		// -depth when already overlapping, otherwise the closing distance still
-		// to be covered to reach the contact (>= 0).
+		// Signed gap along the normal at the body's current (start) position.
+		// Shapes were inflated by spec_margin_, so an overlap of the inflated
+		// shapes (col.time == 0) means the true surfaces are within the margin:
+		// the real gap is (margin - inflated_depth) — 0 when touching, negative
+		// when truly penetrating, positive within the shell. A contact reached
+		// only by sweeping this tick (col.time > 0) is a fast approach; its gap is
+		// the closing distance still to cover.
 		T separation;
-		if (col.time <= zero && col.depth > zero) {
-			separation = -col.depth;
+		if (col.time <= zero) {
+			separation = spec_margin_ - col.depth;
 		} else {
 			vec3<T> to_contact;
 			sub(to_contact, col.point, old_pos);
@@ -960,9 +961,9 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 }
 
 // Speculative Pass B: commit position from the solved velocity, then run the
-// shared deactivation logic. Penetration recovery lives in the velocity solve
-// (solve_contacts' speculative target separates overlapping pairs), so there is
-// no position push-out here.
+// shared deactivation logic. Penetration is handled at the velocity level by
+// solve_contacts' speculative target (Baumgarte recovery), so there is no
+// position push-out here.
 template <typename T> void simulator<T>::commit_solid(solid<T> * solid_ptr, T dt) {
 	vec3<T> old_pos(solid_ptr->position_);
 	cap_vec3(old_pos, max_position_component_);
@@ -1370,10 +1371,13 @@ void simulator<T>::solve_contacts(T dt) {
 			// Speculative target. With a real gap remaining (separation > slop),
 			// the contact hasn't happened yet: withhold restitution and only cap
 			// the approach so the body closes at most the gap this tick
-			// (vn >= -(gap - slop)/dt). At/inside the contact, apply restitution
-			// plus a Baumgarte fraction of any penetration as a separating bias
-			// (gap < 0 → recovery > 0). The non-penetration cap is what both stops
-			// fast bodies short of tunneling and lets a resting pile come to rest.
+			// (vn >= -(gap - slop)/dt) — this stops fast bodies short of tunneling.
+			// At/inside the contact, apply restitution plus a Baumgarte fraction of
+			// any penetration as a separating bias (gap < 0 → recovery > 0). A
+			// summed position-projection backstop was tried instead and proved
+			// unstable on dense piles (many contacts per body over-displace and
+			// eject bodies through the floor); the velocity recovery is the robust
+			// handler here. See docs/pipeline_reorder_plan.md.
 			const T gap = p.separation;
 			if (gap > spec_slop_) {
 				p.target = -(gap - spec_slop_) * inv_dt;
