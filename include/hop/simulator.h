@@ -1529,6 +1529,13 @@ void simulator<T>::solve_contacts(T dt) {
 		for (auto & p : contact_pairs_) {
 			if (p.inv_m_sum <= zero_val)
 				continue;
+			// Only damp genuinely touching pairs. Margin-shell discovery (speculative
+			// pipeline) adds proximity pairs that are not yet in contact; damping
+			// their tangential velocity would drain a body's *fall* through its
+			// lateral near-neighbours and leave it hovering. Default-pipeline pairs
+			// have separation <= 0, so they are unaffected.
+			if (p.separation > spec_slop_)
+				continue;
 			vec3<T> vrel;
 			sub(vrel, p.b->velocity_, p.a->velocity_);
 			T vn = dot(vrel, p.normal);

@@ -54,6 +54,7 @@ int main(int argc, char ** argv) {
 	float DS  = argc > 8 ? atof(argv[8]) : 0.2f;
 	int   DC  = argc > 9 ? atoi(argv[9]) : 32;
 	int   SPEC = argc > 10 ? atoi(argv[10]) : 0;
+	float CDAMP = argc > 11 ? atof(argv[11]) : 0.8f;
 	WALL_FRICTION = FR;
 
 	const float SPHERE_R = 0.28f;
@@ -72,7 +73,7 @@ int main(int argc, char ** argv) {
 	sim.set_deactivate_speed(tr::from_milli((int)(DS*1000)));
 	sim.set_solver_iterations(ITERS);
 	sim.set_average_normals(AN != 0);
-	sim.set_contact_damping(ff(0.8f));  // match demo_stress
+	sim.set_contact_damping(ff(CDAMP));  // demo_stress uses 0.8
 	sim.set_speculative_contacts(SPEC != 0);
 
 	T half = fi(ROOM_HALF), hgt = fi(ROOM_HEIGHT), thick = fi(1), zero = T{};
