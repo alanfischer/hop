@@ -775,7 +775,14 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 				supported = true;
 			} else {
 				for (int k = 0; k < solid_ptr->touch_count_; ++k) {
-					if (solid_ptr->touches_[k].last_tick == current_tick_) {
+					// Only a genuinely load-bearing contact counts as support, not
+					// mere proximity. Margin-shell discovery (speculative pipeline)
+					// records touches for neighbours up to spec_margin_ away; without
+					// this gap check a body merely *near* another would be deemed
+					// supported and sleep mid-air. Default-pipeline touches always
+					// have separation <= 0 (post-push-out), so they still qualify.
+					if (solid_ptr->touches_[k].last_tick == current_tick_ &&
+					    solid_ptr->touches_[k].separation <= spec_slop_) {
 						supported = true;
 						break;
 					}
