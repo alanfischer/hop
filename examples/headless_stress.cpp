@@ -1,6 +1,6 @@
 // headless_stress.cpp — headless diagnostics for the demo_stress settling scene.
-// Mirrors demo_stress.cpp's setup (dissipative COR-0.5 walls, contact damping
-// 0.8) but runs without a window and prints stats.
+// Mirrors demo_stress.cpp's setup (dissipative COR-0.5 walls) but runs without a
+// window and prints stats. Friction and the speculative toggle are args.
 //
 // Usage: headless_stress [ticks] [room_half] [room_height] [iters] [COR]
 //                        [friction] [avg_normals] [deactivate_speed]
@@ -54,7 +54,6 @@ int main(int argc, char ** argv) {
 	float DS  = argc > 8 ? atof(argv[8]) : 0.2f;
 	int   DC  = argc > 9 ? atoi(argv[9]) : 32;
 	int   SPEC = argc > 10 ? atoi(argv[10]) : 0;
-	float CDAMP = argc > 11 ? atof(argv[11]) : 0.8f;
 	WALL_FRICTION = FR;
 
 	const float SPHERE_R = 0.28f;
@@ -73,7 +72,6 @@ int main(int argc, char ** argv) {
 	sim.set_deactivate_speed(tr::from_milli((int)(DS*1000)));
 	sim.set_solver_iterations(ITERS);
 	sim.set_average_normals(AN != 0);
-	sim.set_contact_damping(ff(CDAMP));  // demo_stress uses 0.8
 	sim.set_speculative_contacts(SPEC != 0);
 
 	T half = fi(ROOM_HALF), hgt = fi(ROOM_HEIGHT), thick = fi(1), zero = T{};

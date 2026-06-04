@@ -41,8 +41,8 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	// Friction is safe under the speculative pipeline (see run()): the COM-split
 	// NGS position correction is order-independent, so friction no longer ratchets
 	// the pile into a corner the way the old per-body push-out did. It's also the
-	// physical way to drain the pile's residual slosh — unlike contact_damping,
-	// which (lacking a Coulomb cone) glues balls to the walls.
+	// physical way to drain the pile's residual slosh — unlike viscous contact
+	// damping, which (lacking a Coulomb cone) would glue balls to the walls.
 	w->set_coefficient_of_static_friction(ff<T>(0.5f));
 	w->set_coefficient_of_dynamic_friction(ff<T>(0.5f));
 	w->add_shape(std::make_shared<hop::shape<T>>(box));
@@ -71,8 +71,8 @@ template <typename T> static void run() {
 	// Speculative-contacts pipeline (discover -> solve -> integrate, with the NGS
 	// position solver). It removes the old pipeline's structural energy injection,
 	// so the pile actually dissipates and settles instead of churning forever — and
-	// it lets us use real friction (above) to drain the slosh, dropping the
-	// contact_damping crutch (which glued balls to the walls). See
+	// it lets us use real friction (above) to drain the slosh, dropping the old
+	// viscous-damping crutch (which glued balls to the walls). See
 	// docs/pipeline_reorder_plan.md.
 	sim.set_speculative_contacts(true);
 
