@@ -128,10 +128,10 @@ completeness**, which must be solved before the backstop helps.
 
 **Phase 4 — Re-tune and prune.** With the pile now dissipating naturally,
 re-tune `deactivate_speed` / `deactivate_count` (the sweep harness,
-`examples/headless_stress.cpp`, already measures this). Re-evaluate whether
-`set_contact_damping` (`demo_stress`'s current crutch) is still needed — it
-likely becomes a no-op for settling and can default off. Confirm
-`solver_iterations` budgets.
+`examples/headless_stress.cpp`, already measures this). `contact_damping` was
+evaluated and **removed** — real Coulomb friction supersedes it (see findings).
+Confirm `solver_iterations` budgets. (Largely done; deactivation re-tune for the
+speculative rest signature remains — see the resume checklist.)
 
 **Phase 5 — Flip the default and remove the old path.** Once the test matrix
 below is green with `speculative_contacts` on, make it the default, then delete
@@ -195,17 +195,59 @@ damping): deep-load floor penetration essentially gone (finalBelow 316 → ~2, n
 ejection), KE ~1000 vs default 55223 (~50×), ~140 asleep vs 6, floor clean.
 Default path untouched (11/11).
 
+**Friction replaces contact_damping — DONE (commits 1962029, 8f7a91f).** Real
+Coulomb friction (cone-limited) is the physical, drift-free way to drain the
+pile's slosh under the speculative pipeline; `contact_damping` (viscous, no cone)
+glued balls to walls and was **removed entirely**. `demo_stress` now runs
+speculative with friction 0.5 on balls and walls: asleep ~527 (vs 13 default),
+KE ~620 (vs 55223), floor clean, COM centered at (−0.012, −0.008) — the corner
+drift that originally forced the demo frictionless is gone because the NGS
+correction is order-independent.
+
 **Still open — full sleep.** A low ~0.7 m/s churn keeps most bodies from fully
 sleeping (a position-solve / velocity-solve interaction: NGS shifts positions, the
 velocities don't quite reach zero against the shifted configuration). The pile is
-stable and ~50× calmer than default but not fully at rest. Next tuning targets:
-expose the NGS knobs (`spec_pos_baumgarte_`, `spec_pos_iters_`, `spec_margin_`,
-`spec_slop_`) as setters; consider relaxing the velocity solve's restitution
-gating at rest, or a small post-NGS velocity projection; then add the full-sleep +
-tunneling tests to the suite and re-tune before flipping the default. With NGS in
-place, modest contact damping is beneficial again (drains the residual churn) and
-no longer hovers (it is gated to real contacts) — so contact_damping does NOT need
-to be 0 with speculative+NGS.
+stable, drift-free, and ~50–80× calmer than default, but not fully at rest. This
+is the one functional gap left — see the resume checklist below.
+
+## Remaining work — resume checklist
+
+Branch `speculative-contacts` (off `main`). Pipeline is implemented and opt-in
+(`set_speculative_contacts`, default off); `demo_stress` uses it with friction.
+What's left, in order:
+
+1. **[functional gap] Full settle-to-sleep.** Close the residual ~0.7 m/s churn
+   so the pile actually sleeps. Likely a small post-NGS velocity reconciliation
+   (re-zero the normal velocity the position shift introduces) or relaxing the
+   restitution gate at rest. This is the gating item — everything below waits on
+   it. Measure with `examples/headless_stress.cpp … <spec=1>` (watch `asleep`,
+   `finalKE`, `COM`).
+2. **Expose tuning knobs as setters.** `spec_margin_`, `spec_slop_`,
+   `spec_pos_baumgarte_`, `spec_pos_iters_` are hardcoded in
+   `init_epsilon_defaults` (`simulator.h`). Add `set_/get_` accessors like the
+   other sim knobs.
+3. **Tests** (`tests/test_collision.cpp`). Beyond `box_stack`: a full-sleep test
+   (demo_stress headless settles + `asleep == COUNT` within N ticks), a tunneling
+   test (fast body vs thin static wall, float + fixed16), and a fixed16
+   determinism/round-trip test.
+4. **Re-tune deactivation** (`deactivate_speed`/`deactivate_count`) for the
+   speculative rest signature.
+5. **Flip the default** — make `speculative_contacts_` default true (or drop the
+   toggle) once 1–4 are green.
+6. **Delete the old pipeline** — the integrate→snap→solve path: the depth
+   push-out and TOI-snap placement and sub-step slide loop in `update_solid`
+   (`simulator.h`, ~lines 560–740 in the current default branch). This is the big
+   simplification; do it only after the default is flipped and proven.
+7. **Docs** — rewrite the README "Contact Solver, Settling & Sleep" section to
+   describe speculative as *the* pipeline (not opt-in), and finalize this plan.
+
+Key symbols: `integrate_and_discover`, `solve_contacts`, `correct_positions`,
+`commit_solid`, `try_deactivate` (all `simulator.h`); `solid::pos_correction_`,
+`solid::touch::separation` (`solid.h`); `hop::test_solid(..., margin)`
+(`collide.h`). Diagnostics: `examples/headless_stress.cpp` args are
+`ticks room_half room_height iters COR friction avg_normals deactivate_speed
+deactivate_count speculative`; DONE line reports asleep / KE / meanZ /
+breachTicks / finalBelow / finalMinZ / COM.
 
 ## Determinism / fixed-point
 
