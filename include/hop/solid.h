@@ -295,6 +295,7 @@ private:
 	vec3<T> position_;
 	vec3<T> velocity_;
 	vec3<T> force_;
+	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
 	aa_box<T> world_bound_;       // broad phase reads this
 	aa_box<T> local_bound_;
 	std::vector<typename shape<T>::ptr> shapes_;

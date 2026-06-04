@@ -219,6 +219,12 @@ public:
 				integrate_and_discover(s, dt);
 			}
 			solve_contacts(dt);
+			// Iterative NGS position solver: remove residual penetration the
+			// velocity solve leaves under load, as a pseudo-position correction
+			// (no velocity change → no energy added). Bodies are still at their
+			// frame-start positions; commit_solid folds in both v*dt and the
+			// accumulated correction.
+			correct_positions();
 			// Pass B commits each body's position from its solved velocity, then
 			// handles deactivation and the manager's post-update.
 			for (size_t ii = 0; ii < num; ++ii) {
@@ -255,6 +261,11 @@ public:
 	// position from the solved velocity and handles deactivation.
 	void integrate_and_discover(solid<T> * solid_ptr, T dt);
 	void commit_solid(solid<T> * solid_ptr, T dt);
+	// Iterative non-linear Gauss–Seidel position solver (speculative pipeline):
+	// removes residual penetration as a pseudo-position correction, re-deriving
+	// each contact's separation from the running correction so multi-contact
+	// corrections converge instead of summing. Velocity is never touched.
+	void correct_positions();
 	// Shared deactivation/sleep logic: given the body's about-to-be-committed
 	// position, decide whether it qualifies to sleep this tick. Used by both the
 	// default and speculative pipelines.
@@ -349,7 +360,7 @@ private:
 		// Speculative-contacts tuning (only used when speculative_contacts_ is on).
 		spec_margin_ = epsilon_ * tr::from_int(8);  // discover contacts this far past the predicted motion
 		spec_slop_ = epsilon_;                       // penetration tolerated without correction (anti-jitter)
-		spec_baumgarte_ = tr::from_milli(200);       // 0.2 — fraction of penetration corrected per tick
+		spec_pos_baumgarte_ = tr::from_milli(800);   // 0.8 — fraction of penetration removed per NGS iteration
 	}
 
 	void report_collisions();
@@ -451,9 +462,10 @@ private:
 	// ticks settle in 1–2 sweeps regardless of pile depth, so the per-tick
 	// cost is dominated by the first tick after a perturbation.
 	bool speculative_contacts_ = false;
-	T spec_margin_ {};     // discover contacts up to this far beyond the predicted motion
-	T spec_slop_ {};       // penetration tolerated without correction (kills resting jitter)
-	T spec_baumgarte_ {};  // fraction of penetration corrected per tick via the velocity target
+	T spec_margin_ {};         // discover contacts up to this far beyond the predicted motion
+	T spec_slop_ {};           // penetration tolerated without correction (kills resting jitter)
+	T spec_pos_baumgarte_ {};  // fraction of remaining penetration removed per NGS position iteration
+	int spec_pos_iters_ = 8;   // NGS position-solver iterations per tick
 	int solver_iterations_ = 16;
 	T contact_damping_ {};  // viscous tangential contact damping; 0 = off. See set_contact_damping.
 	// Sub-step budget for update_solid's swept-collision slide loop. Was a
@@ -847,6 +859,10 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	const T zero = T {};
 	const T one = tr::one();
 
+	// Reset this tick's NGS position correction (commit_solid folds it in for every
+	// body, so it must start at zero whether or not the body gets contacts).
+	solid_ptr->pos_correction_.reset();
+
 	// Semi-implicit (symplectic) Euler: v += a(x, v)·dt, committed now; position
 	// is integrated in Pass B from the *solved* velocity. The high-order
 	// integrators (Heun/RK) target accurate ballistic free flight; a contact
@@ -967,10 +983,10 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	}
 }
 
-// Speculative Pass B: commit position from the solved velocity, then run the
-// shared deactivation logic. Penetration is handled at the velocity level by
-// solve_contacts' speculative target (Baumgarte recovery), so there is no
-// position push-out here.
+// Speculative Pass B: commit position from the solved velocity plus the NGS
+// position correction, then run the shared deactivation logic. The correction is
+// a pseudo-position (velocity is untouched), so it removes penetration without
+// adding energy.
 template <typename T> void simulator<T>::commit_solid(solid<T> * solid_ptr, T dt) {
 	vec3<T> old_pos(solid_ptr->position_);
 	cap_vec3(old_pos, max_position_component_);
@@ -978,10 +994,64 @@ template <typename T> void simulator<T>::commit_solid(solid<T> * solid_ptr, T dt
 	mul(delta, solid_ptr->velocity_, dt);
 	vec3<T> new_pos;
 	add(new_pos, old_pos, delta);
+	add(new_pos, solid_ptr->pos_correction_);  // NGS pseudo-position correction
 	cap_vec3(new_pos, max_position_component_);
 
 	try_deactivate(solid_ptr, new_pos, dt);
 	solid_ptr->set_position_direct(new_pos);
+}
+
+// Iterative non-linear Gauss–Seidel position solver. Accumulates a per-body
+// pseudo-position correction (solid::pos_correction_, zeroed in Pass A and folded
+// into the commit), never touching velocity — so it removes penetration without
+// adding energy, unlike a velocity-level Baumgarte term. "Non-linear" because each
+// pair's separation is re-derived from the running correction every visit, so the
+// corrections from a body's several contacts converge (a floor pushing up and a
+// neighbour pushing down see each other) instead of blindly summing — the failure
+// mode of a one-shot projection, which over-displaced and ejected bodies.
+template <typename T> void simulator<T>::correct_positions() {
+	const T zero = T {};
+	// Start every participating body from a zero correction. Active bodies were
+	// already zeroed in Pass A; this additionally clears sleeping partners (skipped
+	// in Pass A) whose stale correction would otherwise corrupt the re-derivation.
+	for (auto & p : contact_pairs_) {
+		p.a->pos_correction_.reset();
+		p.b->pos_correction_.reset();
+	}
+	for (int iter = 0; iter < spec_pos_iters_; ++iter) {
+		for (auto & p : contact_pairs_) {
+			// Sleeping (and static) bodies are immovable supports: treat their
+			// inverse mass as zero so an awake body takes the whole correction, and
+			// we never write a correction to a body that won't commit it.
+			T inv_a = p.a->active_ ? p.inv_ma : zero;
+			T inv_b = p.b->active_ ? p.inv_mb : zero;
+			T inv_sum = inv_a + inv_b;
+			if (inv_sum <= zero)
+				continue;
+			// Current separation = the gap at discovery plus how far the running
+			// corrections have already separated this pair along the normal.
+			vec3<T> rel;
+			sub(rel, p.b->pos_correction_, p.a->pos_correction_);
+			T cur_sep = p.separation + dot(rel, p.normal);
+			// Only penetration beyond the slop band is corrected.
+			T pen = -cur_sep - spec_slop_;
+			if (pen <= zero)
+				continue;
+			T corr = pen * spec_pos_baumgarte_;
+			// p.normal points from a toward b: push b along +normal and a along
+			// -normal, each by its share of the inverse mass.
+			if (inv_b > zero) {
+				vec3<T> d;
+				mul(d, p.normal, corr * (inv_b / inv_sum));
+				add(p.b->pos_correction_, d);
+			}
+			if (inv_a > zero) {
+				vec3<T> d;
+				mul(d, p.normal, corr * (inv_a / inv_sum));
+				sub(p.a->pos_correction_, d);
+			}
+		}
+	}
 }
 
 template <typename T> void simulator<T>::report_collisions() {
@@ -1379,19 +1449,15 @@ void simulator<T>::solve_contacts(T dt) {
 			// the contact hasn't happened yet: withhold restitution and only cap
 			// the approach so the body closes at most the gap this tick
 			// (vn >= -(gap - slop)/dt) — this stops fast bodies short of tunneling.
-			// At/inside the contact, apply restitution plus a Baumgarte fraction of
-			// any penetration as a separating bias (gap < 0 → recovery > 0). A
-			// summed position-projection backstop was tried instead and proved
-			// unstable on dense piles (many contacts per body over-displace and
-			// eject bodies through the floor); the velocity recovery is the robust
-			// handler here. See docs/pipeline_reorder_plan.md.
+			// At/inside the contact the target is restitution only (0 for a resting
+			// pile, so vn is driven to zero — no further approach). Existing
+			// penetration is removed positionally by correct_positions (NGS), not
+			// here, so the velocity solve adds no energy.
 			const T gap = p.separation;
 			if (gap > spec_slop_) {
 				p.target = -(gap - spec_slop_) * inv_dt;
 			} else {
-				T bounce = (-p.vn0 > micro_collision_threshold_) ? -p.cor * p.vn0 : zero_val;
-				T recovery = (gap < -spec_slop_) ? -spec_baumgarte_ * (gap + spec_slop_) * inv_dt : zero_val;
-				p.target = bounce > recovery ? bounce : recovery;
+				p.target = (-p.vn0 > micro_collision_threshold_) ? -p.cor * p.vn0 : zero_val;
 			}
 		} else {
 			p.target = (-p.vn0 > micro_collision_threshold_) ? -p.cor * p.vn0 : zero_val;
