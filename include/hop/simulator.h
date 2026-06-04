@@ -98,6 +98,15 @@ public:
 	void set_max_collision_iterations(int n) { max_collision_iterations_ = n > 0 ? n : 1; }
 	int get_max_collision_iterations() const { return max_collision_iterations_; }
 
+	// Viscous contact damping. Each tick the solver removes this fraction (0..1) of
+	// the *tangential* relative velocity at every contact. Unlike global drag it
+	// only acts where bodies touch — a falling/free body is untouched, so it does
+	// not slow the fall — and only on the sliding component, not the descent. It
+	// drains the tangential slosh a frictionless pile keeps forever, so the pile
+	// visibly settles, without the corner-ratchet drift friction causes. 0 = off.
+	void set_contact_damping(T d) { contact_damping_ = d; }
+	T get_contact_damping() const { return contact_damping_; }
+
 	// Solid management
 	void add_solid(std::shared_ptr<solid<T>> s) {
 		for (auto & existing : solids_) {
@@ -400,6 +409,7 @@ private:
 	// ticks settle in 1–2 sweeps regardless of pile depth, so the per-tick
 	// cost is dominated by the first tick after a perturbation.
 	int solver_iterations_ = 16;
+	T contact_damping_ {};  // viscous tangential contact damping; 0 = off. See set_contact_damping.
 	// Sub-step budget for update_solid's swept-collision slide loop. Was a
 	// hard-coded 5; raised to give a fast body room to resolve more colliders
 	// along a long step before the loop gives up (see set_max_collision_iterations).
@@ -1265,6 +1275,32 @@ void simulator<T>::solve_contacts(T dt) {
 			if (length_squared(delta) > zero_val) {
 				apply_pair_impulse(p, delta);
 			}
+		}
+	}
+
+	// --- 4b. Viscous contact damping (optional) ---
+	// Drain `contact_damping_` of the tangential relative velocity at each contact.
+	// This is the energy sink a frictionless pile otherwise lacks: restitution only
+	// removes the normal component, so the tangential (sliding) DOF keeps a slosh
+	// going and the pile never visibly rests. Acts only on touching pairs (a free
+	// or falling body has no entry here, so the fall is unaffected) and only on the
+	// tangential part (the normal/descent solve above is untouched). Velocity-
+	// proportional with no Coulomb cone, so unlike friction it vanishes at rest and
+	// never holds a displacement — it cannot rectify the movement-pass order bias
+	// into directional drift.
+	if (contact_damping_ > zero_val) {
+		for (auto & p : contact_pairs_) {
+			if (p.inv_m_sum <= zero_val)
+				continue;
+			vec3<T> vrel;
+			sub(vrel, p.b->velocity_, p.a->velocity_);
+			T vn = dot(vrel, p.normal);
+			vec3<T> vt;
+			mul(vt, p.normal, vn);
+			sub(vt, vrel, vt);  // tangential relative velocity = vrel - vn·n
+			vec3<T> delta;
+			mul(delta, vt, p.friction_scale * contact_damping_);
+			apply_pair_impulse(p, delta);
 		}
 	}
 
