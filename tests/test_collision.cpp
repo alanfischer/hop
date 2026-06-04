@@ -1289,8 +1289,67 @@ template <typename T> static void test_ray_traceable_floor(const char * label) {
 	printf("OK\n");
 }
 
+// Test: the solver holds a column of unit boxes as a stable resting stack — the
+// stacking-force propagation Pass B exists for. Boxes start pre-stacked, so each
+// box's weight must be transmitted down through the contacts to the floor or the
+// tower sinks/collapses. Flat faces + friction give a true static rest, so it
+// holds at ~1.0 spacing with ~zero KE and no lateral drift, in float and
+// fixed-point. (Dynamically *dropping* boxes settles less precisely in fixed16 —
+// a known contact-precision limitation — but a held stack stays put in both.)
+template <typename T> static void test_box_stack(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  box_stack[%s]: ", label);
+	simulator<T> sim;
+	auto floor = make_floor(sim);
+	floor->set_coefficient_of_static_friction(tr::half());
+	floor->set_coefficient_of_dynamic_friction(tr::half());
+
+	const T h = tr::half();  // unit (1x1x1) boxes
+	const int N = 5;
+	std::shared_ptr<solid<T>> boxes[N];
+	for (int i = 0; i < N; ++i) {
+		auto b = std::make_shared<solid<T>>();
+		b->set_mass(tr::one());
+		b->set_coefficient_of_restitution(tr::from_milli(200));        // 0.2, low so it settles
+		b->set_restitution_combine(restitution_combine::minimum);      // pair COR = min(0.2, floor) = 0.2
+		b->set_coefficient_of_static_friction(tr::half());
+		b->set_coefficient_of_dynamic_friction(tr::half());
+		b->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-h, -h, -h), vec3<T>(h, h, h))));
+		b->set_position({ T {}, T {}, tr::half() + tr::from_int(i) });  // pre-stacked, touching: 0.5,1.5,...
+		sim.add_solid(b);
+		boxes[i] = b;
+	}
+
+	for (int i = 0; i < 400; ++i)
+		sim.update(tr::from_milli(16));
+
+	float ke = 0, drift = 0;
+	printf("z=[");
+	for (int i = 0; i < N; ++i) {
+		auto p = boxes[i]->get_position();
+		auto v = boxes[i]->get_velocity();
+		ke += 0.5f * (tr::to_float(v.x) * tr::to_float(v.x) + tr::to_float(v.y) * tr::to_float(v.y) +
+		              tr::to_float(v.z) * tr::to_float(v.z));
+		float ax = std::fabs(tr::to_float(p.x)), ay = std::fabs(tr::to_float(p.y));
+		if (ax > drift) drift = ax;
+		if (ay > drift) drift = ay;
+		printf("%.3f ", tr::to_float(p.z));
+	}
+	printf("] KE=%.4f drift=%.4f ", ke, drift);
+	for (int i = 0; i < N; ++i)
+		assert(approx(tr::to_float(boxes[i]->get_position().z), 0.5f + i * 1.0f, 0.12f));
+	// Must reach a true rest. This is the discriminating bound: the swept push-out
+	// alone (no Pass B) holds the box positions but leaves the stack jittering
+	// (KE ~0.65 in this scene) — only the contact solver settles it to ~0. Verified
+	// against the pre-solver commit (ef460a5), which fails this.
+	assert(ke < 0.1f);
+	assert(drift < 0.05f);  // no lateral drift / topple
+	printf("OK\n");
+}
+
 template <typename T> static void run_all_tests(const char * label) {
 	printf(" [%s]\n", label);
+	test_box_stack<T>(label);
 	test_sphere_floor_bounce<T>(label);
 	test_box_box_collision<T>(label);
 	test_sphere_sphere_collision<T>(label);

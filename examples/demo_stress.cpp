@@ -9,6 +9,9 @@
 #include <raylib.h>
 #include <vector>
 
+template <typename T> static T fi(int n) { return hop::scalar_traits<T>::from_int(n); }
+template <typename T> static T ff(float f) { return hop::scalar_traits<T>::from_milli((int)(f * 1000.0f)); }
+
 // Hop is Z-up, raylib is Y-up — swap Y and Z
 template <typename T> static Vector3 to_rl(const hop::vec3<T> & v) {
 	using tr = hop::scalar_traits<T>;
@@ -31,13 +34,15 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
                                                  hop::bvh_manager<T> & bvh,
                                                  hop::aa_box<T> box,
                                                  hop::vec3<T> pos) {
-	using tr = hop::scalar_traits<T>;
 	auto w = std::make_shared<hop::solid<T>>();
 	w->set_infinite_mass();
 	w->set_coefficient_of_gravity(T{});
-	w->set_coefficient_of_restitution(tr::one());
-	w->set_coefficient_of_static_friction(0);
-	w->set_coefficient_of_dynamic_friction(0);
+	w->set_coefficient_of_restitution(ff<T>(0.5f));
+	// Frictionless walls: friction would let the fixed-order solver ratchet the
+	// pile into a corner over long runs. The pile is calmed by linear drag on the
+	// balls instead (see run()), which doesn't drift.
+	w->set_coefficient_of_static_friction(T{});
+	w->set_coefficient_of_dynamic_friction(T{});
 	w->add_shape(std::make_shared<hop::shape<T>>(box));
 	w->set_position(pos);
 	sim.add_solid(w);
@@ -57,18 +62,18 @@ template <typename T> static void run() {
 	constexpr int   Z_LAYERS    = (int)(ROOM_HEIGHT / SPACING);
 	constexpr int   COUNT       = COLS * COLS * Z_LAYERS;
 
-	// float -> T
-	auto fi = [](int n) { return tr::from_int(n); };
-	auto ff = [](float f) -> T { return tr::from_milli((int)(f * 1000.0f)); };
-
 	hop::simulator<T> sim;
 	hop::bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
 	sim.set_deactivate_count(32);
+	// Frictionless contact damping calms the pile to a visible rest without slowing
+	// the fall (it only acts on touching pairs, and only on the sliding component)
+	// and without the corner-ratchet drift that friction's grip produces.
+	sim.set_contact_damping(ff<T>(0.8f));
 
-	T half  = fi(ROOM_HALF);
-	T hgt   = fi(ROOM_HEIGHT);
-	T thick = fi(1);
+	T half  = fi<T>(ROOM_HALF);
+	T hgt   = fi<T>(ROOM_HEIGHT);
+	T thick = fi<T>(1);
 	T zero  = T{};
 
 	// Floor and ceiling extend beyond the side walls so that at every wall-floor
@@ -107,13 +112,15 @@ template <typename T> static void run() {
 	for (int i = 0; i < COUNT; ++i) {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
-		// Match demo_stress_rp3d: rp3d combines restitution by taking the max of
-		// the two materials, so a ball (0.75) hitting a wall (1.0) bounces at 1.0.
+		// restitution_combine::maximum resolves each contact at the higher of the
+		// two materials' COR (walls and balls are both 0.5 here).
 		s->set_restitution_combine(hop::restitution_combine::maximum);
-		s->set_coefficient_of_restitution(ff(0.75f));
-		s->set_coefficient_of_static_friction(0);
-		s->set_coefficient_of_dynamic_friction(0);
-		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff(SPHERE_R))));
+		s->set_coefficient_of_restitution(ff<T>(0.5f));
+		// Frictionless (no corner-ratchet drift); the pile is calmed by the
+		// simulator's contact damping (set in run()), which leaves the fall alone.
+		s->set_coefficient_of_static_friction(T{});
+		s->set_coefficient_of_dynamic_friction(T{});
+		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff<T>(SPHERE_R))));
 
 		int   layer = i / (COLS * COLS);
 		int   rem   = i % (COLS * COLS);
@@ -127,8 +134,8 @@ template <typename T> static void run() {
 		float vx    = ((i * 7  + 3) % 21 - 10) * 0.5f;
 		float vy    = ((i * 13 + 5) % 21 - 10) * 0.5f;
 		float vz    = ((i * 17 + 9) % 21 - 10) * 0.5f;
-		s->set_position(hop::vec3<T>(ff(x), ff(y), ff(z)));
-		s->set_velocity(hop::vec3<T>(ff(vx), ff(vy), ff(vz)));
+		s->set_position(hop::vec3<T>(ff<T>(x), ff<T>(y), ff<T>(z)));
+		s->set_velocity(hop::vec3<T>(ff<T>(vx), ff<T>(vy), ff<T>(vz)));
 		s->activate();
 		sim.add_solid(s);
 		bvh.add_solid(s.get(), false);

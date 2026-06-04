@@ -1,0 +1,186 @@
+# Pipeline Reorder: Speculative Contacts
+
+A plan to move hop from its current **integrate → snap → solve** tick order to a
+**discover → solve → integrate** order built on *speculative contacts*, so that
+resting piles dissipate to true rest and sleep at the default threshold instead
+of churning forever.
+
+Background and the why-it-matters framing live in the README section
+"Contact Solver, Settling & Sleep". This document is the implementation plan.
+
+## The core idea in one paragraph
+
+Hop already runs the expensive half of speculative contacts every tick: the
+swept query that finds *where a body would go and what it would hit on the way*.
+Today that query is used to **snap** a body to its earliest time-of-impact and
+then patch up velocity afterward (`solve_contacts`, "Pass B"), which leaks a
+little energy every tick (see README). The reorder reuses the same query to
+instead **discover** contacts ahead of the move — recording, per contact, the
+remaining gap distance — then solves velocities with a constraint that only
+removes enough approach speed to close that gap, and *then* integrates. Because
+velocity is made non-penetrating before the move, there is no snap and no
+push-out, so there is no leak. The position update becomes a plain
+`pos += v·dt`.
+
+## Current pipeline (what we're changing)
+
+Per `simulator<T>::update` (`include/hop/simulator.h:174`):
+
+1. For each active solid, `update_solid` (`:423`):
+   - **Integrate** position and velocity with the chosen integrator (`:445–501`),
+     committing the new velocity immediately (`:504`).
+   - Run the **collision loop** (`:550–697`): sweep the integrated path
+     (`trace_solid_with_current_spacials`, `:560`), and for the earliest hit:
+     - if penetrating at frame start, **push both bodies out** by the overlap
+       depth (`:570–595`);
+     - otherwise **snap** the committed position to the TOI point (`:596–599`);
+     - record the contact in the persistent per-body **touch cache**
+       (`add_or_refresh_touch`, `:643`);
+     - project the leftover motion onto the contact tangent and sub-step
+       (`slide_vel`, `:653–692`).
+   - Velocity is deliberately **not** mutated here (`:538`).
+2. After every body is integrated, **`solve_contacts`** (`:1043`) rebuilds the
+   canonical pair list from the touch caches (`:1048–1143`), snapshots `vn0`
+   and sets each pair's restitution target `target = -cor·vn0` (`:1161`),
+   warm-starts from cached impulses (`:1165–1186`), and runs warm-started
+   Gauss–Seidel normal+friction sweeps (`:1188–1262`), writing accumulated
+   impulses back to the cache.
+
+The leak is structural: the body is integrated into penetration under gravity,
+the position is corrected by hand (snap / push-out), and only *then* is velocity
+reconciled — so each tick injects a sliver of energy, worst at angled contacts
+and low restitution. In a deep pile it never decays.
+
+## Target pipeline
+
+Per tick:
+
+1. **Integrate velocity only** (forces, gravity, damping) → a *tentative*
+   velocity per body. Compute a *predicted* displacement `Δ = v·dt` but **do not
+   commit position**.
+2. **Discovery sweep.** Sweep each body's current position along `Δ` (plus a
+   small **speculative margin** so contacts about to happen are caught) and, for
+   every contact found, record into the touch cache: the contact normal and the
+   **separation gap** — the signed distance still to be closed along the normal
+   (negative if already penetrating). No snap, no push-out, no position change.
+3. **Solve velocities** (`solve_contacts`) with a *speculative* normal target:
+   the post-solve approach speed may not exceed `gap/dt`. Resting contacts
+   (`gap≈0`) target zero approach (or the restitution bounce); contacts still a
+   little apart are allowed to keep closing just until they touch. Friction and
+   warm-starting are unchanged.
+4. **Commit positions.** `pos += v·dt` with the solved velocity. Because no
+   contact can be closed by more than its gap, bodies land on surfaces instead
+   of inside them.
+5. **Penetration backstop** (small): a single cheap positional correction for
+   any residual overlap (numerical slop, or a contact discovered along the old
+   direction that the solved tangential motion slid into). This replaces the
+   dominant push-out of today with a small safety net (a slop band, corrected
+   fractionally — Baumgarte-style), not the primary mechanism.
+
+The corner-sliding behavior that the current sub-step loop produces
+(`slide_vel`, `:653–662`) falls out of step 3 for free: multiple
+non-penetration constraints on one body, solved together, already yield motion
+along their intersection. Continuous-collision (anti-tunneling) is preserved
+because the discovery sweep still spans the *full* predicted motion — a fast
+body's gap to a thin wall is found within `Δ`, and the velocity clamp stops it
+from crossing.
+
+## Data-structure changes
+
+- `solid<T>::touch` (`include/hop/solid.h:42`): add `T separation {};` — the gap
+  recorded at discovery. `accum_n` / `accum_t` / `normal` / `last_tick` /
+  `pair_built_tick` are unchanged and keep warm-starting working as-is.
+- `contact_pair` (`simulator.h:384`): add `T separation {};`, carried from the
+  slot at build time alongside the existing fields.
+- Likely retire `impact_speed`'s role in the restitution path (already not the
+  target since `:1161`); keep it only for wake/callback logic.
+
+## Implementation phases
+
+**Phase 0 — Discovery without behavior change.** Refactor the body of the
+collision loop (`:550–697`) into a `discover_contacts(solid, path)` that fills
+the touch cache with normal **and separation**, *without* mutating position.
+Keep the existing snap/push-out as the default; have discovery run alongside it
+under an internal flag so the new cache field can be validated against the old
+contacts before anything switches. No observable change yet.
+
+**Phase 1 — Reorder `update`.** Split the per-body work in `update`
+(`:191–211`) into two passes over the iteration list: pass 1 integrates velocity
+and stores predicted `Δ`; pass 2 runs discovery. Then `solve_contacts`, then a
+commit pass (`pos += v·dt`). Gate the whole new order behind a
+`set_speculative_contacts(bool)` toggle (default **off**) so both pipelines ship
+side by side during bring-up and A/B testing.
+
+**Phase 2 — Speculative target.** In `solve_contacts` (`:1148–1163`), replace
+`target = -cor·vn0` with the speculative form: a non-penetration velocity bound
+`vn ≥ -gap/dt` combined with the restitution bounce, i.e.
+`target = max(-cor·vn0_if_closing, -gap/dt)` (signs per the existing pair-normal
+convention). The clamped-accumulator GS (`:1220–1240`) is otherwise unchanged.
+Restitution stays dissipative for the same reason it is today (`|target| ≤
+|vn0|`).
+
+**Phase 3 — Commit + backstop.** Implement the `pos += v·dt` commit and the
+small penetration-correction backstop. Demote the depth push-out (`:570–595`)
+and the TOI snap (`:596–599`) to the backstop's slop handling; they no longer
+drive normal settling.
+
+**Phase 4 — Re-tune and prune.** With the pile now dissipating naturally,
+re-tune `deactivate_speed` / `deactivate_count` (the sweep harness,
+`examples/headless_stress.cpp`, already measures this). Re-evaluate whether
+`set_contact_damping` (`demo_stress`'s current crutch) is still needed — it
+likely becomes a no-op for settling and can default off. Confirm
+`solver_iterations` budgets.
+
+**Phase 5 — Flip the default and remove the old path.** Once the test matrix
+below is green with `speculative_contacts` on, make it the default, then delete
+the legacy snap-driven settling path and the toggle.
+
+## Determinism / fixed-point
+
+No new risk. The snap (a TOI solve) is replaced by a velocity clamp and a
+multiply-add — strictly *fewer* and simpler operations. The `solve_id`
+canonical pair ordering (`:1078–1090`) and the per-tick traversal flip
+(`:1062`, `:190`) carry over unchanged. The one new arithmetic op is `gap/dt`;
+division already exists in fixed-point. Discovery must compute `separation`
+deterministically (reuse the same trace math that produces `c.depth`/`c.point`),
+so float and fixed stay in lockstep.
+
+## Test matrix
+
+- **`test_box_stack`** (float + fixed16) — must still reach true rest; this is
+  the existing solver guard.
+- **New settling test** — `demo_stress` headless: assert KE decays below a tight
+  bound and `asleep == COUNT` within N ticks (today it never does). This is the
+  feature's reason for existing.
+- **Tunneling test** — a fast body fired at a thin static wall must not pass
+  through (proves CCD survives the reorder). Run float + fixed16.
+- **Restitution test** — a single ball dropped at known COR returns to the
+  expected height (no energy gain/loss regression).
+- **Determinism test** — identical fixed16 runs are bit-identical; an A↔B
+  position round-trip is stable.
+
+## Risks and mitigations
+
+- **Tunneling regressions** from discovery missing a contact the old sub-step
+  loop would have caught. *Mitigation:* the discovery sweep spans the full
+  predicted `Δ` (not first-hit-only), plus the speculative margin; the tunneling
+  test gates it.
+- **"Hovering"** — too large a speculative margin stops bodies short of
+  surfaces. *Mitigation:* margin proportional to a small fraction of `Δ`/epsilon;
+  tune against the settling and stacking tests.
+- **Predicted-but-unreached contacts** (body stopped by A never reaches B).
+  *Mitigation:* a contact whose gap is never closed simply contributes no
+  impulse (clamped accumulator ≥ 0); it is harmless, this is the standard
+  speculative behavior.
+- **Re-tuning churn** — damping/sleep/iteration values balanced around the old
+  leak. *Mitigation:* the toggle (Phase 1) keeps the old path for A/B until the
+  matrix is green; the headless sweep harness quantifies each change.
+
+## Status
+
+**Deferred, not rejected.** The translation-only, game-object use case (a
+character, some projectiles, a few crates) rarely needs thousand-body piles to
+fully sleep, so this rework is not currently scheduled. It is written down
+because hop is unusually well-positioned to do it — it already owns the swept
+discovery query — and the cost is control-flow rework and re-tuning, not
+technical risk to the swept/fixed-point differentiators.

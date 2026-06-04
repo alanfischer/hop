@@ -98,6 +98,15 @@ public:
 	void set_max_collision_iterations(int n) { max_collision_iterations_ = n > 0 ? n : 1; }
 	int get_max_collision_iterations() const { return max_collision_iterations_; }
 
+	// Viscous contact damping. Each tick the solver removes this fraction (0..1) of
+	// the *tangential* relative velocity at every contact. Unlike global drag it
+	// only acts where bodies touch — a falling/free body is untouched, so it does
+	// not slow the fall — and only on the sliding component, not the descent. It
+	// drains the tangential slosh a frictionless pile keeps forever, so the pile
+	// visibly settles, without the corner-ratchet drift friction causes. 0 = off.
+	void set_contact_damping(T d) { contact_damping_ = d; }
+	T get_contact_damping() const { return contact_damping_; }
+
 	// Solid management
 	void add_solid(std::shared_ptr<solid<T>> s) {
 		for (auto & existing : solids_) {
@@ -400,6 +409,7 @@ private:
 	// ticks settle in 1–2 sweeps regardless of pile depth, so the per-tick
 	// cost is dominated by the first tick after a perturbation.
 	int solver_iterations_ = 16;
+	T contact_damping_ {};  // viscous tangential contact damping; 0 = off. See set_contact_damping.
 	// Sub-step budget for update_solid's swept-collision slide loop. Was a
 	// hard-coded 5; raised to give a fast body room to resolve more colliders
 	// along a long step before the loop gives up (see set_max_collision_iterations).
@@ -551,18 +561,12 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 
 		if (c.time < one) {
 			sub(left_over, c.point, old_pos);
-			// Per-pair contact normal for c.collider. With average_normals on, the
-			// swept trace blends every simultaneous collider's normal into c.normal;
-			// that blend carries a net horizontal bias in an asymmetric pile and,
-			// applied coherently every tick, sums into a steady lean (the settling
-			// drift). Use c.collider's UN-blended normal — captured for free during the
-			// trace (merge_collision blends only the normal, so c.depth/c.point are
-			// already the first collider's) — for BOTH the push-out and the solver
-			// cache, so position and velocity corrections stay along the same direction
-			// (a mismatch between them injects energy). c.normal/c.point still drive the
-			// multi-collider TOI slide in the else branch below.
-			vec3<T> pair_normal(c.collider ? solid_trace_pair_normal_ : c.normal);
-			const T pair_depth = c.depth;
+			// Use c.collider's UN-blended normal (captured during the trace; see
+			// solid_trace_pair_normal_) for BOTH the push-out and the solver cache, so
+			// position and velocity corrections share one direction — a mismatch
+			// injects energy. c.depth/c.point are already the first collider's (only the
+			// normal is blended); c.normal/c.point still drive the TOI slide below.
+			const vec3<T> & pair_normal = c.collider ? solid_trace_pair_normal_ : c.normal;
 			if (c.time == T {} && c.depth > T {}) {
 				// Penetration at frame start: separate along the contact normal by
 				// the full overlap depth. Against a dynamic partner the correction
@@ -576,7 +580,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// one corner). Moving both bodies ±depth/2 is center-of-mass
 				// preserving and order-independent, killing the drift at its source.
 				bool split = c.collider && !c.collider->has_infinite_mass() && c.collider->active_;
-				T push = split ? pair_depth * tr::half() : pair_depth;
+				T push = split ? c.depth * tr::half() : c.depth;
 				vec3<T> correction;
 				mul(correction, pair_normal, push);
 				add(old_pos, correction);
@@ -1271,6 +1275,32 @@ void simulator<T>::solve_contacts(T dt) {
 			if (length_squared(delta) > zero_val) {
 				apply_pair_impulse(p, delta);
 			}
+		}
+	}
+
+	// --- 4b. Viscous contact damping (optional) ---
+	// Drain `contact_damping_` of the tangential relative velocity at each contact.
+	// This is the energy sink a frictionless pile otherwise lacks: restitution only
+	// removes the normal component, so the tangential (sliding) DOF keeps a slosh
+	// going and the pile never visibly rests. Acts only on touching pairs (a free
+	// or falling body has no entry here, so the fall is unaffected) and only on the
+	// tangential part (the normal/descent solve above is untouched). Velocity-
+	// proportional with no Coulomb cone, so unlike friction it vanishes at rest and
+	// never holds a displacement — it cannot rectify the movement-pass order bias
+	// into directional drift.
+	if (contact_damping_ > zero_val) {
+		for (auto & p : contact_pairs_) {
+			if (p.inv_m_sum <= zero_val)
+				continue;
+			vec3<T> vrel;
+			sub(vrel, p.b->velocity_, p.a->velocity_);
+			T vn = dot(vrel, p.normal);
+			vec3<T> vt;
+			mul(vt, p.normal, vn);
+			sub(vt, vrel, vt);  // tangential relative velocity = vrel - vn·n
+			vec3<T> delta;
+			mul(delta, vt, p.friction_scale * contact_damping_);
+			apply_pair_impulse(p, delta);
 		}
 	}
 
