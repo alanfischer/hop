@@ -335,6 +335,7 @@ private:
 	                                                solid<T> * partner,
 	                                                const vec3<T> & normal,
 	                                                T impact_speed,
+	                                                T separation,
 	                                                int tick);
 	// Find an existing cache slot for (s, partner) or nullptr.
 	typename solid<T>::touch * find_touch(solid<T> * s, solid<T> * partner);
@@ -388,6 +389,7 @@ private:
 		T accum_n {};                // accumulated normal impulse magnitude (>= 0)
 		vec3<T> accum_t;             // accumulated friction impulse (a-side convention)
 		T impact_speed {};           // approach speed at TOI, for restitution
+		T separation {};             // signed gap along normal (0 touching, <0 penetrating); for the speculative target
 		T vn0 {};                    // relative normal velocity entering the GS (after warm-start)
 		T cor {};                    // combined restitution
 		T mu_s {};                   // combined static friction (cone limit while sticking)
@@ -640,7 +642,13 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			}
 
 			if (hit_solid && !responded) {
-				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, impact_speed, current_tick_);
+				// Signed gap along the contact normal. Today the body has already
+				// been snapped/pushed to the contact, so this is 0 at a clean TOI
+				// touch and -depth when separating an existing overlap. Recorded
+				// but not yet consumed; the speculative reorder will measure it
+				// pre-move instead (see docs/pipeline_reorder_plan.md).
+				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
+				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, impact_speed, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly.
 				if ((hit_solid->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
@@ -976,7 +984,7 @@ typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * par
 
 template <typename T>
 typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
-    solid<T> * s, solid<T> * partner, const vec3<T> & normal, T impact_speed, int tick) {
+    solid<T> * s, solid<T> * partner, const vec3<T> & normal, T impact_speed, T separation, int tick) {
 	const T zero_val {};
 
 	// Refresh-in-place if this partner already has a slot. Sub-step iterations
@@ -997,6 +1005,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 			} else if (impact_speed > slot.impact_speed) {
 				slot.impact_speed = impact_speed;
 			}
+			slot.separation = separation;
 			slot.last_tick = tick;
 			return &slot;
 		}
@@ -1010,6 +1019,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 		slot.accum_n = zero_val;
 		slot.accum_t.reset();
 		slot.impact_speed = impact_speed;
+		slot.separation = separation;
 		slot.last_tick = tick;
 		return &slot;
 	}
@@ -1035,6 +1045,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 	slot.accum_n = zero_val;
 	slot.accum_t.reset();
 	slot.impact_speed = impact_speed;
+	slot.separation = separation;
 	slot.last_tick = tick;
 	return &slot;
 }
@@ -1113,6 +1124,7 @@ void simulator<T>::solve_contacts(T dt) {
 				p.accum_t.set(slot.accum_t);
 			}
 			p.impact_speed = slot.impact_speed;
+			p.separation = slot.separation;  // carried from the iterating side's slot (same as normal/impact)
 			// Combine the two bodies' coefficients of restitution. When the
 			// bodies' modes differ the higher-precedence one governs (larger
 			// enumerator: average < minimum < multiply < maximum). See the

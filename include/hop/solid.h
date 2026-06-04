@@ -45,6 +45,7 @@ public:
 		T          accum_n {};        // accumulated normal impulse magnitude (>= 0)
 		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
 		T          impact_speed {};   // approach speed at TOI; drives restitution target
+		T          separation {};     // signed gap along normal at discovery: 0 touching, <0 penetrating (see pipeline_reorder_plan.md)
 		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
 		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
 	};
