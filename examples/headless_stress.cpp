@@ -119,7 +119,7 @@ int main(int argc, char ** argv) {
 
 	printf("%7s %7s %12s %8s %8s %6s\n", "tick", "asleep", "KE", "maxV", "meanZ", "");
 	double prevKE = 0, prevE = 0, injPos = 0, injNeg = 0;
-	int finalAsleep = 0, totalBreach = 0, finalBelow = 0; float finalKE = 0, finalMeanZ = 0, finalMinZ = 0;
+	int finalAsleep = 0, totalBreach = 0, finalBelow = 0; float finalKE = 0, finalMeanZ = 0, finalMinZ = 0, finalComX = 0, finalComY = 0;
 	auto t0 = std::chrono::high_resolution_clock::now();
 	for (int t = 1; t <= TICKS; ++t) {
 		sim.update(tr::from_milli(16));
@@ -156,10 +156,11 @@ int main(int argc, char ** argv) {
 		prevKE = ke;
 		finalAsleep = asleep; finalKE = ke; finalMeanZ = sumz/spheres.size();
 		finalBelow = below; finalMinZ = tr::to_float(minz);
+		finalComX = comx; finalComY = comy;
 	}
 	auto t1 = std::chrono::high_resolution_clock::now();
 	double secs = std::chrono::duration<double>(t1 - t0).count();
-	printf("DONE  time=%.2fs  asleep=%d/%d  finalKE=%.2f  meanZ=%.3f  breachTicks=%d  finalBelow=%d  finalMinZ=%.3f\n",
-	       secs, finalAsleep, COUNT, finalKE, finalMeanZ, totalBreach, finalBelow, finalMinZ);
+	printf("DONE  time=%.2fs  asleep=%d/%d  finalKE=%.2f  meanZ=%.3f  breachTicks=%d  finalBelow=%d  finalMinZ=%.3f  COM=(%+.3f,%+.3f)\n",
+	       secs, finalAsleep, COUNT, finalKE, finalMeanZ, totalBreach, finalBelow, finalMinZ, finalComX, finalComY);
 	return 0;
 }
