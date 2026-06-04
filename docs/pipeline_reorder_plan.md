@@ -119,10 +119,12 @@ convention). The clamped-accumulator GS (`:1220–1240`) is otherwise unchanged.
 Restitution stays dissipative for the same reason it is today (`|target| ≤
 |vn0|`).
 
-**Phase 3 — Commit + backstop.** Implement the `pos += v·dt` commit and the
-small penetration-correction backstop. Demote the depth push-out (`:570–595`)
-and the TOI snap (`:596–599`) to the backstop's slop handling; they no longer
-drive normal settling.
+**Phase 3 — Commit + backstop, and the discovery-completeness blocker.**
+Implement the `pos += v·dt` commit (done) and a position-only penetration
+backstop (a COM-split, order-independent NGS pass over the contact graph;
+prototyped). The backstop turned out to be **necessary but not sufficient** —
+see the findings below. The real blocker surfaced here is **contact-discovery
+completeness**, which must be solved before the backstop helps.
 
 **Phase 4 — Re-tune and prune.** With the pile now dissipating naturally,
 re-tune `deactivate_speed` / `deactivate_count` (the sweep harness,
@@ -134,6 +136,45 @@ likely becomes a no-op for settling and can default off. Confirm
 **Phase 5 — Flip the default and remove the old path.** Once the test matrix
 below is green with `speculative_contacts` on, make it the default, then delete
 the legacy snap-driven settling path and the toggle.
+
+## Implementation status & findings (2026-06-04)
+
+Phases 0–2 are **implemented and committed** behind `set_speculative_contacts`
+(default off): `integrate_and_discover` → `solve_contacts` (speculative target)
+→ `commit_solid`, with a shared `try_deactivate`. The headline result is
+confirmed — the structural **energy injection is gone** (demo_stress KE
+55223 → ~1400, ~40×), single contacts are exact (a drop lands at rest), the
+box stack rests at KE 0, and a 300 m/s sphere does **not** tunnel a thin wall
+(CCD preserved).
+
+**The open blocker — directional discovery under-counts resting contacts.**
+The swept query is *directional*: it finds what a body moves *toward*. That is
+perfect for the cases above (a falling body sweeps down onto its support; a fast
+body sweeps into a wall), which is why the vertical box stack, the drop, and the
+tunneling test all pass. But a dense 3D pile's contacts arrive from **all
+directions** at gap ≈ 0, and a near-zero predicted Δ sweep does not enumerate the
+lateral neighbours a body is merely resting against. With an incomplete contact
+set, neither the velocity solve nor a position backstop can prevent
+interpenetration, and demo_stress breaches the floor on most ticks
+(`breachTicks ≈ 760/1200`).
+
+A position-only backstop (Phase 3) was prototyped and **made the dense pile
+worse** (meanZ collapsed 3.4 → 1.5, bodies sleeping interpenetrated) precisely
+because it shuffles positions using the same incomplete contact set — it was
+reverted. Conclusion: **omnidirectional contact discovery is the prerequisite**,
+and the next real step, not the position pass.
+
+**Next step — margin-shell discovery.** Discovery must enumerate every contact
+within a small margin in *all* directions, not just along Δ. Options:
+- inflate the body's collision shape by `spec_margin_` for the discovery query so
+  near-contacts register as overlaps (standard speculative-margin approach), with
+  `separation = reported_depth − margin`; or
+- add a closest-distance / proximity query per nearby pair (hop is swept-only
+  today, so this is new narrow-phase surface area).
+
+Once discovery is complete, re-introduce the (already-designed) position backstop
+and re-run the matrix. The Phase 1+2 velocity machinery and the speculative
+target are believed correct — they are starved of contacts, not wrong.
 
 ## Determinism / fixed-point
 
