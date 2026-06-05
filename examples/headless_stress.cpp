@@ -54,6 +54,9 @@ int main(int argc, char ** argv) {
 	float DS  = argc > 8 ? atof(argv[8]) : 0.2f;
 	int   DC  = argc > 9 ? atoi(argv[9]) : 32;
 	int   SPEC = argc > 10 ? atoi(argv[10]) : 0;
+	int   PI  = argc > 11 ? atoi(argv[11]) : -1;   // NGS position iterations (-1 = leave default)
+	int   SI  = argc > 12 ? atoi(argv[12]) : -1;   // shock-propagation passes (-1 = leave default)
+	float MC  = argc > 13 ? atof(argv[13]) : -1.f; // micro-collision (restitution) threshold (<0 = leave default)
 	WALL_FRICTION = FR;
 
 	const float SPHERE_R = 0.28f;
@@ -73,6 +76,9 @@ int main(int argc, char ** argv) {
 	sim.set_solver_iterations(ITERS);
 	sim.set_average_normals(AN != 0);
 	sim.set_speculative_contacts(SPEC != 0);
+	if (PI >= 0) sim.set_position_iterations(PI);
+	if (SI >= 0) sim.set_shock_iterations(SI);
+	if (MC >= 0) sim.set_micro_collision_threshold(ff(MC));
 
 	T half = fi(ROOM_HALF), hgt = fi(ROOM_HEIGHT), thick = fi(1), zero = T{};
 	T outer = half + thick;
