@@ -184,7 +184,7 @@ public:
 	// to merge in external geometry (level BSP, heightfield, static trimesh)
 	// should subclass manager<T> directly and override these. See manager.h.
 	void trace_segment(collision<T> & result, const segment<T> & seg, int collide_with_bits) override {}
-	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits) override {}
+	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits, T margin) override {}
 
 	// Refresh the dynamic BVH at the start of every tick. Rebuild when
 	// topology is stale (adds/removes since last rebuild) or every

@@ -552,7 +552,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				mul(iseg.direction, seg.direction, -tr::one());
 				vec3<T> tr_origin;
 				add(tr_origin, seg.origin, lp1);
-				sh1->get_traceable()->trace_solid(col, s2, tr_origin, iseg);
+				sh1->get_traceable()->trace_solid(col, s2, tr_origin, iseg, margin);
 				col.invert();
 				sub(iseg.origin, col.point);
 				add(col.point, seg.origin, iseg.origin);
@@ -560,7 +560,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			} else if (sh2->get_type() == shape_type::traceable) {
 				vec3<T> tr_origin;
 				add(tr_origin, s2->get_position(), lp2);
-				sh2->get_traceable()->trace_solid(col, s1, tr_origin, seg);
+				sh2->get_traceable()->trace_solid(col, s1, tr_origin, seg, margin);
 				modify_scope = true;
 			}
 			// AABox vs *

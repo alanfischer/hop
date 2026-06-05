@@ -37,12 +37,24 @@ template <typename T> class solid;
 //                   uses this for position correction.  Leaving it at 0 falls
 //                   back to the old epsilon-nudge behaviour, which is safe but
 //                   slower to resolve deep penetrations.
+//
+//                   `margin` (default 0 = exact surface) Minkowski-inflates the
+//                   geometry outward by that distance, so a solid whose surface
+//                   is within `margin` of the mesh registers as an overlap (t=0)
+//                   even when not actually penetrating.  This is how the
+//                   speculative-contacts pipeline discovers near-resting
+//                   contacts against a mesh.  Report `result.depth` measured
+//                   against the *inflated* surface (depth = margin - true_gap);
+//                   the simulator recovers the true signed gap as
+//                   (margin - depth).  Swept hits (t > 0) should likewise stop
+//                   at the inflated surface.  Treat margin == 0 as the exact
+//                   mesh so existing (non-speculative) callers are unaffected.
 template <typename T> class traceable {
 public:
 	virtual ~traceable() = default;
 	virtual void get_bound(aa_box<T> & result) = 0;
 	virtual void trace_segment(collision<T> & result, const vec3<T> & position, const segment<T> & seg) = 0;
-	virtual void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const segment<T> & seg) = 0;
+	virtual void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const segment<T> & seg, T margin) = 0;
 };
 
 } // namespace hop

@@ -25,6 +25,15 @@ template <typename T> class solid;
 //      collision<T>. Managers that only accelerate broad-phase (like
 //      bvh_manager) leave them as no-ops.
 //
+//      trace_solid takes a `margin` (0 = exact). Under the speculative-contacts
+//      pipeline the simulator passes spec_margin during discovery so near-resting
+//      contacts against external geometry are found the same way primitive pairs
+//      are; report result.depth against the inflated surface (the caller recovers
+//      the true gap as margin - depth). The legacy swept path and the public
+//      trace_solid query pass margin 0. A hit with no owning solid
+//      (result.collider == nullptr) is treated as a contact against an immovable
+//      world anchor.
+//
 //   3. Lifecycle / response hooks. The pre/post/intra_update and
 //      collision_response methods let a host engine observe or override
 //      per-tick and per-solid behavior (e.g. routing collision response
@@ -35,7 +44,7 @@ public:
 
 	virtual int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) = 0;
 	virtual void trace_segment(collision<T> & result, const segment<T> & seg, int collide_with_bits) = 0;
-	virtual void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits) = 0;
+	virtual void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits, T margin) = 0;
 	virtual void pre_update(T dt) = 0;
 	virtual void post_update(T dt) = 0;
 	virtual void pre_update(solid<T> * s, T dt) = 0;
