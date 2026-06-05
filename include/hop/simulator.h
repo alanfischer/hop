@@ -1543,19 +1543,30 @@ void simulator<T>::solve_contacts(T dt) {
 		// sweeps for this pair, so derive them once here rather than per
 		// iteration in the hot loop below.
 		if (speculative_contacts_) {
-			// Speculative target. With a real gap remaining (separation > slop),
-			// the contact hasn't happened yet: withhold restitution and only cap
-			// the approach so the body closes at most the gap this tick
-			// (vn >= -(gap - slop)/dt) — this stops fast bodies short of tunneling.
-			// At/inside the contact the target is restitution only (0 for a resting
-			// pile, so vn is driven to zero — no further approach). Existing
-			// penetration is removed positionally by correct_positions (NGS), not
-			// here, so the velocity solve adds no energy.
+			// Speculative target, by collision class:
+			//  - genuinely closing (vn0 below -micro): restitution bounce, even with
+			//    a gap still remaining (the discovery pass is speculative, so a fast
+			//    body is found before it reaches the surface);
+			//  - slow approach with a gap: cap so the body closes at most the gap
+			//    this tick (vn >= -(gap - slop)/dt), stopping fast bodies short of
+			//    tunneling, with no bounce;
+			//  - at/inside the contact and not closing (resting pile): drive vn to 0.
+			// Existing penetration is removed positionally by correct_positions
+			// (NGS), not here, so the velocity solve adds no energy.
 			const T gap = p.separation;
-			if (gap > spec_slop_) {
+			if (-p.vn0 > micro_collision_threshold_) {
+				// Genuine closing collision: bounce at cor times the inbound speed
+				// even when a speculative gap still remains. Withholding restitution
+				// until gap<=slop (as this once did) let the approach cap below bleed
+				// off the entire inbound velocity first, so the body reached the
+				// surface with ~zero closing speed and never bounced. cor<=1 keeps
+				// |target|<=|vn0|, so restitution stays dissipative; the micro
+				// threshold lets a slow, settling body fall through to the cap.
+				p.target = -p.cor * p.vn0;
+			} else if (gap > spec_slop_) {
 				p.target = -(gap - spec_slop_) * inv_dt;
 			} else {
-				p.target = (-p.vn0 > micro_collision_threshold_) ? -p.cor * p.vn0 : zero_val;
+				p.target = zero_val;
 			}
 		} else {
 			p.target = (-p.vn0 > micro_collision_threshold_) ? -p.cor * p.vn0 : zero_val;
