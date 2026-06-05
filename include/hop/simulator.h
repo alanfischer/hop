@@ -30,6 +30,11 @@ public:
 		set_gravity(gravity);
 		init_epsilon_defaults();
 		collisions_.resize(64);
+		// Immovable world anchor: the partner for speculative contacts against
+		// manager-injected geometry that has no owning solid. solve_id 0 sorts it
+		// before every real solid (which start at 1) in the canonical pair order.
+		static_world_.set_infinite_mass();
+		static_world_.solve_id_ = 0;
 	}
 
 	~simulator() = default;
@@ -419,6 +424,11 @@ private:
 	manager<T> * manager_ = nullptr;
 	int current_tick_ = 0;  // increments per update(); also stamps touch slot refresh
 	std::size_t next_solve_id_ = 1;  // monotonic; assigned to each solid at add (see solid::solve_id_)
+	// Immovable world anchor for manager-injected geometry contacts (see ctor and
+	// integrate_and_discover). Never integrated, never added to solids_; used only
+	// as a touch partner so the speculative solver can resolve a body against
+	// external static geometry with no owning solid.
+	solid<T> static_world_;
 
 	// Pass B (post-integration contact solver) working set. The pair list is
 	// rebuilt every tick from the union of all active solids' touch caches,
@@ -843,8 +853,10 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 // contacts along the predicted motion WITHOUT moving the body. Each contact is
 // recorded in the touch cache with its signed gap (separation), which
 // solve_contacts' speculative target consumes. Covers solid-vs-solid contacts
-// found via the broad phase; manager-injected geometry and manager
-// collision_response are not yet handled on this path.
+// found via the broad phase plus manager-injected external geometry (queried at
+// the end, recorded against the world anchor). Every contact passes through the
+// manager's collision_response hook, which can claim it (excluding it from the
+// solver) exactly as in the legacy update_solid path.
 template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid_ptr, T dt) {
 	const T zero = T {};
 	const T one = tr::one();
@@ -907,6 +919,93 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 	const int bits = solid_ptr->collide_with_scope_;
 	collision<T> col;
+
+	// Record one discovered contact, or hand it to the manager's custom response.
+	// Shared by the broad-phase loop and the manager-geometry query so the signed-gap
+	// recovery, collision_response hook, callback recording, touch refresh and wake
+	// logic are identical on both. `col` must already hold the hit (time/depth/
+	// normal/collider/point); `partner` is the touch partner — a real solid, or
+	// static_world_ for manager geometry with no owning solid.
+	//
+	// collision_response mirrors the legacy update_solid hook: when the manager
+	// claims the contact it is NOT recorded, so Pass B applies no impulse — the
+	// manager has taken responsibility and may mutate the solid's velocity/position
+	// directly. The `position` out-param is honored as a relocation (commit_solid
+	// integrates from it); `remainder` is the predicted motion this tick, which is
+	// informational here — the speculative path derives the committed position from
+	// the *solved* velocity, so there is no slide remainder to consume. (A manager
+	// that relocates the body this way should zero its velocity too if it wants it
+	// to stay put. Contacts discovered later this tick are not re-traced from the
+	// new position, unlike the legacy slide loop, so claim-and-relocate is intended
+	// for the destroy / single-contact cases.)
+	auto record_contact = [&](solid<T> * partner) {
+		const vec3<T> & n = col.normal;
+		const bool partner_is_world = (partner == &static_world_);
+
+		// Signed gap along the normal at the body's current (start) position. Shapes
+		// were inflated by spec_margin_, so an overlap of the inflated shapes
+		// (col.time == 0) means the true surfaces are within the margin: the real gap
+		// is (margin - inflated_depth) — 0 when touching, negative when truly
+		// penetrating, positive within the shell. A contact reached only by sweeping
+		// this tick (col.time > 0) is a fast approach; its gap is the closing distance
+		// still to cover.
+		T separation;
+		if (col.time <= zero) {
+			separation = spec_margin_ - col.depth;
+		} else {
+			vec3<T> to_contact;
+			sub(to_contact, col.point, old_pos);
+			separation = -dot(to_contact, n);
+			if (separation < zero)
+				separation = zero;
+		}
+
+		// Relative velocity at contact (self - partner), for callback + wake logic.
+		if (col.collider)
+			sub(col.velocity, solid_ptr->velocity_, col.collider->velocity_);
+		else
+			col.velocity.set(solid_ptr->velocity_);
+		T impact_speed = -dot(col.velocity, n);
+		if (impact_speed < zero)
+			impact_speed = zero;
+
+		// Callback recording, suppressed on sustained contact (as update_solid).
+		typename solid<T>::touch * existing = find_touch(solid_ptr, partner);
+		bool sustained = (existing != nullptr && existing->last_tick == current_tick_ - 1);
+		if (!sustained && (solid_ptr->collision_callback_ != nullptr ||
+		                   (!partner_is_world && partner->collision_callback_ != nullptr))) {
+			col.collidee = solid_ptr;
+			if (num_collisions_ < static_cast<int>(collisions_.size())) {
+				collisions_[num_collisions_].set(col);
+				num_collisions_++;
+			}
+		}
+
+		// Manager-owned custom response (destroy on impact, character controller,
+		// bounce pad, ...). A claimed contact is excluded from the solver.
+		if (manager_) {
+			vec3<T> position(old_pos);
+			vec3<T> remainder(delta);
+			if (manager_->collision_response(solid_ptr, position, remainder, col)) {
+				if (position != old_pos) {
+					old_pos.set(position);
+					solid_ptr->set_position_direct(position);
+				}
+				return;  // claimed: no solver touch, no wake
+			}
+		}
+
+		add_or_refresh_touch(solid_ptr, partner, n, impact_speed, separation, current_tick_);
+
+		// Wake a real sleeping partner so it participates in the solve (the world
+		// anchor never sleeps).
+		if (!partner_is_world &&
+		    (partner->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
+		    partner->should_collide(solid_ptr) && impact_speed > deactivate_speed_) {
+			partner->activate();
+		}
+	};
+
 	for (int i = 0; i < num_spacial_collection_; ++i) {
 		auto * s2 = spacial_collection_[i];
 		if (s2 == solid_ptr)
@@ -922,53 +1021,26 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		if (col.time >= one && col.depth <= zero)
 			continue; // not within the inflated shell and not swept into this tick
 
-		// Normal points from partner toward self (the cache convention).
-		const vec3<T> & n = col.normal;
+		record_contact(s2);
+	}
 
-		// Signed gap along the normal at the body's current (start) position.
-		// Shapes were inflated by spec_margin_, so an overlap of the inflated
-		// shapes (col.time == 0) means the true surfaces are within the margin:
-		// the real gap is (margin - inflated_depth) — 0 when touching, negative
-		// when truly penetrating, positive within the shell. A contact reached
-		// only by sweeping this tick (col.time > 0) is a fast approach; its gap is
-		// the closing distance still to cover.
-		T separation;
-		if (col.time <= zero) {
-			separation = spec_margin_ - col.depth;
-		} else {
-			vec3<T> to_contact;
-			sub(to_contact, col.point, old_pos);
-			separation = -dot(to_contact, n);
-			if (separation < zero)
-				separation = zero;
-		}
-
-		// Relative velocity at contact, for callback + wake logic.
-		if (col.collider)
-			sub(col.velocity, solid_ptr->velocity_, col.collider->velocity_);
-		else
-			col.velocity.set(solid_ptr->velocity_);
-		T impact_speed = -dot(col.velocity, n);
-		if (impact_speed < zero)
-			impact_speed = zero;
-
-		// Callback recording, suppressed on sustained contact (as update_solid).
-		typename solid<T>::touch * existing = find_touch(solid_ptr, s2);
-		bool sustained = (existing != nullptr && existing->last_tick == current_tick_ - 1);
-		if (!sustained && (solid_ptr->collision_callback_ != nullptr || s2->collision_callback_ != nullptr)) {
-			col.collidee = solid_ptr;
-			if (num_collisions_ < static_cast<int>(collisions_.size())) {
-				collisions_[num_collisions_].set(col);
-				num_collisions_++;
-			}
-		}
-
-		add_or_refresh_touch(solid_ptr, s2, n, impact_speed, separation, current_tick_);
-
-		// Wake a sleeping partner so it participates in the solve.
-		if ((s2->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
-		    s2->should_collide(solid_ptr) && impact_speed > deactivate_speed_) {
-			s2->activate();
+	// --- Manager-injected geometry ---
+	// External static geometry the manager owns (level BSP / heightfield / trimesh
+	// registered outside hop) is not in solids_, so the broad-phase loop above
+	// can't reach it. Query the manager along the same swept path with the
+	// speculative margin and fold a hit into the solver the same way: recover the
+	// signed gap and refresh a touch. With no owning solid the partner is the
+	// immovable world anchor; if the manager attaches a real collider we use it.
+	// The manager returns a single merged contact per body per tick (interface
+	// limit), so a body resting on a mesh gets one contact point, not a manifold.
+	if (manager_) {
+		col.reset();
+		col.time = one;
+		manager_->trace_solid(col, solid_ptr, path, bits, spec_margin_);
+		if (col.time < one || col.depth > zero) {
+			// No owning solid: resolve against the immovable world anchor. If the
+			// manager attached a real collider, prefer it as the partner.
+			record_contact(col.collider ? col.collider : &static_world_);
 		}
 	}
 }
@@ -1149,7 +1221,7 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 
 	if (manager_) {
 		col.time = tr::one();
-		manager_->trace_solid(col, s, seg, collide_with_bits);
+		manager_->trace_solid(col, s, seg, collide_with_bits, T {});  // exact: swept query / public API
 		hop::merge_collision(result, col, epsilon_, average_normals_, &solid_trace_pair_normal_);
 	}
 

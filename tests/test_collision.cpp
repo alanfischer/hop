@@ -35,8 +35,11 @@ public:
 		}
 	}
 
-	void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const segment<T> & seg) override {
-		T floor_z = position.z;
+	void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const segment<T> & seg, T margin) override {
+		// Inflate the floor outward (upward) by the margin so a solid resting
+		// within `margin` of the surface registers as an overlap; the simulator
+		// recovers the true gap as (margin - depth). margin == 0 is the exact floor.
+		T surface_z = position.z + margin;
 		// Find the solid's lowest z extent from its shapes
 		T lowest_z = T {};
 		for (auto & shape : s->get_shapes()) {
@@ -46,10 +49,24 @@ public:
 				lowest_z = bound.mins.z;
 		}
 		T start_z = seg.origin.z + lowest_z;
+
+		// Already within / below the inflated surface at the start of the sweep:
+		// report a static overlap (t=0) with penetration depth into the inflated
+		// surface, so the caller's (margin - depth) yields the true signed gap.
+		if (start_z <= surface_z) {
+			if (result.time > T {}) {  // only if nothing earlier already hit
+				result.time = T {};
+				result.point.set(seg.origin);
+				result.normal = { T {}, T {}, tr::one() };
+				result.depth = surface_z - start_z;
+			}
+			return;
+		}
+
 		T dz = seg.direction.z;
 		if (dz >= T {})
 			return;
-		T t = (floor_z - start_z) / dz;
+		T t = (surface_z - start_z) / dz;
 		if (t >= T {} && t <= tr::one() && t < result.time) {
 			result.time = t;
 			mul(result.point, seg.direction, t);
