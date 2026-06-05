@@ -296,6 +296,7 @@ private:
 	vec3<T> velocity_;
 	vec3<T> force_;
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
+	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
 	aa_box<T> world_bound_;       // broad phase reads this
 	aa_box<T> local_bound_;
 	std::vector<typename shape<T>::ptr> shapes_;

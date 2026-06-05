@@ -111,6 +111,26 @@ public:
 	void set_speculative_contacts(bool on) { speculative_contacts_ = on; }
 	bool get_speculative_contacts() const { return speculative_contacts_; }
 
+	// Shock-propagation passes appended to the speculative velocity solve (see
+	// spec_shock_iters_). Lets a deep pile transmit support to the floor without
+	// needing solver_iterations ≈ pile-depth. 0 disables it.
+	void set_shock_iterations(int n) { spec_shock_iters_ = n < 0 ? 0 : n; }
+	int get_shock_iterations() const { return spec_shock_iters_; }
+
+	// Remaining speculative-pipeline knobs (defaults set in init_epsilon_defaults).
+	// spec_margin: how far past the predicted motion contacts are discovered.
+	// spec_slop: penetration tolerated without correction (resting-jitter band).
+	// pos_baumgarte: fraction of remaining penetration the NGS removes per iter.
+	// pos_iterations: NGS position-solver iterations per tick (0 disables it).
+	void set_speculative_margin(T m) { spec_margin_ = m; }
+	T get_speculative_margin() const { return spec_margin_; }
+	void set_speculative_slop(T s) { spec_slop_ = s; }
+	T get_speculative_slop() const { return spec_slop_; }
+	void set_position_baumgarte(T b) { spec_pos_baumgarte_ = b; }
+	T get_position_baumgarte() const { return spec_pos_baumgarte_; }
+	void set_position_iterations(int n) { spec_pos_iters_ = n < 0 ? 0 : n; }
+	int get_position_iterations() const { return spec_pos_iters_; }
+
 	// Solid management
 	void add_solid(std::shared_ptr<solid<T>> s) {
 		for (auto & existing : solids_) {
@@ -455,18 +475,34 @@ private:
 		typename solid<T>::touch * slot_b = nullptr;
 	};
 	std::vector<contact_pair> contact_pairs_;
-	// Iteration budget for solve_contacts. Each Gauss–Seidel sweep can
-	// propagate a unit of impulse through one layer of the contact graph;
-	// piles N layers tall therefore need at least N sweeps to transmit
-	// gravity load to the floor. Default targets stacks up to ~15 tall
-	// (a 1000-sphere pile in a 5m box). Warm-starting means subsequent
-	// ticks settle in 1–2 sweeps regardless of pile depth, so the per-tick
-	// cost is dominated by the first tick after a perturbation.
+	// Shock-propagation scratch, all reused per tick (no steady-state alloc):
+	// shock_order_ is pair indices sorted support-end-first; shock_key_[k] is pair
+	// k's gravity-depth sort key; shock_lo_[k] is its deeper (anchor) body. Depths
+	// are computed once per tick since positions don't move during the solve.
+	std::vector<int> shock_order_;
+	std::vector<T> shock_key_;
+	std::vector<solid<T> *> shock_lo_;
+	// Iteration budget for solve_contacts' Gauss–Seidel sweeps. Each sweep
+	// propagates one layer of impulse through the contact graph. Historically
+	// this had to be ≳ the tallest pile, since transmitting gravity load to the
+	// floor took ~depth sweeps; under the speculative pipeline that job is now
+	// done in O(1) by the shock-propagation phase (spec_shock_iters_), so this
+	// budget no longer needs to scale with stack depth — it governs friction /
+	// lateral-constraint convergence and how fast a pile settles to sleep. (The
+	// legacy non-speculative path still relies on it for depth, so the shared
+	// default stays conservative.) Warm-starting keeps steady-state cost low.
 	bool speculative_contacts_ = false;
 	T spec_margin_ {};         // discover contacts up to this far beyond the predicted motion
 	T spec_slop_ {};           // penetration tolerated without correction (kills resting jitter)
 	T spec_pos_baumgarte_ {};  // fraction of remaining penetration removed per NGS position iteration
 	int spec_pos_iters_ = 8;   // NGS position-solver iterations per tick
+	// Shock-propagation passes appended to the velocity solve. Each pass walks
+	// contacts bottom-up and freezes every body once its support-from-below is
+	// resolved, so the support impulse reaches the floor in a single pass
+	// regardless of stack depth — the cure for plain Gauss–Seidel needing ~depth
+	// sweeps to hold a tall pile (which otherwise compresses into penetration and
+	// never sleeps). 0 disables it.
+	int spec_shock_iters_ = 2;
 	int solver_iterations_ = 16;
 	// Sub-step budget for update_solid's swept-collision slide loop. Was a
 	// hard-coded 5; raised to give a fast body room to resolve more colliders
@@ -1557,17 +1593,43 @@ void simulator<T>::solve_contacts(T dt) {
 	// normal-then-friction so friction sees a meaningful normal load even
 	// on the very first iteration.
 	// Apply a constraint impulse `delta` (a-side convention) split across the
-	// pair by inverse mass — the split-impulse step shared by both sweeps.
-	auto apply_pair_impulse = [zero_val](contact_pair & p, const vec3<T> & delta) {
-		if (p.inv_ma > zero_val) {
+	// pair by inverse mass — the split-impulse step shared by both sweeps. The
+	// inverse masses are passed explicitly (rather than read from the pair) so the
+	// shock-propagation phase can substitute effective masses that zero out frozen
+	// anchors.
+	auto apply_pair_impulse = [zero_val](contact_pair & p, const vec3<T> & delta, T inv_a, T inv_b) {
+		if (inv_a > zero_val) {
 			vec3<T> da;
-			mul(da, delta, -p.inv_ma);
+			mul(da, delta, -inv_a);
 			add(p.a->velocity_, da);
 		}
-		if (p.inv_mb > zero_val) {
+		if (inv_b > zero_val) {
 			vec3<T> db;
-			mul(db, delta, p.inv_mb);
+			mul(db, delta, inv_b);
 			add(p.b->velocity_, db);
+		}
+	};
+
+	// One clamped normal-constraint solve for a pair: drive the relative normal
+	// velocity to p.target, keep the accumulated impulse non-negative (no sticky
+	// pull), and apply the resulting split impulse. Shared by the Gauss–Seidel
+	// normal sweep (cached masses) and the shock-propagation walk (effective masses
+	// with frozen anchors zeroed). inv_sum is passed in since the caller already
+	// has it / needs to guard against the immovable-pair (inv_sum == 0) case.
+	auto solve_normal = [&apply_pair_impulse, zero_val](contact_pair & p, T inv_a, T inv_b, T inv_sum) {
+		vec3<T> vrel;
+		sub(vrel, p.b->velocity_, p.a->velocity_);
+		T vn = dot(vrel, p.normal);
+		T lambda_n = (p.target - vn) / inv_sum;
+		T new_acc = p.accum_n + lambda_n;
+		if (new_acc < zero_val)
+			new_acc = zero_val;
+		T effective = new_acc - p.accum_n;
+		p.accum_n = new_acc;
+		if (effective != zero_val) {
+			vec3<T> delta;
+			mul(delta, p.normal, effective);
+			apply_pair_impulse(p, delta, inv_a, inv_b);
 		}
 	};
 
@@ -1588,20 +1650,7 @@ void simulator<T>::solve_contacts(T dt) {
 			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
 			if (p.inv_m_sum <= zero_val)
 				continue;
-			vec3<T> vrel;
-			sub(vrel, p.b->velocity_, p.a->velocity_);
-			T vn = dot(vrel, p.normal);
-			T lambda_n = (p.target - vn) / p.inv_m_sum;
-			T new_acc = p.accum_n + lambda_n;
-			if (new_acc < zero_val)
-				new_acc = zero_val;
-			T effective = new_acc - p.accum_n;
-			p.accum_n = new_acc;
-			if (effective != zero_val) {
-				vec3<T> delta;
-				mul(delta, p.normal, effective);
-				apply_pair_impulse(p, delta);
-			}
+			solve_normal(p, p.inv_ma, p.inv_mb, p.inv_m_sum);
 		}
 		// Friction sweep (same per-tick flip)
 		for (int k = 0; k < npairs; ++k) {
@@ -1638,7 +1687,78 @@ void simulator<T>::solve_contacts(T dt) {
 			sub(delta, new_accum_t, p.accum_t);
 			p.accum_t.set(new_accum_t);
 			if (length_squared(delta) > zero_val) {
-				apply_pair_impulse(p, delta);
+				apply_pair_impulse(p, delta, p.inv_ma, p.inv_mb);
+			}
+		}
+	}
+
+	// --- 4b. Shock propagation ---
+	// Plain Gauss–Seidel transmits one layer of support per sweep, so an N-deep
+	// pile needs ~N sweeps before the bottom contacts carry the weight above them.
+	// With a fixed iteration budget a tall pile stays under-supported: it
+	// compresses into penetration (sinks), and the never-zeroed normal velocities
+	// keep the bottom layer churning instead of sleeping. Shock propagation fixes
+	// this in O(1) sweeps: walk the contacts from the support end up the gravity
+	// chain and, as each body's support-from-below is resolved, freeze it into a
+	// rigid anchor (effective inverse mass 0) so the body above solves against firm
+	// ground and its reaction can't shove the support back down. Normal-only —
+	// friction and restitution are already handled by the GS loop above.
+	// Speculative path only; needs a gravity direction to define "down" (a zero-g
+	// gas has no stacking chain to propagate, so skip it).
+	const bool have_gravity =
+	    gravity_.x != zero_val || gravity_.y != zero_val || gravity_.z != zero_val;
+	if (speculative_contacts_ && spec_shock_iters_ > 0 && npairs > 0 && have_gravity) {
+		// A body is a standing anchor from the outset if it can't move (static /
+		// infinite mass) or is asleep (a settled lower layer supporting the rest).
+		auto pre_frozen = [zero_val](const solid<T> * s, T inv_m) {
+			return inv_m <= zero_val || !s->active_;
+		};
+		// "Support depth" along gravity: dot(position, gravity_) grows the further a
+		// body sits down the gravity vector, so the deeper body of a pair is the one
+		// nearer the anchor (it supports the other). Raw dot — unnormalized gravity
+		// scales every depth equally, leaving the ordering unchanged. Positions are
+		// frozen during the velocity solve, so each pair's depth key and deeper-body
+		// ("lo") are computed once here and reused by both the sort and every pass.
+		shock_order_.resize(npairs);
+		shock_key_.resize(npairs);
+		shock_lo_.resize(npairs);
+		for (int k = 0; k < npairs; ++k) {
+			const contact_pair & p = contact_pairs_[k];
+			T da = dot(p.a->position_, gravity_);
+			T db = dot(p.b->position_, gravity_);
+			shock_order_[k] = k;
+			shock_key_[k] = tr::max_val(da, db);
+			shock_lo_[k] = da >= db ? p.a : p.b;
+		}
+		// Order contacts support-end-first: descending depth, so a body's contacts
+		// from below are visited before the contacts it supports from above.
+		// stable_sort keeps the canonical pair order for equal depths, so the sweep
+		// stays deterministic (fixed-point included).
+		std::stable_sort(shock_order_.begin(), shock_order_.end(),
+		                 [this](int i, int j) { return shock_key_[i] > shock_key_[j]; });
+		for (int pass = 0; pass < spec_shock_iters_; ++pass) {
+			// Re-seed the freeze state each pass: only the standing anchors start
+			// frozen; the support-end-first walk re-freezes the rest against the
+			// updated velocities.
+			for (auto & p : contact_pairs_) {
+				p.a->solve_frozen_ = pre_frozen(p.a, p.inv_ma);
+				p.b->solve_frozen_ = pre_frozen(p.b, p.inv_mb);
+			}
+			for (int oi = 0; oi < npairs; ++oi) {
+				int idx = shock_order_[oi];
+				contact_pair & p = contact_pairs_[idx];
+				// The deeper (more-anchored) body has had its support-from-below
+				// resolved by now — earlier in the walk — so freeze it: it anchors
+				// this contact and everything above it. Frozen bodies contribute zero
+				// effective inverse mass, so the solve drives the free body alone and
+				// its reaction can't shove the support back down.
+				shock_lo_[idx]->solve_frozen_ = true;
+				T inv_a = p.a->solve_frozen_ ? zero_val : p.inv_ma;
+				T inv_b = p.b->solve_frozen_ ? zero_val : p.inv_mb;
+				T inv_sum = inv_a + inv_b;
+				if (inv_sum <= zero_val)
+					continue;
+				solve_normal(p, inv_a, inv_b, inv_sum);
 			}
 		}
 	}
