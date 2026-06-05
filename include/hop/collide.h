@@ -494,13 +494,34 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 	}
 }
 
+// `margin` inflates both solids' shapes (Minkowski-grows the contact boundary by
+// that distance), so a swept/overlap test reports contact when the true surfaces
+// are within `margin` rather than only on touch. Used by speculative-contacts
+// discovery to enumerate near-resting contacts the bare swept query misses; the
+// caller recovers the true signed gap as (margin − reported depth). Default 0 =
+// exact shapes, the behaviour every existing caller relies on.
 template <typename T>
-void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T epsilon) {
+void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T epsilon, T margin = T {}) {
 	using tr = scalar_traits<T>;
 	collision<T> col;
 	col.collider = s2;
 	const T one = tr::one();
 	T zero_val {};
+
+	// Inflate a Minkowski AABB / convex by the margin (no-op when margin == 0, so
+	// the exact-shape fast path is unaffected). Combined-radius pairs (sphere,
+	// capsule) add the margin to their radius directly at the call site.
+	auto inflate_box = [&](aa_box<T> & b) {
+		if (margin > zero_val) {
+			b.mins.x -= margin; b.mins.y -= margin; b.mins.z -= margin;
+			b.maxs.x += margin; b.maxs.y += margin; b.maxs.z += margin;
+		}
+	};
+	auto inflate_planes = [&](convex_solid<T> & c) {
+		if (margin > zero_val)
+			for (auto & p : c.planes)
+				p.distance = p.distance + margin;
+	};
 
 	// Squared segment length is invariant across all shape pairs in this call;
 	// hoist it for the sphere/sphere fast reject below.
@@ -550,6 +571,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(box, lp_delta);
 				sub(box.maxs, sh1->get_box().mins);
 				sub(box.mins, sh1->get_box().maxs);
+				inflate_box(box);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->get_type() == shape_type::box && sh2->get_type() == shape_type::sphere) {
 				aa_box<T> box;
@@ -558,6 +580,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(box, lp_delta);
 				sub(box.maxs, sh1->get_box().mins);
 				sub(box.mins, sh1->get_box().maxs);
+				inflate_box(box);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->get_type() == shape_type::box && sh2->get_type() == shape_type::capsule) {
 				aa_box<T> box;
@@ -566,6 +589,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(box, lp_delta);
 				sub(box.maxs, sh1->get_box().mins);
 				sub(box.mins, sh1->get_box().maxs);
+				inflate_box(box);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->get_type() == shape_type::box && sh2->get_type() == shape_type::convex_solid) {
 				vec3<T> half;
@@ -577,6 +601,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(sh1_offset, sh1->get_box().mins, sh1->get_box().maxs);
 				mul(sh1_offset, tr::half());
 				add(sh1_offset, lp1);
+				inflate_planes(cs);
 				trace_forward_convex(col, seg, s2->get_position(), lp2, cs, sh1_offset, epsilon);
 			}
 			// Sphere vs *
@@ -589,6 +614,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(box, lp_delta);
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
+				inflate_box(box);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->get_type() == shape_type::sphere && sh2->get_type() == shape_type::sphere) {
 				vec3<T> origin;
@@ -596,7 +622,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(origin, lp_delta);
 				sub(origin, sh1->get_sphere().origin);
 				add(origin, sh2->get_sphere().origin);
-				T r_sum = sh1->get_sphere().radius + sh2->get_sphere().radius;
+				T r_sum = sh1->get_sphere().radius + sh2->get_sphere().radius + margin;
 				// Fast reject: if start-position centers are too far apart for the
 				// swept sphere to ever reach the target sphere this tick, skip the
 				// quadratic root solve. Conservative no-sqrt bound:
@@ -619,7 +645,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				sub(origin, sh1->get_sphere().origin);
 				add(origin, sh2->get_capsule().origin);
 				capsule<T> cap;
-				cap.set(origin, sh2->get_capsule().direction, sh2->get_capsule().radius + sh1->get_sphere().radius);
+				cap.set(origin, sh2->get_capsule().direction, sh2->get_capsule().radius + sh1->get_sphere().radius + margin);
 				trace_capsule(col, seg, cap, epsilon);
 			} else if (sh1->get_type() == shape_type::sphere && sh2->get_type() == shape_type::convex_solid) {
 				convex_solid<T> cs;
@@ -628,6 +654,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 					p.distance = p.distance + sh1->get_sphere().radius;
 				vec3<T> sh1_offset;
 				add(sh1_offset, sh1->get_sphere().origin, lp1);
+				inflate_planes(cs);
 				trace_forward_convex(col, seg, s2->get_position(), lp2, cs, sh1_offset, epsilon);
 			}
 			// Capsule vs *
@@ -640,6 +667,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(box, lp_delta);
 				sub(box.maxs, box1.mins);
 				sub(box.mins, box1.maxs);
+				inflate_box(box);
 				trace_aa_box(col, seg, box);
 			} else if (sh1->get_type() == shape_type::capsule && sh2->get_type() == shape_type::sphere) {
 				vec3<T> origin;
@@ -651,7 +679,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				dir.set(sh1->get_capsule().direction);
 				neg(dir);
 				capsule<T> cap;
-				cap.set(origin, dir, sh1->get_capsule().radius + sh2->get_sphere().radius);
+				cap.set(origin, dir, sh1->get_capsule().radius + sh2->get_sphere().radius + margin);
 				trace_capsule(col, seg, cap, epsilon);
 			} else if (sh1->get_type() == shape_type::capsule && sh2->get_type() == shape_type::convex_solid) {
 				// Capsule support relative to its A endpoint: r + max(0, n·D).
@@ -667,6 +695,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				}
 				vec3<T> sh1_offset;
 				add(sh1_offset, sh1->get_capsule().origin, lp1);
+				inflate_planes(cs);
 				trace_forward_convex(col, seg, s2->get_position(), lp2, cs, sh1_offset, epsilon);
 			} else if (sh1->get_type() == shape_type::capsule && sh2->get_type() == shape_type::capsule) {
 				vec3<T> base;
@@ -679,7 +708,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				                      base,
 				                      sh1->get_capsule().direction,
 				                      sh2->get_capsule().direction,
-				                      sh1->get_capsule().radius + sh2->get_capsule().radius,
+				                      sh1->get_capsule().radius + sh2->get_capsule().radius + margin,
 				                      epsilon);
 			}
 			else if (sh1->get_type() == shape_type::convex_solid && sh2->get_type() == shape_type::box) {
@@ -691,6 +720,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				vec3<T> sh2_offset;
 				add(sh2_offset, sh2->get_box().mins, sh2->get_box().maxs);
 				mul(sh2_offset, tr::half());
+				inflate_planes(cs);
 				trace_inverted_convex(col, seg, s1->get_position(), s2->get_position(), lp_delta, cs, sh2_offset, epsilon);
 			}
 			// Convex solid vs sphere
@@ -699,6 +729,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				cs.set(sh1->get_convex_solid());
 				for (auto & p : cs.planes)
 					p.distance = p.distance + sh2->get_sphere().radius;
+				inflate_planes(cs);
 				trace_inverted_convex(col, seg, s1->get_position(), s2->get_position(), lp_delta, cs, sh2->get_sphere().origin, epsilon);
 			}
 			// Convex solid vs capsule (mirror of capsule × convex)
@@ -710,6 +741,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 					T nd = dot(p.normal, D);
 					p.distance = p.distance + sh2->get_capsule().radius + tr::max_val(zero_val, nd);
 				}
+				inflate_planes(cs);
 				trace_inverted_convex(col, seg, s1->get_position(), s2->get_position(), lp_delta, cs, sh2->get_capsule().origin, epsilon);
 			}
 			// Minkowski difference sh2 ⊕ (-sh1) — locus of (sh1.pos - sh2.pos) at
@@ -737,6 +769,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 					support(sup, b, neg_n);
 					cs.planes.push_back(plane<T>(neg_n, p1.distance + dot(sup, neg_n)));
 				}
+				inflate_planes(cs);
 				trace_forward_convex(col, seg, s2->get_position(), lp2, cs, lp1, epsilon);
 			}
 

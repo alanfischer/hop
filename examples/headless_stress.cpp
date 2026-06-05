@@ -1,10 +1,10 @@
 // headless_stress.cpp — headless diagnostics for the demo_stress settling scene.
-// Mirrors demo_stress.cpp's setup (dissipative COR-0.5 walls, contact damping
-// 0.8) but runs without a window and prints stats.
+// Mirrors demo_stress.cpp's setup (dissipative COR-0.5 walls) but runs without a
+// window and prints stats. Friction and the speculative toggle are args.
 //
 // Usage: headless_stress [ticks] [room_half] [room_height] [iters] [COR]
 //                        [friction] [avg_normals] [deactivate_speed]
-//                        [deactivate_count]
+//                        [deactivate_count] [speculative]
 //
 // Per sample (every 300 ticks, plus tick 1 and any KE spike) prints asleep
 // count, total KE, max speed, and mean ball height. A final DONE line reports
@@ -53,6 +53,7 @@ int main(int argc, char ** argv) {
 	int   AN  = argc > 7 ? atoi(argv[7]) : 1;
 	float DS  = argc > 8 ? atof(argv[8]) : 0.2f;
 	int   DC  = argc > 9 ? atoi(argv[9]) : 32;
+	int   SPEC = argc > 10 ? atoi(argv[10]) : 0;
 	WALL_FRICTION = FR;
 
 	const float SPHERE_R = 0.28f;
@@ -71,7 +72,7 @@ int main(int argc, char ** argv) {
 	sim.set_deactivate_speed(tr::from_milli((int)(DS*1000)));
 	sim.set_solver_iterations(ITERS);
 	sim.set_average_normals(AN != 0);
-	sim.set_contact_damping(ff(0.8f));  // match demo_stress
+	sim.set_speculative_contacts(SPEC != 0);
 
 	T half = fi(ROOM_HALF), hgt = fi(ROOM_HEIGHT), thick = fi(1), zero = T{};
 	T outer = half + thick;
@@ -116,7 +117,7 @@ int main(int argc, char ** argv) {
 
 	printf("%7s %7s %12s %8s %8s %6s\n", "tick", "asleep", "KE", "maxV", "meanZ", "");
 	double prevKE = 0, prevE = 0, injPos = 0, injNeg = 0;
-	int finalAsleep = 0, totalBreach = 0; float finalKE = 0, finalMeanZ = 0;
+	int finalAsleep = 0, totalBreach = 0, finalBelow = 0; float finalKE = 0, finalMeanZ = 0, finalMinZ = 0, finalComX = 0, finalComY = 0;
 	auto t0 = std::chrono::high_resolution_clock::now();
 	for (int t = 1; t <= TICKS; ++t) {
 		sim.update(tr::from_milli(16));
@@ -152,10 +153,12 @@ int main(int argc, char ** argv) {
 		}
 		prevKE = ke;
 		finalAsleep = asleep; finalKE = ke; finalMeanZ = sumz/spheres.size();
+		finalBelow = below; finalMinZ = tr::to_float(minz);
+		finalComX = comx; finalComY = comy;
 	}
 	auto t1 = std::chrono::high_resolution_clock::now();
 	double secs = std::chrono::duration<double>(t1 - t0).count();
-	printf("DONE  time=%.2fs  asleep=%d/%d  finalKE=%.2f  meanZ=%.3f  breachTicks=%d\n",
-	       secs, finalAsleep, COUNT, finalKE, finalMeanZ, totalBreach);
+	printf("DONE  time=%.2fs  asleep=%d/%d  finalKE=%.2f  meanZ=%.3f  breachTicks=%d  finalBelow=%d  finalMinZ=%.3f  COM=(%+.3f,%+.3f)\n",
+	       secs, finalAsleep, COUNT, finalKE, finalMeanZ, totalBreach, finalBelow, finalMinZ, finalComX, finalComY);
 	return 0;
 }

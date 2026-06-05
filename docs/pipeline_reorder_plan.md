@@ -119,21 +119,135 @@ convention). The clamped-accumulator GS (`:1220–1240`) is otherwise unchanged.
 Restitution stays dissipative for the same reason it is today (`|target| ≤
 |vn0|`).
 
-**Phase 3 — Commit + backstop.** Implement the `pos += v·dt` commit and the
-small penetration-correction backstop. Demote the depth push-out (`:570–595`)
-and the TOI snap (`:596–599`) to the backstop's slop handling; they no longer
-drive normal settling.
+**Phase 3 — Commit + backstop, and the discovery-completeness blocker.**
+Implement the `pos += v·dt` commit (done) and a position-only penetration
+backstop (a COM-split, order-independent NGS pass over the contact graph;
+prototyped). The backstop turned out to be **necessary but not sufficient** —
+see the findings below. The real blocker surfaced here is **contact-discovery
+completeness**, which must be solved before the backstop helps.
 
 **Phase 4 — Re-tune and prune.** With the pile now dissipating naturally,
 re-tune `deactivate_speed` / `deactivate_count` (the sweep harness,
-`examples/headless_stress.cpp`, already measures this). Re-evaluate whether
-`set_contact_damping` (`demo_stress`'s current crutch) is still needed — it
-likely becomes a no-op for settling and can default off. Confirm
-`solver_iterations` budgets.
+`examples/headless_stress.cpp`, already measures this). `contact_damping` was
+evaluated and **removed** — real Coulomb friction supersedes it (see findings).
+Confirm `solver_iterations` budgets. (Largely done; deactivation re-tune for the
+speculative rest signature remains — see the resume checklist.)
 
 **Phase 5 — Flip the default and remove the old path.** Once the test matrix
 below is green with `speculative_contacts` on, make it the default, then delete
 the legacy snap-driven settling path and the toggle.
+
+## Implementation status & findings (2026-06-04)
+
+Phases 0–2 are **implemented and committed** behind `set_speculative_contacts`
+(default off): `integrate_and_discover` → `solve_contacts` (speculative target)
+→ `commit_solid`, with a shared `try_deactivate`. The headline result is
+confirmed — the structural **energy injection is gone** (demo_stress KE
+55223 → ~1400, ~40×), single contacts are exact (a drop lands at rest), the
+box stack rests at KE 0, and a 300 m/s sphere does **not** tunnel a thin wall
+(CCD preserved).
+
+**The open blocker — directional discovery under-counts resting contacts.**
+The swept query is *directional*: it finds what a body moves *toward*. That is
+perfect for the cases above (a falling body sweeps down onto its support; a fast
+body sweeps into a wall), which is why the vertical box stack, the drop, and the
+tunneling test all pass. But a dense 3D pile's contacts arrive from **all
+directions** at gap ≈ 0, and a near-zero predicted Δ sweep does not enumerate the
+lateral neighbours a body is merely resting against. With an incomplete contact
+set, neither the velocity solve nor a position backstop can prevent
+interpenetration, and demo_stress breaches the floor on most ticks
+(`breachTicks ≈ 760/1200`).
+
+A position-only backstop (Phase 3) was prototyped and **made the dense pile
+worse** (meanZ collapsed 3.4 → 1.5, bodies sleeping interpenetrated) precisely
+because it shuffles positions using the same incomplete contact set — it was
+reverted. Conclusion: **omnidirectional contact discovery is the prerequisite**,
+and the next real step, not the position pass.
+
+**Margin-shell discovery — DONE (Option A, commit 2f84e3b).** A `margin`
+parameter is threaded through the narrow phase (`hop::test_solid` + the simulator
+wrapper, default 0 = exact shapes). It Minkowski-inflates every shape pair
+uniformly — AABB Minkowski grows, sphere/capsule combined radii gain the margin,
+convex planes shift out — so a near-resting contact registers as an overlap and
+discovery recovers the true signed gap as `margin − reported_depth`. Discovery
+now enumerates contacts in **all** directions, not just along Δ.
+
+Effect: the dense pile is now **stable** — the incomplete-discovery collapse and
+ejection (a sphere reaching z = −94) are gone, and the 40× KE-injection win holds
+(demo_stress KE ~1300 vs 55223). Default path untouched (11/11); box stack rests,
+drop lands, 300 m/s sphere doesn't tunnel.
+
+**Iterative NGS position solver — DONE (commit 2edb1ef).** `correct_positions()`
+runs after the velocity solve: it accumulates a per-body pseudo-position
+(`solid::pos_correction_`, zeroed in Pass A, folded into the commit), never
+touching velocity, so it removes penetration without adding energy (the velocity
+Baumgarte term is dropped). It is *non-linear* — each pair's separation is
+re-derived from the running correction every visit
+(`sep = discovery_gap + dot(Δb − Δa, n)`), so a body's several contacts converge
+instead of summing. Two ejection sources were found and fixed along the way: the
+naive one-shot summed projection (over-displaces; the reason iteration +
+re-derivation are required), and **stale corrections on sleeping partners** —
+sleeping/static bodies are now treated as immovable supports (zeroed first, inverse
+mass forced to 0), so awake bodies take the whole correction.
+
+Result (demo_stress headless, speculative, baumgarte 0.8 × 8 iters + gated contact
+damping): deep-load floor penetration essentially gone (finalBelow 316 → ~2, no
+ejection), KE ~1000 vs default 55223 (~50×), ~140 asleep vs 6, floor clean.
+Default path untouched (11/11).
+
+**Friction replaces contact_damping — DONE (commits 1962029, 8f7a91f).** Real
+Coulomb friction (cone-limited) is the physical, drift-free way to drain the
+pile's slosh under the speculative pipeline; `contact_damping` (viscous, no cone)
+glued balls to walls and was **removed entirely**. `demo_stress` now runs
+speculative with friction 0.5 on balls and walls: asleep ~527 (vs 13 default),
+KE ~620 (vs 55223), floor clean, COM centered at (−0.012, −0.008) — the corner
+drift that originally forced the demo frictionless is gone because the NGS
+correction is order-independent.
+
+**Still open — full sleep.** A low ~0.7 m/s churn keeps most bodies from fully
+sleeping (a position-solve / velocity-solve interaction: NGS shifts positions, the
+velocities don't quite reach zero against the shifted configuration). The pile is
+stable, drift-free, and ~50–80× calmer than default, but not fully at rest. This
+is the one functional gap left — see the resume checklist below.
+
+## Remaining work — resume checklist
+
+Branch `speculative-contacts` (off `main`). Pipeline is implemented and opt-in
+(`set_speculative_contacts`, default off); `demo_stress` uses it with friction.
+What's left, in order:
+
+1. **[functional gap] Full settle-to-sleep.** Close the residual ~0.7 m/s churn
+   so the pile actually sleeps. Likely a small post-NGS velocity reconciliation
+   (re-zero the normal velocity the position shift introduces) or relaxing the
+   restitution gate at rest. This is the gating item — everything below waits on
+   it. Measure with `examples/headless_stress.cpp … <spec=1>` (watch `asleep`,
+   `finalKE`, `COM`).
+2. **Expose tuning knobs as setters.** `spec_margin_`, `spec_slop_`,
+   `spec_pos_baumgarte_`, `spec_pos_iters_` are hardcoded in
+   `init_epsilon_defaults` (`simulator.h`). Add `set_/get_` accessors like the
+   other sim knobs.
+3. **Tests** (`tests/test_collision.cpp`). Beyond `box_stack`: a full-sleep test
+   (demo_stress headless settles + `asleep == COUNT` within N ticks), a tunneling
+   test (fast body vs thin static wall, float + fixed16), and a fixed16
+   determinism/round-trip test.
+4. **Re-tune deactivation** (`deactivate_speed`/`deactivate_count`) for the
+   speculative rest signature.
+5. **Flip the default** — make `speculative_contacts_` default true (or drop the
+   toggle) once 1–4 are green.
+6. **Delete the old pipeline** — the integrate→snap→solve path: the depth
+   push-out and TOI-snap placement and sub-step slide loop in `update_solid`
+   (`simulator.h`, ~lines 560–740 in the current default branch). This is the big
+   simplification; do it only after the default is flipped and proven.
+7. **Docs** — rewrite the README "Contact Solver, Settling & Sleep" section to
+   describe speculative as *the* pipeline (not opt-in), and finalize this plan.
+
+Key symbols: `integrate_and_discover`, `solve_contacts`, `correct_positions`,
+`commit_solid`, `try_deactivate` (all `simulator.h`); `solid::pos_correction_`,
+`solid::touch::separation` (`solid.h`); `hop::test_solid(..., margin)`
+(`collide.h`). Diagnostics: `examples/headless_stress.cpp` args are
+`ticks room_half room_height iters COR friction avg_normals deactivate_speed
+deactivate_count speculative`; DONE line reports asleep / KE / meanZ /
+breachTicks / finalBelow / finalMinZ / COM.
 
 ## Determinism / fixed-point
 

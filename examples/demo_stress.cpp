@@ -38,11 +38,13 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	w->set_infinite_mass();
 	w->set_coefficient_of_gravity(T{});
 	w->set_coefficient_of_restitution(ff<T>(0.5f));
-	// Frictionless walls: friction would let the fixed-order solver ratchet the
-	// pile into a corner over long runs. The pile is calmed by linear drag on the
-	// balls instead (see run()), which doesn't drift.
-	w->set_coefficient_of_static_friction(T{});
-	w->set_coefficient_of_dynamic_friction(T{});
+	// Friction is safe under the speculative pipeline (see run()): the COM-split
+	// NGS position correction is order-independent, so friction no longer ratchets
+	// the pile into a corner the way the old per-body push-out did. It's also the
+	// physical way to drain the pile's residual slosh — unlike viscous contact
+	// damping, which (lacking a Coulomb cone) would glue balls to the walls.
+	w->set_coefficient_of_static_friction(ff<T>(0.5f));
+	w->set_coefficient_of_dynamic_friction(ff<T>(0.5f));
 	w->add_shape(std::make_shared<hop::shape<T>>(box));
 	w->set_position(pos);
 	sim.add_solid(w);
@@ -66,10 +68,13 @@ template <typename T> static void run() {
 	hop::bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
 	sim.set_deactivate_count(32);
-	// Frictionless contact damping calms the pile to a visible rest without slowing
-	// the fall (it only acts on touching pairs, and only on the sliding component)
-	// and without the corner-ratchet drift that friction's grip produces.
-	sim.set_contact_damping(ff<T>(0.8f));
+	// Speculative-contacts pipeline (discover -> solve -> integrate, with the NGS
+	// position solver). It removes the old pipeline's structural energy injection,
+	// so the pile actually dissipates and settles instead of churning forever — and
+	// it lets us use real friction (above) to drain the slosh, dropping the old
+	// viscous-damping crutch (which glued balls to the walls). See
+	// docs/pipeline_reorder_plan.md.
+	sim.set_speculative_contacts(true);
 
 	T half  = fi<T>(ROOM_HALF);
 	T hgt   = fi<T>(ROOM_HEIGHT);
@@ -116,10 +121,10 @@ template <typename T> static void run() {
 		// two materials' COR (walls and balls are both 0.5 here).
 		s->set_restitution_combine(hop::restitution_combine::maximum);
 		s->set_coefficient_of_restitution(ff<T>(0.5f));
-		// Frictionless (no corner-ratchet drift); the pile is calmed by the
-		// simulator's contact damping (set in run()), which leaves the fall alone.
-		s->set_coefficient_of_static_friction(T{});
-		s->set_coefficient_of_dynamic_friction(T{});
+		// Real friction (matches the walls): under the speculative pipeline it
+		// drains the pile's slosh physically and without corner drift (see run()).
+		s->set_coefficient_of_static_friction(ff<T>(0.5f));
+		s->set_coefficient_of_dynamic_friction(ff<T>(0.5f));
 		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff<T>(SPHERE_R))));
 
 		int   layer = i / (COLS * COLS);
