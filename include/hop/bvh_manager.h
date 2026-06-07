@@ -45,6 +45,9 @@ public:
 			dynamic_solids_.push_back(s);
 			dynamic_dirty_ = true;
 		}
+		// iteration_order_ contains both buckets, so any add invalidates it —
+		// including static adds, which leave dynamic_dirty_ untouched.
+		order_dirty_ = true;
 	}
 
 	void remove_solid(solid<T> * s) {
@@ -52,12 +55,16 @@ public:
 		if (it_s != static_solids_.end()) {
 			static_solids_.erase(it_s);
 			dirty_ = true;
+			// Drop the now-dangling pointer from the cached order immediately;
+			// it may be read again before the next rebuild.
+			order_dirty_ = true;
 			return;
 		}
 		auto it_d = std::find(dynamic_solids_.begin(), dynamic_solids_.end(), s);
 		if (it_d != dynamic_solids_.end()) {
 			dynamic_solids_.erase(it_d);
 			dynamic_dirty_ = true;
+			order_dirty_ = true;
 		}
 	}
 
@@ -97,14 +104,30 @@ public:
 		dynamic_dirty_ = false;
 		ticks_since_dynamic_rebuild_ = 0;
 
-		// Capture leaf order for the simulator's spatial-locality update loop.
+		rebuild_iteration_order();
+	}
+
+	// Rebuild the simulator's spatial-locality update order from the current
+	// BVH leaves plus the bookkeeping vectors. Invariant the simulator relies
+	// on: the order must contain *every* solid this manager owns exactly once,
+	// so its size equals dynamic_solids_.size() + static_solids_.size(). The
+	// dynamic BVH only holds solids with shapes, so shape-less dynamics (e.g. a
+	// body added to the space before its collision shape arrives) are appended
+	// explicitly — otherwise they'd be silently dropped from the order. Assumes
+	// dynamic_bvh_ topology is current (post build or refit); cheap, so it's
+	// safe to call after a refit-only tick.
+	void rebuild_iteration_order() {
 		// Dynamics in BVH-DFS order; statics tail (their order is irrelevant
 		// since walls don't move and their per-tick work is trivial).
 		iteration_order_.clear();
 		iteration_order_.reserve(dynamic_solids_.size() + static_solids_.size());
 		dynamic_bvh_.collect_leaves(iteration_order_);
+		for (auto * s : dynamic_solids_)
+			if (s->get_shapes().empty())
+				iteration_order_.push_back(s);
 		for (auto * s : static_solids_)
 			iteration_order_.push_back(s);
+		order_dirty_ = false;
 	}
 
 	int get_static_count() const { return static_cast<int>(static_solids_.size()); }
@@ -194,10 +217,15 @@ public:
 		if (static_cast<int>(dynamic_solids_.size()) < linear_scan_threshold)
 			return;
 		if (dynamic_dirty_ || ++ticks_since_dynamic_rebuild_ >= dynamic_rebuild_period) {
-			rebuild_dynamic();
+			rebuild_dynamic();  // also refreshes iteration_order_
 			ticks_since_dynamic_rebuild_ = 0;
 		} else {
 			dynamic_bvh_.refit([](solid<T> * s) { return s->get_world_bound(); });
+			// A refit preserves topology, so the BVH leaves are unchanged — but
+			// a static add/remove (which doesn't dirty the dynamic BVH) can still
+			// have invalidated the order's tail. Refresh it without a full rebuild.
+			if (order_dirty_)
+				rebuild_iteration_order();
 		}
 	}
 	void post_update(T dt) override {}
@@ -225,6 +253,7 @@ private:
 	bvh<T, solid<T> *> dynamic_bvh_;
 	bool dirty_ = false;
 	bool dynamic_dirty_ = false;
+	bool order_dirty_ = false;
 	int ticks_since_dynamic_rebuild_ = 0;
 };
 

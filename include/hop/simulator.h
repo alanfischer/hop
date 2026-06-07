@@ -208,7 +208,14 @@ public:
 		// order is skipped. With no manager order, iterate solids_ directly.
 		const std::vector<solid<T> *> * order =
 		    (target == nullptr && manager_) ? manager_->get_iteration_order() : nullptr;
-		assert(!order || order->size() == solids_.size());
+		// The manager's order is a spatial-locality *hint*, not a contract. If a
+		// manager desync or a mid-tick add/remove leaves it out of sync with
+		// solids_, ignore it for this tick and iterate solids_ directly. A stale
+		// order would otherwise skip bodies (release) or dereference a dangling
+		// solid pointer (use-after-free) — both far worse than losing locality
+		// for one tick. (Was an assert(); promoted to a graceful fallback.)
+		if (order && order->size() != solids_.size())
+			order = nullptr;
 
 		const size_t num = target ? 1 : (order ? order->size() : solids_.size());
 		const bool flip = !target && (current_tick_ & 1);
