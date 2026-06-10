@@ -68,13 +68,14 @@ template <typename T> static void run() {
 	hop::bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
 	sim.set_deactivate_count(32);
-	// Speculative-contacts pipeline (discover -> solve -> integrate, with the NGS
-	// position solver). It removes the old pipeline's structural energy injection,
-	// so the pile actually dissipates and settles instead of churning forever — and
-	// it lets us use real friction (above) to drain the slosh, dropping the old
-	// viscous-damping crutch (which glued balls to the walls). See
-	// docs/pipeline_reorder_plan.md.
-	sim.set_speculative_contacts(true);
+	// Resolve every body with the speculative contact mode (discover -> solve ->
+	// integrate, with the NGS position solver). It removes the sweep_slide path's
+	// structural energy injection, so the pile actually dissipates and settles
+	// instead of churning forever — and it lets us use real friction (above) to
+	// drain the slosh, dropping the old viscous-damping crutch (which glued balls to
+	// the walls). Set as the simulator default so every sphere and wall added below
+	// inherits it (see solid::set_contact_mode for the per-body override).
+	sim.set_default_contact_mode(hop::contact_mode::speculative);
 
 	T half  = fi<T>(ROOM_HALF);
 	T hgt   = fi<T>(ROOM_HEIGHT);

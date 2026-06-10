@@ -138,7 +138,7 @@ template <typename T> static void test_speculative_manager_floor(const char * la
 	manager_floor<T> floor;
 	auto sim = std::make_shared<simulator<T>>();
 	sim->set_gravity({ T {}, T {}, -tr::from_milli(9810) });
-	sim->set_speculative_contacts(true);
+	sim->set_default_contact_mode(hop::contact_mode::speculative);
 	sim->set_manager(&floor);
 
 	auto ball = std::make_shared<solid<T>>();
@@ -182,7 +182,7 @@ template <typename T> static void test_speculative_manager_response(const char *
 	claiming_floor<T> floor;
 	auto sim = std::make_shared<simulator<T>>();
 	sim->set_gravity({ T {}, T {}, -tr::from_milli(9810) });
-	sim->set_speculative_contacts(true);
+	sim->set_default_contact_mode(hop::contact_mode::speculative);
 	sim->set_manager(&floor);
 
 	auto ball = std::make_shared<solid<T>>();
@@ -201,6 +201,52 @@ template <typename T> static void test_speculative_manager_response(const char *
 	printf("  speculative_manager_response[%s]: OK\n", label);
 }
 
+// Mixed contact modes in one simulator: a finite-mass sweep_slide "character" is
+// pushed by a speculative ball through the shared velocity solve. Verifies (a) the
+// character is influenced by physics — it is shoved in +x from rest, the behavior a
+// kinematic (inv_mass=0) character controller would NOT give — and (b) the ball
+// does not tunnel through it. Exercises the per-body dispatch and the mixed-pair
+// seam (sweep_slide owns its own position via the snap/slide; the impulse exchange
+// still uses its real finite mass).
+template <typename T> static void test_mixed_modes_push(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  mixed_modes_push[%s]: ", label);
+
+	auto sim = std::make_shared<simulator<T>>();
+	sim->set_gravity({ T {}, T {}, T {} });  // zero-g: isolate the push
+
+	// Character: sweep_slide, finite mass, at rest at the origin.
+	auto character = std::make_shared<solid<T>>();
+	character->set_mass(tr::one());
+	character->set_position({ T {}, T {}, T {} });
+	character->set_coefficient_of_restitution(T {});  // inelastic: clean momentum transfer
+	character->add_shape(std::make_shared<shape<T>>(hop::sphere<T> { vec3<T> {}, tr::one() }));
+	sim->add_solid(character);
+	character->set_contact_mode(contact_mode::sweep_slide);
+
+	// Ball: speculative, finite mass, approaching from -x.
+	auto ball = std::make_shared<solid<T>>();
+	ball->set_mass(tr::one());
+	ball->set_position({ tr::from_int(-4), T {}, T {} });
+	ball->set_velocity({ tr::from_int(5), T {}, T {} });
+	ball->set_coefficient_of_restitution(T {});
+	ball->add_shape(std::make_shared<shape<T>>(hop::sphere<T> { vec3<T> {}, tr::one() }));
+	sim->add_solid(ball);
+	ball->set_contact_mode(contact_mode::speculative);
+
+	for (int i = 0; i < 120; ++i)
+		sim->update(tr::from_milli(16));
+
+	float cx  = tr::to_float(character->get_position().x);
+	float cvx = tr::to_float(character->get_velocity().x);
+	float bx  = tr::to_float(ball->get_position().x);
+	printf("char x=%.2f vx=%.3f  ball x=%.2f (char shoved +x, ball stays behind)\n", cx, cvx, bx);
+	assert(cx > 0.1f);    // the sweep_slide character was pushed by the speculative ball
+	assert(cvx > 0.0f);   // ... and is still carrying that motion
+	assert(bx < cx);      // the ball never tunnelled past the character
+	printf("  mixed_modes_push[%s]: OK\n", label);
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -217,6 +263,7 @@ int main() {
 	test_trigger_scope<float>();
 	test_speculative_manager_floor<float>("float");
 	test_speculative_manager_response<float>("float");
+	test_mixed_modes_push<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -244,6 +291,7 @@ int main() {
 	}
 	test_speculative_manager_floor<fixed16>("fixed16");
 	test_speculative_manager_response<fixed16>("fixed16");
+	test_mixed_modes_push<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

@@ -26,6 +26,20 @@ template <typename T> class manager;
 // bouncy; for damped, set `minimum` and keep partners off `multiply`/`maximum`.
 enum class restitution_combine { average, minimum, multiply, maximum };
 
+// Per-body contact-resolution strategy.
+//  - speculative: discover -> solve velocity -> integrate, with an NGS position
+//    backstop. Contacts are made non-penetrating at the velocity level before the
+//    body moves, so resting piles dissipate to true rest and fast bodies don't
+//    tunnel. This is the dynamics-solver path.
+//  - sweep_slide: the swept collide-and-slide path — integrate, sweep to the
+//    earliest time-of-impact, snap, and slide the remainder along the surface.
+//    Geometric, convergence-independent, character-controller-style movement.
+// A sweep_slide body still exchanges impulses through the shared velocity solve,
+// so it is pushed by speculative bodies normally; only its *positioning* differs.
+// The two can be mixed per body (e.g. a sweep_slide character among speculative
+// balls). See simulator::update.
+enum class contact_mode { speculative, sweep_slide };
+
 template <typename T> class solid : public std::enable_shared_from_this<solid<T>> {
 public:
 	using ptr = std::shared_ptr<solid<T>>;
@@ -45,7 +59,7 @@ public:
 		T          accum_n {};        // accumulated normal impulse magnitude (>= 0)
 		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
 		T          impact_speed {};   // approach speed at TOI; drives restitution target
-		T          separation {};     // signed gap along normal at discovery: 0 touching, <0 penetrating (see pipeline_reorder_plan.md)
+		T          separation {};     // signed gap along normal at discovery: 0 touching, <0 penetrating (speculative target)
 		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
 		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
 	};
@@ -135,6 +149,20 @@ public:
 	int get_collide_with_scope() const { return collide_with_scope_; }
 	void set_trigger_scope(int s) { trigger_scope_ = s; }
 	int get_trigger_scope() const { return trigger_scope_; }
+
+	// Contact-resolution strategy for this body (see contact_mode). New bodies
+	// inherit the simulator's default (simulator::set_default_contact_mode) when
+	// added; call this to override an individual body — e.g. a sweep_slide
+	// character moving among speculative balls.
+	void set_contact_mode(contact_mode m) { contact_mode_ = m; }
+	contact_mode get_contact_mode() const { return contact_mode_; }
+	// True when this body is resolved by the speculative solve: its position is
+	// committed in the simulator's Pass B (from the solved velocity + NGS
+	// correction) rather than during the Pass A swept move, and it absorbs NGS
+	// position correction. The single predicate the per-body dispatch keys on, so a
+	// future third mode forces one explicit decision here rather than silently
+	// falling between the Pass A / Pass B branches.
+	bool uses_speculative_solve() const { return contact_mode_ == contact_mode::speculative; }
 
 	// Mass
 	void set_mass(T mass) {
@@ -297,6 +325,7 @@ private:
 	vec3<T> force_;
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
+	contact_mode contact_mode_ = contact_mode::sweep_slide;  // positioning strategy (see contact_mode)
 	aa_box<T> world_bound_;       // broad phase reads this
 	aa_box<T> local_bound_;
 	std::vector<typename shape<T>::ptr> shapes_;

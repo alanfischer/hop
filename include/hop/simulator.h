@@ -103,13 +103,14 @@ public:
 	void set_max_collision_iterations(int n) { max_collision_iterations_ = n > 0 ? n : 1; }
 	int get_max_collision_iterations() const { return max_collision_iterations_; }
 
-	// Speculative-contacts pipeline (opt-in; default off). When on, the tick runs
-	// discover -> solve -> integrate (semi-implicit Euler) instead of the default
-	// integrate -> snap -> solve, so contacts are resolved at the velocity level
-	// before the body moves and resting piles dissipate to true rest. See
-	// docs/pipeline_reorder_plan.md.
-	void set_speculative_contacts(bool on) { speculative_contacts_ = on; }
-	bool get_speculative_contacts() const { return speculative_contacts_; }
+	// Contact resolution is a per-body property (solid::set_contact_mode); the
+	// simulator has no global pipeline switch. This sets the default mode stamped
+	// onto bodies as they are added (add_solid), so a scene that wants one strategy
+	// throughout sets it once here; mixed scenes override individual bodies. Default
+	// is sweep_slide (the swept collide-and-slide path). See contact_mode and
+	// solid::set_contact_mode.
+	void set_default_contact_mode(contact_mode m) { default_contact_mode_ = m; }
+	contact_mode get_default_contact_mode() const { return default_contact_mode_; }
 
 	// Shock-propagation passes appended to the speculative velocity solve (see
 	// spec_shock_iters_). Lets a deep pile transmit support to the floor without
@@ -140,6 +141,7 @@ public:
 		solids_.push_back(s);
 		s->internal_set_simulator(this);
 		s->solve_id_ = next_solve_id_++;  // stable canonical-ordering key (see solid::solve_id_)
+		s->set_contact_mode(default_contact_mode_);  // per-body default; override after add_solid
 		s->activate();
 		spacial_collection_.resize(solids_.size());
 	}
@@ -230,47 +232,50 @@ public:
 			return s;
 		};
 
-		if (speculative_contacts_) {
-			// Speculative pipeline: discover -> solve -> integrate.
-			// Pass A integrates velocity and discovers contacts with every body
-			// still at its old position (a consistent, order-independent snapshot);
-			// nothing moves yet.
-			for (size_t ii = 0; ii < num; ++ii) {
-				solid<T> * s = select(ii);
-				if (!s) continue;
-				if (manager_) manager_->pre_update(s, dt);
+		// Pass A: integrate every body, dispatching on its contact mode. A
+		// sweep_slide body resolves and commits its position now (integrate -> sweep
+		// -> snap -> slide); a speculative body integrates velocity and discovers
+		// contacts at its frame-start position without moving — its position is
+		// committed in Pass B. `any_speculative` records whether the NGS position
+		// pass and shock propagation have work to do; a scene with no speculative
+		// body behaves exactly as the legacy swept pipeline did.
+		bool any_speculative = false;
+		for (size_t ii = 0; ii < num; ++ii) {
+			solid<T> * s = select(ii);
+			if (!s) continue;
+			if (manager_) manager_->pre_update(s, dt);
+			if (s->uses_speculative_solve()) {
+				any_speculative = true;
 				integrate_and_discover(s, dt);
-			}
-			solve_contacts(dt);
-			// Iterative NGS position solver: remove residual penetration the
-			// velocity solve leaves under load, as a pseudo-position correction
-			// (no velocity change → no energy added). Bodies are still at their
-			// frame-start positions; commit_solid folds in both v*dt and the
-			// accumulated correction.
-			correct_positions();
-			// Pass B commits each body's position from its solved velocity, then
-			// handles deactivation and the manager's post-update.
-			for (size_t ii = 0; ii < num; ++ii) {
-				solid<T> * s = select(ii);
-				if (!s) continue;
-				commit_solid(s, dt);
-				if (manager_) manager_->post_update(s, dt);
-			}
-		} else {
-			for (size_t ii = 0; ii < num; ++ii) {
-				solid<T> * s = select(ii);
-				if (!s) continue;
-				if (manager_) manager_->pre_update(s, dt);
+			} else {
 				update_solid(s, dt);
 				if (manager_) manager_->post_update(s, dt);
 			}
+		}
 
-			// Pass B: with all bodies integrated and their contact caches populated
-			// (or refreshed), redistribute velocities across the touched-pair graph.
-			// This is where stacking force propagation lives — a body's update can
-			// only see its own contacts in isolation; the global sweep is what
-			// lets the bottom of a column know about the weight on top of it.
-			solve_contacts(dt);
+		// Global velocity solve over the touched-pair graph: stacking force
+		// propagates here and impulses are exchanged at each body's real mass —
+		// including between a sweep_slide body and speculative bodies, so a
+		// sweep_slide character is pushed by speculative balls normally. The target
+		// is unified (see solve_contacts); the flag gates only its speculative-only
+		// shock-propagation phase.
+		solve_contacts(dt, any_speculative);
+
+		if (any_speculative) {
+			// Remove residual penetration the velocity solve leaves under load as a
+			// pseudo-position correction (no velocity change → no energy added). Acts
+			// on speculative bodies only — sweep_slide bodies placed themselves in
+			// Pass A — so a speculative body takes the whole correction against a
+			// sweep_slide partner. commit_solid folds the correction into the move.
+			correct_positions();
+			// Pass B: commit each speculative body's position; sweep_slide bodies
+			// already committed (and ran post_update) in Pass A.
+			for (size_t ii = 0; ii < num; ++ii) {
+				solid<T> * s = select(ii);
+				if (!s || !s->uses_speculative_solve()) continue;
+				commit_solid(s, dt);
+				if (manager_) manager_->post_update(s, dt);
+			}
 		}
 
 		report_collisions();
@@ -279,9 +284,9 @@ public:
 	}
 
 	void update_solid(solid<T> * solid_ptr, T dt);
-	// Speculative pipeline (see set_speculative_contacts). Pass A integrates
-	// velocity and discovers contacts without moving the body; Pass B commits the
-	// position from the solved velocity and handles deactivation.
+	// Speculative path (contact_mode::speculative). Pass A integrates velocity and
+	// discovers contacts without moving the body; Pass B commits the position from
+	// the solved velocity and handles deactivation.
 	void integrate_and_discover(solid<T> * solid_ptr, T dt);
 	void commit_solid(solid<T> * solid_ptr, T dt);
 	// Iterative non-linear Gauss–Seidel position solver (speculative pipeline):
@@ -380,7 +385,7 @@ private:
 		deactivate_speed_ = tr::one() * tr::from_milli(200); // 0.2
 		deactivate_count_ = 32;
 		micro_collision_threshold_ = tr::one() * tr::from_milli(1000); // 1.0
-		// Speculative-contacts tuning (only used when speculative_contacts_ is on).
+		// Speculative-contacts tuning (consulted only for contact_mode::speculative bodies).
 		spec_margin_ = epsilon_ * tr::from_int(8);  // discover contacts this far past the predicted motion
 		spec_slop_ = epsilon_;                       // penetration tolerated without correction (anti-jitter)
 		spec_pos_baumgarte_ = tr::from_milli(800);   // 0.8 — fraction of penetration removed per NGS iteration
@@ -414,7 +419,9 @@ private:
 	// Find an existing cache slot for (s, partner) or nullptr.
 	typename solid<T>::touch * find_touch(solid<T> * s, solid<T> * partner);
 
-	void solve_contacts(T dt);
+	// has_speculative gates the speculative-only shock-propagation phase (true when
+	// any body resolved this tick uses the speculative solve).
+	void solve_contacts(T dt, bool has_speculative);
 
 	void integration_step(solid<T> * s,
 	                      const vec3<T> & x,
@@ -489,16 +496,9 @@ private:
 	std::vector<int> shock_order_;
 	std::vector<T> shock_key_;
 	std::vector<solid<T> *> shock_lo_;
-	// Iteration budget for solve_contacts' Gauss–Seidel sweeps. Each sweep
-	// propagates one layer of impulse through the contact graph. Historically
-	// this had to be ≳ the tallest pile, since transmitting gravity load to the
-	// floor took ~depth sweeps; under the speculative pipeline that job is now
-	// done in O(1) by the shock-propagation phase (spec_shock_iters_), so this
-	// budget no longer needs to scale with stack depth — it governs friction /
-	// lateral-constraint convergence and how fast a pile settles to sleep. (The
-	// legacy non-speculative path still relies on it for depth, so the shared
-	// default stays conservative.) Warm-starting keeps steady-state cost low.
-	bool speculative_contacts_ = false;
+	// Default contact mode stamped onto bodies in add_solid (per-body overridable;
+	// see set_default_contact_mode / solid::set_contact_mode).
+	contact_mode default_contact_mode_ = contact_mode::sweep_slide;
 	T spec_margin_ {};         // discover contacts up to this far beyond the predicted motion
 	T spec_slop_ {};           // penetration tolerated without correction (kills resting jitter)
 	T spec_pos_baumgarte_ {};  // fraction of remaining penetration removed per NGS position iteration
@@ -510,6 +510,15 @@ private:
 	// sweeps to hold a tall pile (which otherwise compresses into penetration and
 	// never sleeps). 0 disables it.
 	int spec_shock_iters_ = 2;
+	// Iteration budget for solve_contacts' Gauss–Seidel sweeps. Each sweep
+	// propagates one layer of impulse through the contact graph. Historically this
+	// had to be ≳ the tallest pile, since transmitting gravity load to the floor
+	// took ~depth sweeps; for speculative bodies that job is now done in O(1) by the
+	// shock-propagation phase (spec_shock_iters_), so this budget no longer needs to
+	// scale with stack depth — it governs friction / lateral-constraint convergence
+	// and how fast a pile settles to sleep. (The sweep_slide path still relies on it
+	// for depth, so the shared default stays conservative.) Warm-starting keeps
+	// steady-state cost low.
 	int solver_iterations_ = 16;
 	// Sub-step budget for update_solid's swept-collision slide loop. Was a
 	// hard-coded 5; raised to give a fast body room to resolve more colliders
@@ -741,11 +750,12 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			}
 
 			if (hit_solid && !responded) {
-				// Signed gap along the contact normal. Today the body has already
-				// been snapped/pushed to the contact, so this is 0 at a clean TOI
-				// touch and -depth when separating an existing overlap. Recorded
-				// but not yet consumed; the speculative reorder will measure it
-				// pre-move instead (see docs/pipeline_reorder_plan.md).
+				// Signed gap along the contact normal. The sweep_slide body has
+				// already been snapped/pushed to the contact, so this is 0 at a clean
+				// TOI touch and -depth when separating an existing overlap. Because
+				// gap <= slop, the unified velocity target in solve_contacts reduces to
+				// the legacy restitution response for this contact (the speculative
+				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
 				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, impact_speed, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
@@ -1125,11 +1135,13 @@ template <typename T> void simulator<T>::correct_positions() {
 	}
 	for (int iter = 0; iter < spec_pos_iters_; ++iter) {
 		for (auto & p : contact_pairs_) {
-			// Sleeping (and static) bodies are immovable supports: treat their
-			// inverse mass as zero so an awake body takes the whole correction, and
-			// we never write a correction to a body that won't commit it.
-			T inv_a = p.a->active_ ? p.inv_ma : zero;
-			T inv_b = p.b->active_ ? p.inv_mb : zero;
+			// Only an awake speculative body absorbs correction here: sleeping/static
+			// bodies and sweep_slide bodies are immovable supports (a sweep_slide body
+			// never folds pos_correction_ — it placed itself in Pass A — so giving it a
+			// share would silently drop that correction). Zero their inverse mass so a
+			// speculative body takes the whole correction against such a partner.
+			T inv_a = (p.a->active_ && p.a->uses_speculative_solve()) ? p.inv_ma : zero;
+			T inv_b = (p.b->active_ && p.b->uses_speculative_solve()) ? p.inv_mb : zero;
 			T inv_sum = inv_a + inv_b;
 			if (inv_sum <= zero)
 				continue;
@@ -1428,7 +1440,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 }
 
 template <typename T>
-void simulator<T>::solve_contacts(T dt) {
+void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	const T zero_val {};
 	const T one = tr::one();
 	// Used by the speculative target to convert a separation distance into an
@@ -1549,34 +1561,34 @@ void simulator<T>::solve_contacts(T dt) {
 		// Restitution target and the λ mass-scale are constant across all GS
 		// sweeps for this pair, so derive them once here rather than per
 		// iteration in the hot loop below.
-		if (speculative_contacts_) {
-			// Speculative target, by collision class:
-			//  - genuinely closing (vn0 below -micro): restitution bounce, even with
-			//    a gap still remaining (the discovery pass is speculative, so a fast
-			//    body is found before it reaches the surface);
-			//  - slow approach with a gap: cap so the body closes at most the gap
-			//    this tick (vn >= -(gap - slop)/dt), stopping fast bodies short of
-			//    tunneling, with no bounce;
-			//  - at/inside the contact and not closing (resting pile): drive vn to 0.
-			// Existing penetration is removed positionally by correct_positions
-			// (NGS), not here, so the velocity solve adds no energy.
-			const T gap = p.separation;
-			if (-p.vn0 > micro_collision_threshold_) {
-				// Genuine closing collision: bounce at cor times the inbound speed
-				// even when a speculative gap still remains. Withholding restitution
-				// until gap<=slop (as this once did) let the approach cap below bleed
-				// off the entire inbound velocity first, so the body reached the
-				// surface with ~zero closing speed and never bounced. cor<=1 keeps
-				// |target|<=|vn0|, so restitution stays dissipative; the micro
-				// threshold lets a slow, settling body fall through to the cap.
-				p.target = -p.cor * p.vn0;
-			} else if (gap > spec_slop_) {
-				p.target = -(gap - spec_slop_) * inv_dt;
-			} else {
-				p.target = zero_val;
-			}
+		// Unified speculative target, by collision class. It is mode-agnostic: a
+		// sweep_slide body has already been snapped to its contact, so its recorded
+		// gap is <= slop and only the first and third branches can fire — exactly the
+		// legacy `(-vn0 > micro) ? -cor*vn0 : 0` target. A speculative body can also
+		// carry a positive gap (margin-shell discovery) and take the middle branch.
+		//  - genuinely closing (vn0 below -micro): restitution bounce, even with a
+		//    gap still remaining (discovery is speculative, so a fast body is found
+		//    before it reaches the surface);
+		//  - slow approach with a gap: cap so the body closes at most the gap this
+		//    tick (vn >= -(gap - slop)/dt), stopping fast bodies short of tunneling,
+		//    with no bounce;
+		//  - at/inside the contact and not closing (resting pile): drive vn to 0.
+		// Existing penetration is removed positionally by correct_positions (NGS),
+		// not here, so the velocity solve adds no energy.
+		const T gap = p.separation;
+		if (-p.vn0 > micro_collision_threshold_) {
+			// Genuine closing collision: bounce at cor times the inbound speed even
+			// when a speculative gap still remains. Withholding restitution until
+			// gap<=slop (as this once did) let the approach cap below bleed off the
+			// entire inbound velocity first, so the body reached the surface with
+			// ~zero closing speed and never bounced. cor<=1 keeps |target|<=|vn0|, so
+			// restitution stays dissipative; the micro threshold lets a slow,
+			// settling body fall through to the cap.
+			p.target = -p.cor * p.vn0;
+		} else if (gap > spec_slop_) {
+			p.target = -(gap - spec_slop_) * inv_dt;
 		} else {
-			p.target = (-p.vn0 > micro_collision_threshold_) ? -p.cor * p.vn0 : zero_val;
+			p.target = zero_val;
 		}
 		p.friction_scale = (p.inv_m_sum > zero_val) ? -one / p.inv_m_sum : zero_val;
 	}
@@ -1725,7 +1737,7 @@ void simulator<T>::solve_contacts(T dt) {
 	// gas has no stacking chain to propagate, so skip it).
 	const bool have_gravity =
 	    gravity_.x != zero_val || gravity_.y != zero_val || gravity_.z != zero_val;
-	if (speculative_contacts_ && spec_shock_iters_ > 0 && npairs > 0 && have_gravity) {
+	if (has_speculative && spec_shock_iters_ > 0 && npairs > 0 && have_gravity) {
 		// A body is a standing anchor from the outset if it can't move (static /
 		// infinite mass) or is asleep (a settled lower layer supporting the rest).
 		auto pre_frozen = [zero_val](const solid<T> * s, T inv_m) {
