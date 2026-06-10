@@ -75,7 +75,7 @@ int main(int argc, char ** argv) {
 	sim.set_deactivate_speed(tr::from_milli((int)(DS*1000)));
 	sim.set_solver_iterations(ITERS);
 	sim.set_average_normals(AN != 0);
-	sim.set_speculative_contacts(SPEC != 0);
+	sim.set_default_contact_mode(SPEC != 0 ? hop::contact_mode::speculative : hop::contact_mode::sweep_slide);
 	if (PI >= 0) sim.set_position_iterations(PI);
 	if (SI >= 0) sim.set_shock_iterations(SI);
 	if (MC >= 0) sim.set_micro_collision_threshold(ff(MC));
