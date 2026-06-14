@@ -261,7 +261,8 @@ include/hop/
     gjk.h                # GJK closest-point distance + conservative-advancement sweep
     intersect.h          # intersection tests
     bounding.h           # bounding box computation
-    project.h            # point/segment projection
+    project.h            # point/segment projection + segment-segment closest points
+    triangle.h           # point/segment-vs-triangle closest points
 ```
 
 ## License

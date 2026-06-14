@@ -1,5 +1,6 @@
 #pragma once
 
+#include <hop/math/triangle.h>
 #include <hop/math/vec3.h>
 #include <hop/scalar_traits.h>
 
@@ -35,71 +36,13 @@ inline void gjk_acc(vec3<T> & r, const vec3<T> & a, T c) {
 	r.z += a.z * c;
 }
 
-// Closest point to the origin on a triangle (a,b,c). Returns barycentric
-// weights in bary[0..2] (sum to 1). Christer Ericson, Real-Time Collision
-// Detection, ClosestPtPointTriangle.
+// Closest point to the origin on a triangle (a,b,c), as barycentric weights —
+// the closest-to-origin specialization of math/triangle.h's closest_point_triangle.
 template <typename T>
 inline void gjk_closest_triangle(const vec3<T> & a, const vec3<T> & b, const vec3<T> & c, T bary[3]) {
-	using tr = scalar_traits<T>;
-	const T zero {};
-	const T one = tr::one();
-
-	vec3<T> ab, ac, ap;
-	sub(ab, b, a);
-	sub(ac, c, a);
-
-	// Vertex region A
-	neg(ap, a); // ap = origin - a = -a
-	T d1 = dot(ab, ap);
-	T d2 = dot(ac, ap);
-	if (d1 <= zero && d2 <= zero) {
-		bary[0] = one; bary[1] = zero; bary[2] = zero;
-		return;
-	}
-	// Vertex region B
-	vec3<T> bp;
-	neg(bp, b);
-	T d3 = dot(ab, bp);
-	T d4 = dot(ac, bp);
-	if (d3 >= zero && d4 <= d3) {
-		bary[0] = zero; bary[1] = one; bary[2] = zero;
-		return;
-	}
-	// Edge region AB
-	T vc = d1 * d4 - d3 * d2;
-	if (vc <= zero && d1 >= zero && d3 <= zero) {
-		T v = d1 / (d1 - d3);
-		bary[0] = one - v; bary[1] = v; bary[2] = zero;
-		return;
-	}
-	// Vertex region C
-	vec3<T> cp;
-	neg(cp, c);
-	T d5 = dot(ab, cp);
-	T d6 = dot(ac, cp);
-	if (d6 >= zero && d5 <= d6) {
-		bary[0] = zero; bary[1] = zero; bary[2] = one;
-		return;
-	}
-	// Edge region AC
-	T vb = d5 * d2 - d1 * d6;
-	if (vb <= zero && d2 >= zero && d6 <= zero) {
-		T w = d2 / (d2 - d6);
-		bary[0] = one - w; bary[1] = zero; bary[2] = w;
-		return;
-	}
-	// Edge region BC
-	T va = d3 * d6 - d5 * d4;
-	if (va <= zero && (d4 - d3) >= zero && (d5 - d6) >= zero) {
-		T w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-		bary[0] = zero; bary[1] = one - w; bary[2] = w;
-		return;
-	}
-	// Face region
-	T denom = one / (va + vb + vc);
-	T v = vb * denom;
-	T w = vc * denom;
-	bary[0] = one - v - w; bary[1] = v; bary[2] = w;
+	vec3<T> origin;
+	origin.reset();
+	closest_point_triangle(origin, a, b, c, bary);
 }
 
 // True if the origin lies on the inner side of plane (a,b,c) — the side that

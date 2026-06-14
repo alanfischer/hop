@@ -18,6 +18,7 @@
 #include <hop/math/project.h>
 #include <hop/math/segment.h>
 #include <hop/math/sphere.h>
+#include <hop/math/triangle.h>
 #include <hop/math/vec3.h>
 
 #include <hop/bvh.h>

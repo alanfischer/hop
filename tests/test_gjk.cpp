@@ -335,6 +335,40 @@ template <typename T> static void test_ca_custom_closest(const char * label) {
 	printf("OK\n");
 }
 
+// math/triangle.h primitives (relocated out of the hop-godot trimesh traceable):
+// point-vs-triangle and segment-vs-triangle closest distance.
+template <typename T> static void test_triangle_primitives(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  triangle_primitives[%s]: ", label);
+	// Triangle in the y=0 plane.
+	vec3<T> a = v3<T>(0, 0, 0), b = v3<T>(1, 0, 0), c = v3<T>(0, 0, 1);
+
+	// Point above the interior projects straight down onto the face.
+	vec3<T> cp;
+	closest_point_triangle(cp, v3<T>(0.2f, 5, 0.2f), a, b, c);
+	assert(std::fabs(tr::to_float(cp.x) - 0.2f) < 0.02f);
+	assert(std::fabs(tr::to_float(cp.y)) < 0.02f);
+	assert(std::fabs(tr::to_float(cp.z) - 0.2f) < 0.02f);
+
+	// Point beyond vertex B resolves to B.
+	closest_point_triangle(cp, v3<T>(3, 2, 0), a, b, c);
+	assert(std::fabs(tr::to_float(cp.x) - 1.0f) < 0.02f && std::fabs(tr::to_float(cp.z)) < 0.02f);
+
+	// Segment piercing the triangle interior → distance 0.
+	vec3<T> cs, ct;
+	T d2 = closest_segment_triangle(v3<T>(0.2f, 1, 0.2f), v3<T>(0.2f, -1, 0.2f),
+	                                a, b, c, cs, ct, tr::from_milli(1));
+	assert(tr::to_float(d2) < 0.01f);
+
+	// Segment held 1 unit above the interior → squared distance 1, contact on face.
+	d2 = closest_segment_triangle(v3<T>(0.2f, 1, 0.2f), v3<T>(0.3f, 1, 0.3f),
+	                              a, b, c, cs, ct, tr::from_milli(1));
+	printf("d2_above=%.3f ", tr::to_float(d2));
+	assert(std::fabs(tr::to_float(d2) - 1.0f) < 0.05f);
+	assert(std::fabs(tr::to_float(ct.y)) < 0.02f); // closest tri point is on the face
+	printf("OK\n");
+}
+
 template <typename T> static void run_gjk_tests(const char * label) {
 	printf(" [%s]\n", label);
 	test_gjk_sphere_drop<T>(label);
@@ -350,6 +384,7 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_gjk_rest_tangential_free<T>(label);
 	test_gjk_penetration_reports<T>(label);
 	test_ca_custom_closest<T>(label);
+	test_triangle_primitives<T>(label);
 }
 
 int main() {
