@@ -307,6 +307,34 @@ template <typename T> static void test_gjk_penetration_reports(const char * labe
 	printf("OK\n");
 }
 
+// conservative_advance is a shared primitive: it owns the swept-contact
+// semantics (penetration / block-only-when-approaching / undershoot) and takes
+// any closest-distance functor. gjk_sweep feeds it a GJK simplex; the trimesh
+// path feeds it an analytic segment-vs-triangle test. Drive it here with a
+// hand-written analytic functor (distance to the plane y=0) to guard that
+// contract independently of GJK.
+template <typename T> static void test_ca_custom_closest(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  ca_custom_closest[%s]: ", label);
+	// A radius-0.5 mover dropping from y=3 toward the plane y=0 along -Y.
+	const T radius = tr::from_milli(500);
+	gjk_sweep_result<T> r;
+	conservative_advance<T>(r, v3<T>(0, -3, 0), radius, tr::from_milli(1),
+	    [&](const vec3<T> & xA, const vec3<T> & /*seed*/, T & dist, vec3<T> & n, bool & deep) {
+		    deep = false;
+		    dist = tr::from_int(3) + xA.y; // height above the plane (start y=3)
+		    n.reset();
+		    n.y = tr::one(); // plane normal, toward the mover
+	    });
+	float t = tr::to_float(r.time);
+	float ny = tr::to_float(r.normal.y);
+	printf("hit=%d t=%.3f ny=%.3f ", r.hit, t, ny);
+	assert(r.valid && r.hit);
+	assert(ny > 0.99f);             // plane normal
+	assert(t > 0.79f && t < 0.85f); // contact when height == 0.5 → t ≈ 0.833
+	printf("OK\n");
+}
+
 template <typename T> static void run_gjk_tests(const char * label) {
 	printf(" [%s]\n", label);
 	test_gjk_sphere_drop<T>(label);
@@ -321,6 +349,7 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_gjk_flag_switches_path<T>(label);
 	test_gjk_rest_tangential_free<T>(label);
 	test_gjk_penetration_reports<T>(label);
+	test_ca_custom_closest<T>(label);
 }
 
 int main() {

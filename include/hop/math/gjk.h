@@ -302,12 +302,26 @@ struct gjk_sweep_result {
 	vec3<T> normal; // outward from B toward A (the mover), world space
 };
 
-// Sweep shape A (support `supportA`, at its start placement, moving by `motion`)
-// against static shape B (support `supportB`). combined_radius is the sum of the
-// rounded margins (sphere/capsule radii) plus any query margin.
-template <typename T, typename SupA, typename SupB>
-inline void gjk_sweep(gjk_sweep_result<T> & res, SupA && supportA, SupB && supportB,
-                      const vec3<T> & motion, T combined_radius, T epsilon) {
+// Conservative advancement of a rounded shape sweeping by `motion` against a
+// static target, given a `closest` callable that reports the core (radius-
+// excluded) separation at a candidate offset:
+//
+//   closest(const vec3<T> & xA, const vec3<T> & seed, T & dist, vec3<T> & n, bool & deep)
+//     xA   — the sweep offset to apply to the moving shape this step
+//     seed — a warm-start search direction (the previous step's normal)
+//     dist — core distance between the shapes at xA (>= 0)
+//     n    — unit contact normal, outward from the target toward the mover
+//     deep — set when the cores genuinely interpenetrate (no usable normal)
+//
+// This owns the swept-contact *semantics* shared by every narrowphase pair:
+// penetration reporting, the "block only on an approaching contact" rule, the
+// tolerance, and the half-tolerance undershoot. The closest-point *method* is
+// the caller's choice — GJK simplex for general convex (gjk_sweep), or an
+// analytic segment-vs-triangle test for a trimesh. combined_radius is the sum of
+// the rounded margins (sphere/capsule radii) plus any query margin.
+template <typename T, typename ClosestFn>
+inline void conservative_advance(gjk_sweep_result<T> & res, const vec3<T> & motion,
+                                 T combined_radius, T epsilon, ClosestFn && closest) {
 	using tr = scalar_traits<T>;
 	const T zero {};
 	const T one = tr::one();
@@ -325,9 +339,8 @@ inline void gjk_sweep(gjk_sweep_result<T> & res, SupA && supportA, SupB && suppo
 	// scale-free — only a motion almost parallel to the surface counts as tangent.
 	const T motion_len = length(motion);
 	const T tangential_cut = motion_len * tr::from_milli(1);
-	// Warm-start the first GJK with an arbitrary axis; subsequent conservative-
-	// advancement steps reuse the previous step's normal, so each GJK starts
-	// near the answer and converges in a couple of iterations.
+	// Warm-start with an arbitrary axis; subsequent steps reuse the previous
+	// step's normal, so an iterative closest-point method starts near the answer.
 	vec3<T> seed;
 	seed.reset();
 	seed.x = one;
@@ -336,13 +349,13 @@ inline void gjk_sweep(gjk_sweep_result<T> & res, SupA && supportA, SupB && suppo
 	const int max_ca = 32;
 	for (int iter = 0; iter < max_ca; ++iter) {
 		vec3<T> xA;
-		mul(xA, motion, t); // A's sweep offset at this TOI
+		mul(xA, motion, t); // mover's sweep offset at this TOI
 		T dist;
-		vec3<T> n; // outward from B toward A (unit)
+		vec3<T> n; // outward from the target toward the mover (unit)
 		bool deep = false;
-		gjk_core_distance<T>(supportA, supportB, xA, seed, epsilon, dist, n, deep);
+		closest(xA, seed, dist, n, deep);
 		if (deep) {
-			res.valid = false; // deep core overlap — let the inflate path recover
+			res.valid = false; // deep core overlap — let the caller's fallback recover
 			return;
 		}
 		if (length_squared(n) < eps2) {
@@ -366,14 +379,12 @@ inline void gjk_sweep(gjk_sweep_result<T> & res, SupA && supportA, SupB && suppo
 		}
 
 		// Only a contact the motion moves *into* can block a swept query. A
-		// tangential or separating contact (approach <= 0) must NOT stop the sweep,
-		// or a body resting on a convex surface sticks at t == 0 and can't slide,
-		// walk, or step off the edge. Convex targets have no re-entrant features, so
-		// a non-approaching contact here means nothing ahead blocks either. (This
-		// matches the plane-inflation path, where a tangential ray never enters the
-		// inflated convex.) Resting/ground contact is reported separately by the
-		// caller's dedicated down-probe, not by this motion cast.
-		T approach = -dot(motion, n); // gap closes at rate `approach` (n points B->A)
+		// tangential or separating contact must NOT stop the sweep, or a body
+		// resting on a surface sticks at t == 0 and can't slide, walk, or step off
+		// the edge. (This matches the plane-inflation path, where a tangential ray
+		// never enters the inflated convex.) Resting/ground contact is reported
+		// separately by the caller's dedicated down-probe, not by this motion cast.
+		T approach = -dot(motion, n); // gap closes at rate `approach` (n points target->mover)
 		if (approach <= tangential_cut) {
 			res.hit = false;
 			res.time = one;
@@ -389,7 +400,7 @@ inline void gjk_sweep(gjk_sweep_result<T> & res, SupA && supportA, SupB && suppo
 			return;
 		}
 		// Undershoot by half the tolerance so the next evaluation lands while the
-		// shapes are still cleanly separated — at exact contact the simplex
+		// shapes are still cleanly separated — at exact contact the closest feature
 		// collapses to an edge/vertex and the recovered normal tilts. Stopping a
 		// hair short keeps it on the contacting face.
 		T dt = (sep - tol * tr::half()) / approach;
@@ -405,6 +416,18 @@ inline void gjk_sweep(gjk_sweep_result<T> & res, SupA && supportA, SupB && suppo
 	// Did not converge within the iteration budget — be conservative, no hit.
 	res.hit = false;
 	res.time = one;
+}
+
+// Sweep shape A (support `supportA`, at its start placement, moving by `motion`)
+// against static shape B (support `supportB`), using GJK for the closest-point
+// step. combined_radius is the sum of the rounded margins plus any query margin.
+template <typename T, typename SupA, typename SupB>
+inline void gjk_sweep(gjk_sweep_result<T> & res, SupA && supportA, SupB && supportB,
+                      const vec3<T> & motion, T combined_radius, T epsilon) {
+	conservative_advance(res, motion, combined_radius, epsilon,
+	    [&](const vec3<T> & xA, const vec3<T> & seed, T & dist, vec3<T> & n, bool & deep) {
+		    gjk_core_distance<T>(supportA, supportB, xA, seed, epsilon, dist, n, deep);
+	    });
 }
 
 } // namespace hop
