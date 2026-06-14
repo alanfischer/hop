@@ -59,6 +59,14 @@ public:
 	void set_average_normals(bool a) { average_normals_ = a; }
 	bool get_average_normals() const { return average_normals_; }
 
+	// Narrowphase mode for rounded-shape (sphere/capsule) vs polytope
+	// (convex_solid/box) pairs. true (default): accurate GJK closest-point sweep
+	// — correct edge/vertex normals (ledge ride-up) and bounded. false: the cheap
+	// plane-inflation / AABB-expansion path — faster, but face-normals-only at
+	// edges. Zero-radius polytope pairs always use the cheap path regardless.
+	void set_accurate_narrowphase(bool a) { accurate_narrowphase_ = a; }
+	bool get_accurate_narrowphase() const { return accurate_narrowphase_; }
+
 	void set_max_position_component(T v) { max_position_component_ = v; }
 	T get_max_position_component() const { return max_position_component_; }
 	void set_max_velocity_component(T v) { max_velocity_component_ = v; }
@@ -338,7 +346,7 @@ public:
 		hop::test_segment(result, seg, s, epsilon_);
 	}
 	void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T margin = T {}) {
-		hop::test_solid(result, s1, seg, s2, epsilon_, margin);
+		hop::test_solid(result, s1, seg, s2, epsilon_, margin, accurate_narrowphase_);
 	}
 
 	// Utility
@@ -437,6 +445,7 @@ private:
 	vec3<T> gravity_;
 	T epsilon_ {};
 	bool average_normals_ = true;
+	bool accurate_narrowphase_ = true;
 	// Set by trace_solid_with_current_spacials: the un-blended normal of the
 	// contact's first collider (c.collider). When average_normals blends several
 	// colliders into c.normal, this still carries c.collider's true normal, which

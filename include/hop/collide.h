@@ -2,6 +2,7 @@
 
 #include <hop/collision.h>
 #include <hop/math/bounding.h>
+#include <hop/math/gjk.h>
 #include <hop/math/intersect.h>
 #include <hop/math/project.h>
 #include <hop/math/support.h>
@@ -397,6 +398,107 @@ void trace_inverted_convex(collision<T> & col,
 	}
 }
 
+// Core (radius-excluded) support point of a primitive shape in world space,
+// for the GJK path: base = solid_position + shape_local_position. Sphere /
+// capsule contribute only their skeleton (point / segment); their radius is
+// handled by gjk_sweep as a combined margin. This is the shape-type dispatch
+// that keeps math/gjk.h shape-agnostic.
+template <typename T>
+inline void gjk_core_support(vec3<T> & out, const shape<T> * sh, const vec3<T> & base, const vec3<T> & dir) {
+	switch (sh->get_type()) {
+		case shape_type::box:
+			support(out, sh->get_box(), dir);
+			break;
+		case shape_type::sphere:
+			out = sh->get_sphere().origin;
+			break;
+		case shape_type::capsule: {
+			const auto & c = sh->get_capsule();
+			vec3<T> end;
+			add(end, c.origin, c.direction);
+			out = (dot(end, dir) > dot(c.origin, dir)) ? end : c.origin;
+			break;
+		}
+		case shape_type::convex_solid:
+			support(out, sh->get_convex_solid(), dir);
+			break;
+		default:
+			out.reset();
+			break;
+	}
+	add(out, base);
+}
+
+template <typename T>
+inline T gjk_core_radius(const shape<T> * sh) {
+	switch (sh->get_type()) {
+		case shape_type::sphere:
+			return sh->get_sphere().radius;
+		case shape_type::capsule:
+			return sh->get_capsule().radius;
+		default:
+			return T {};
+	}
+}
+
+inline bool is_rounded_shape(shape_type t) { return t == shape_type::sphere || t == shape_type::capsule; }
+inline bool is_polytope_shape(shape_type t) { return t == shape_type::box || t == shape_type::convex_solid; }
+
+// The pairs the GJK path owns: exactly one side rounded (sphere/capsule), the
+// other a polytope (box/convex). Rounded×rounded keeps its exact analytic
+// solver (trace_sphere/capsule); polytope×polytope keeps the cheap inflation
+// path (zero combined radius would make GJK resolve contact at dist≈0, which
+// loses precision in fixed-point). The non-zero rounded radius is what keeps GJK
+// well-conditioned, so it is the defining property of eligibility — not a paste
+// pattern across branches.
+inline bool gjk_eligible_pair(shape_type a, shape_type b) {
+	return (is_rounded_shape(a) && is_polytope_shape(b)) || (is_polytope_shape(a) && is_rounded_shape(b));
+}
+
+// GJK closest-point sweep for a rounded-shape (sphere / capsule) vs polytope
+// (convex_solid or box) pair. Replaces the plane-inflation / AABB-expansion path
+// with a vertex-based conservative advancement: correct edge/vertex contact
+// normals (so a capsule rides up a thin ledge instead of hitting a fabricated
+// vertical wall) and bounded (an ill-formed or unbounded plane set can't
+// phantom-block, since the support function uses the finite vertex hull). A=s1
+// sweeps by seg.direction; B=s2 is static. Fills `col` (col.point is s1's
+// reference position at impact, matching the rest of test_solid) and returns
+// true. Returns false on deep core penetration, so the caller falls back to the
+// robust inflate/AABB path for recovery.
+//
+// test_solid dispatches here once, for the pairs gjk_eligible_pair() selects
+// (one rounded shape, one polytope). On a false return the caller's per-pair
+// fallback chain runs the cheap plane-inflation / AABB path; the `use_gjk` flag
+// on test_solid forces that path globally.
+template <typename T>
+inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
+                                  solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
+                                  const vec3<T> & lp1, const vec3<T> & lp2,
+                                  T margin, T epsilon) {
+	using tr = scalar_traits<T>;
+	vec3<T> base_a, base_b;
+	add(base_a, seg.origin, lp1);
+	add(base_b, s2->get_position(), lp2);
+	auto support_a = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh1, base_a, dir); };
+	auto support_b = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh2, base_b, dir); };
+	T combined_radius = gjk_core_radius(sh1) + gjk_core_radius(sh2) + margin;
+	gjk_sweep_result<T> res;
+	gjk_sweep<T>(res, support_a, support_b, seg.direction, combined_radius, epsilon);
+	if (!res.valid)
+		return false;
+	if (res.hit) {
+		col.time = res.time;
+		col.normal.set(res.normal);
+		col.depth = res.depth;
+		vec3<T> travel;
+		mul(travel, seg.direction, res.time);
+		add(col.point, seg.origin, travel);
+	} else {
+		col.time = tr::one();
+	}
+	return true;
+}
+
 // Intra-shape merge used by test_segment and test_solid. Unlike merge_collision
 // (inter-solid), this always averages normals at equal times — co-located shapes
 // on the same solid genuinely want the averaged normal. `modify_scope` is held
@@ -501,7 +603,7 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 // caller recovers the true signed gap as (margin − reported depth). Default 0 =
 // exact shapes, the behaviour every existing caller relies on.
 template <typename T>
-void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T epsilon, T margin = T {}) {
+void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T epsilon, T margin = T {}, bool use_gjk = true) {
 	using tr = scalar_traits<T>;
 	collision<T> col;
 	col.collider = s2;
@@ -562,6 +664,16 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(tr_origin, s2->get_position(), lp2);
 				sh2->get_traceable()->trace_solid(col, s1, tr_origin, seg, margin);
 				modify_scope = true;
+			}
+			// Accurate GJK for the rounded×polytope pairs (one decision, not a guard
+			// pasted into each branch). trace_pair_gjk is shape-agnostic — it reads
+			// both shapes via the support functions — so the eligible set is named
+			// once here. It declines (returns false) on deep core penetration, and
+			// is skipped when narrowphase is set cheap; either way we fall through to
+			// the per-pair fallback chain below.
+			else if (use_gjk && gjk_eligible_pair(sh1->get_type(), sh2->get_type())
+			         && trace_pair_gjk(col, seg, s2, sh1, sh2, lp1, lp2, margin, epsilon)) {
+				// handled by GJK
 			}
 			// AABox vs *
 			else if (sh1->get_type() == shape_type::box && sh2->get_type() == shape_type::box) {
@@ -682,10 +794,9 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				cap.set(origin, dir, sh1->get_capsule().radius + sh2->get_sphere().radius + margin);
 				trace_capsule(col, seg, cap, epsilon);
 			} else if (sh1->get_type() == shape_type::capsule && sh2->get_type() == shape_type::convex_solid) {
-				// Capsule support relative to its A endpoint: r + max(0, n·D).
-				// Inflate each plane and sweep A through the resulting convex —
-				// same recipe as sphere/box/convex × convex. Wrong normal near
-				// edges/vertices of the polyhedron, but never misses contacts.
+				// Fallback (deep core penetration): capsule support relative to its
+				// A endpoint, r + max(0, n·D). Inflate each plane and sweep A through
+				// the resulting convex. Wrong normal near edges, but recovers depth.
 				convex_solid<T> cs;
 				cs.set(sh2->get_convex_solid());
 				const vec3<T> & D = sh1->get_capsule().direction;
