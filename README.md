@@ -22,6 +22,7 @@ Rotational support is a work in progress — see `docs/rotation_plan.md` for the
 ## Features
 
 - **Swept collision detection** (continuous collision detection) for sphere, capsule, box, and convex solid shapes
+- **GJK closest-point narrowphase** for rounded-vs-polytope pairs — correct edge/vertex contact normals (a capsule rides up a thin ledge instead of catching on a fabricated wall) and vertex-bounded; switchable to a cheaper plane-inflation path via `set_accurate_narrowphase`
 - **Multiple numerical integrators**: Euler, Improved Euler, Heun (default), Runge-Kutta
 - **Collision response** with coefficient of restitution, conservation of momentum, and friction
 - **Stacking contact solver** — a post-integration Gauss–Seidel pass over the touched-pair graph (warm-started, with restitution targets and Coulomb-cone friction at the velocity level) lets resting piles transmit load and settle; iteration count is tunable via `set_solver_iterations`
@@ -73,6 +74,23 @@ See `HopTrimeshTraceable::trace_solid` in `hop-godot` for a reference implementa
 Traceable-vs-Traceable is not supported. Segment traces (raycasting) work against all shape types.
 
 **No cylinder primitive**: a cylinder's flat cap meets its curved side at a sharp circular edge. Sweeping any shape against that edge requires finding the intersection with a quarter-torus, which is a degree-4 polynomial — inconsistent with the quadratic math used everywhere else in hop, and impractical in fixed-point. Use a **capsule** instead: it is geometrically equivalent for collision purposes, and its hemispherical caps turn the hard rim problem into a smooth sphere test. If flat caps are required, a `convex_solid` approximation is available.
+
+### Narrowphase: accurate (GJK) vs cheap (inflation)
+
+For pairs where one shape is **rounded** (sphere/capsule) and the other a **polytope** (box/convex_solid), hop offers two narrowphase methods, selected per-simulator with `set_accurate_narrowphase(bool)` (default `true`):
+
+- **Accurate** — GJK closest-point distance + conservative advancement, working from the polytope's **support function** (its vertex hull). The contact normal is the true direction between the closest features, so it is correct at **edges and vertices**: a capsule sweeping a ledge gets an up-and-out normal and rides over it, rather than the fabricated vertical-wall normal a face-based method reports. It is also inherently **bounded** — an ill-formed or unbounded plane set still has a finite vertex hull, so it can't phantom-block from afar.
+- **Cheap** — the legacy path: inflate the convex's planes (or expand the box's AABB) by the rounded shape's support, then ray-trace. Exact on faces and slightly faster, but **face-normals-only** at edges (no ride-up). `set_accurate_narrowphase(false)` forces this globally.
+
+`gjk_eligible_pair()` in `collide.h` names the eligible set. Two classes of pair are intentionally **not** routed through GJK:
+
+- **rounded × rounded** (sphere/capsule pairs) — these have exact closed-form swept tests (`trace_sphere`, `trace_capsule`, `trace_capsule_capsule`); GJK would only approximate them.
+- **polytope × polytope** (box×box, box/convex × convex) — their combined rounded radius is zero, so GJK would have to resolve contact at distance ≈ 0, where the divisions lose precision in fixed-point. The non-zero radius of a rounded shape is exactly what keeps GJK well-conditioned, so it is the defining property of eligibility. These keep the plane-inflation path, which is exact on faces anyway.
+
+Two semantics worth knowing about the swept GJK path:
+
+- A swept query is blocked **only by a contact it is moving into**. A body resting on a convex surface slides, walks, and steps off the edge freely (a tangential or separating contact does not stop the sweep); resting/ground contact is reported separately by the caller's down-probe, not by the motion cast.
+- On **deep core penetration** the GJK path declines and the pair falls back to the inflation path, which recovers the overlap depth for de-penetration.
 
 ## Contact Solver, Settling & Sleep
 
@@ -240,9 +258,11 @@ include/hop/
     mat3.h               # 3×3 matrix
     quat.h               # quaternion
     support.h            # support functions + convex-solid vertex enumeration
+    gjk.h                # GJK closest-point distance + conservative-advancement sweep
     intersect.h          # intersection tests
     bounding.h           # bounding box computation
-    project.h            # point/segment projection
+    project.h            # point/segment projection + segment-segment closest points
+    triangle.h           # point/segment-vs-triangle closest points
 ```
 
 ## License
