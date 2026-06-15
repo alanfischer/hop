@@ -28,6 +28,19 @@ template <typename T> static convex_solid<T> box_convex(T half) {
 	return cs;
 }
 
+// Box convex with per-axis half-extents (planes at distance hx/hy/hz).
+template <typename T> static convex_solid<T> box_convex_ext(T hx, T hy, T hz) {
+	using tr = scalar_traits<T>;
+	convex_solid<T> cs;
+	cs.planes.push_back(plane<T>(vec3<T>(tr::one(), T {}, T {}), hx));
+	cs.planes.push_back(plane<T>(vec3<T>(-tr::one(), T {}, T {}), hx));
+	cs.planes.push_back(plane<T>(vec3<T>(T {}, tr::one(), T {}), hy));
+	cs.planes.push_back(plane<T>(vec3<T>(T {}, -tr::one(), T {}), hy));
+	cs.planes.push_back(plane<T>(vec3<T>(T {}, T {}, tr::one()), hz));
+	cs.planes.push_back(plane<T>(vec3<T>(T {}, T {}, -tr::one()), hz));
+	return cs;
+}
+
 // Sweep shape A (at base_a, moving `motion`) against static shape B (at base_b)
 // with combined rounded radius `cr`, via the same support callables collide.h
 // builds for the real collision path.
@@ -369,6 +382,56 @@ template <typename T> static void test_triangle_primitives(const char * label) {
 	printf("OK\n");
 }
 
+// Static rotation: a box solid rotated 90° about Y has its long (x) axis turned
+// into z, so a sphere swept in -x stops nearer than the unrotated box. Verifies
+// the orientation is honored AND that solid.orientation and shape.local_rotation
+// compose to the same result.
+template <typename T> static void test_gjk_solid_orientation(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  gjk_solid_orientation[%s]: ", label);
+	const T one = tr::one();
+	const T z {};
+	const T neg = -one;
+	// Ry(90°) = [[0,0,1],[0,1,0],[-1,0,0]] (row-major ctor args).
+	mat3<T> Ry90(z, z, one, z, one, z, neg, z, z);
+
+	auto sphere_mover = [&]() {
+		auto s = std::make_shared<solid<T>>();
+		s->add_shape(std::make_shared<shape<T>>(sphere<T>(v3<T>(0, 0, 0), tr::from_milli(500))));
+		s->set_position(v3<T>(5, 0, 0));
+		return s;
+	};
+	auto box_solid = [&](int mode) { // 0=none, 1=solid orientation, 2=shape rotation
+		auto s = std::make_shared<solid<T>>();
+		s->add_shape(std::make_shared<shape<T>>(box_convex_ext<T>(tr::from_int(2), one, one)));
+		s->set_position(v3<T>(0, 0, 0));
+		if (mode == 1) s->set_orientation(Ry90);
+		else if (mode == 2) s->get_shapes()[0]->set_local_rotation(Ry90);
+		return s;
+	};
+	segment<T> seg;
+	seg.origin = v3<T>(5, 0, 0);
+	seg.direction = v3<T>(-6, 0, 0);
+	const T eps = tr::from_milli(1);
+	auto run = [&](int mode) -> collision<T> {
+		auto box = box_solid(mode);
+		auto mv = sphere_mover();
+		collision<T> r;
+		r.time = one;
+		hop::test_solid(r, mv.get(), seg, box.get(), eps, T {}, true);
+		return r;
+	};
+
+	collision<T> unrot = run(0), solidR = run(1), shapeR = run(2);
+	float t_unrot = tr::to_float(unrot.time), t_solid = tr::to_float(solidR.time), t_shape = tr::to_float(shapeR.time);
+	printf("unrot=%.3f solidR=%.3f shapeR=%.3f n.x=%.2f ", t_unrot, t_solid, t_shape, tr::to_float(solidR.normal.x));
+	assert(unrot.time < one && std::fabs(t_unrot - 0.4167f) < 0.04f);   // +x face at x=2 → center 2.5
+	assert(solidR.time < one && std::fabs(t_solid - 0.5833f) < 0.04f);  // rotated: x-face at x=1 → center 1.5
+	assert(tr::to_float(solidR.normal.x) > 0.9f);                       // outward +x
+	assert(std::fabs(t_shape - t_solid) < 0.02f);                       // composition: shape == solid
+	printf("OK\n");
+}
+
 template <typename T> static void run_gjk_tests(const char * label) {
 	printf(" [%s]\n", label);
 	test_gjk_sphere_drop<T>(label);
@@ -385,6 +448,7 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_gjk_penetration_reports<T>(label);
 	test_ca_custom_closest<T>(label);
 	test_triangle_primitives<T>(label);
+	test_gjk_solid_orientation<T>(label);
 }
 
 int main() {
