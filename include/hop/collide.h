@@ -615,9 +615,12 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 			break;
 		}
 		case shape_type::traceable: {
-			vec3<T> traceable_origin;
-			add(traceable_origin, s->get_position(), lp);
-			sh->get_traceable()->trace_segment(col, traceable_origin, seg);
+			mat3<T> R;
+			mul(R, s->get_orientation(), sh->get_local_rotation());
+			vec3<T> traceable_origin, roff;
+			mul(roff, s->get_orientation(), lp);
+			add(traceable_origin, s->get_position(), roff);
+			sh->get_traceable()->trace_segment(col, traceable_origin, R, seg);
 			modify_scope = true;
 			break;
 		}
@@ -691,19 +694,27 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// the other side's primitive type, so dispatch on traceable-ness first.
 			if (sh1->get_type() == shape_type::traceable) {
 				segment<T> iseg;
-				add(iseg.origin, s2->get_position(), lp2);
+				vec3<T> roff;
+				mul(roff, s2->get_orientation(), lp2);
+				add(iseg.origin, s2->get_position(), roff);
 				mul(iseg.direction, seg.direction, -tr::one());
+				mat3<T> R;
+				mul(R, s1->get_orientation(), sh1->get_local_rotation());
 				vec3<T> tr_origin;
-				add(tr_origin, seg.origin, lp1);
-				sh1->get_traceable()->trace_solid(col, s2, tr_origin, iseg, margin);
+				mul(roff, s1->get_orientation(), lp1);
+				add(tr_origin, seg.origin, roff);
+				sh1->get_traceable()->trace_solid(col, s2, tr_origin, R, iseg, margin);
 				col.invert();
 				sub(iseg.origin, col.point);
 				add(col.point, seg.origin, iseg.origin);
 				modify_scope = true;
 			} else if (sh2->get_type() == shape_type::traceable) {
-				vec3<T> tr_origin;
-				add(tr_origin, s2->get_position(), lp2);
-				sh2->get_traceable()->trace_solid(col, s1, tr_origin, seg, margin);
+				mat3<T> R;
+				mul(R, s2->get_orientation(), sh2->get_local_rotation());
+				vec3<T> tr_origin, roff;
+				mul(roff, s2->get_orientation(), lp2);
+				add(tr_origin, s2->get_position(), roff);
+				sh2->get_traceable()->trace_solid(col, s1, tr_origin, R, seg, margin);
 				modify_scope = true;
 			}
 			// Accurate GJK for the rounded×polytope pairs (one decision, not a guard

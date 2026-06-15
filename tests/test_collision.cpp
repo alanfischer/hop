@@ -21,57 +21,61 @@ public:
 		result.maxs = { tr::from_int(10), tr::from_int(10), T {} };
 	}
 
-	void trace_segment(collision<T> & result, const vec3<T> & position, const segment<T> & seg) override {
-		T floor_z = position.z;
-		T dz = seg.direction.z;
-		if (dz >= T {})
+	// The floor is the plane z=0 in local space; a rotation just turns its normal.
+	// Working with the world-space rotated plane (n = R·ẑ through `position`) needs
+	// no query transform and is identity-equivalent to the old z-axis version.
+	void trace_segment(collision<T> & result, const vec3<T> & position, const mat3<T> & orientation,
+	                   const segment<T> & seg) override {
+		vec3<T> n;
+		mul(n, orientation, vec3<T>(T {}, T {}, tr::one())); // world floor normal
+		T denom = dot(n, seg.direction);
+		if (denom >= T {})
 			return;
-		T t = (floor_z - seg.origin.z) / dz;
+		T t = (dot(n, position) - dot(n, seg.origin)) / denom;
 		if (t >= T {} && t <= tr::one() && t < result.time) {
 			result.time = t;
 			mul(result.point, seg.direction, t);
 			add(result.point, seg.origin);
-			result.normal = { T {}, T {}, tr::one() };
+			result.normal = n;
 		}
 	}
 
-	void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const segment<T> & seg, T margin) override {
-		// Inflate the floor outward (upward) by the margin so a solid resting
-		// within `margin` of the surface registers as an overlap; the simulator
-		// recovers the true gap as (margin - depth). margin == 0 is the exact floor.
-		T surface_z = position.z + margin;
-		// Find the solid's lowest z extent from its shapes
-		T lowest_z = T {};
+	void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const mat3<T> & orientation,
+	                 const segment<T> & seg, T margin) override {
+		vec3<T> n, neg_n;
+		mul(n, orientation, vec3<T>(T {}, T {}, tr::one()));
+		neg(neg_n, n);
+		// Deepest extent of the mover toward the floor (along -n) over its shapes.
+		T deepest = T {};
 		for (auto & shape : s->get_shapes()) {
-			aa_box<T> bound;
-			shape->get_bound(bound);
-			if (bound.mins.z < lowest_z)
-				lowest_z = bound.mins.z;
+			vec3<T> sup;
+			support(sup, *shape, neg_n);
+			T extent = dot(sup, neg_n);
+			if (extent > deepest)
+				deepest = extent;
 		}
-		T start_z = seg.origin.z + lowest_z;
-
-		// Already within / below the inflated surface at the start of the sweep:
-		// report a static overlap (t=0) with penetration depth into the inflated
-		// surface, so the caller's (margin - depth) yields the true signed gap.
-		if (start_z <= surface_z) {
-			if (result.time > T {}) {  // only if nothing earlier already hit
+		// Signed distance of the mover's deepest point to the plane (through
+		// `position`, normal n) at the sweep start. The inflated surface is at
+		// `margin`; recover the true gap as (margin - depth).
+		T deepest_dist = (dot(n, seg.origin) - dot(n, position)) - deepest;
+		if (deepest_dist <= margin) {
+			if (result.time > T {}) {
 				result.time = T {};
 				result.point.set(seg.origin);
-				result.normal = { T {}, T {}, tr::one() };
-				result.depth = surface_z - start_z;
+				result.normal = n;
+				result.depth = margin - deepest_dist;
 			}
 			return;
 		}
-
-		T dz = seg.direction.z;
-		if (dz >= T {})
-			return;
-		T t = (surface_z - start_z) / dz;
+		T denom = dot(n, seg.direction);
+		if (denom >= T {})
+			return; // moving away from / parallel to the floor
+		T t = (margin - deepest_dist) / denom;
 		if (t >= T {} && t <= tr::one() && t < result.time) {
 			result.time = t;
 			mul(result.point, seg.direction, t);
 			add(result.point, seg.origin);
-			result.normal = { T {}, T {}, tr::one() };
+			result.normal = n;
 		}
 	}
 };
@@ -1284,6 +1288,47 @@ template <typename T> static void test_convex_solid_traceable_floor(const char *
 }
 
 // Test: segment trace against a traceable floor
+// A traceable floor rotated 45° about X: a sphere swept straight down must
+// contact with the ROTATED floor normal (R·ẑ), proving solid.orientation flows
+// through the traceable narrowphase path.
+template <typename T> static void test_traceable_orientation(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  traceable_orientation[%s]: ", label);
+	test_floor_traceable<T> traceable;
+
+	mat3<T> Rx45;
+	set_mat3_from_axis_angle(Rx45, vec3<T>(tr::one(), T {}, T {}), tr::pi() * tr::quarter());
+
+	auto floor = std::make_shared<solid<T>>();
+	floor->set_infinite_mass();
+	floor->add_shape(std::make_shared<shape<T>>(&traceable));
+	floor->set_position(vec3<T>(T {}, T {}, T {}));
+	floor->set_orientation(Rx45);
+
+	auto sph = std::make_shared<solid<T>>();
+	sph->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(vec3<T>(T {}, T {}, T {}), tr::half())));
+	sph->set_position(vec3<T>(T {}, T {}, tr::from_int(5)));
+
+	segment<T> seg;
+	seg.origin = { T {}, T {}, tr::from_int(5) };
+	seg.direction = { T {}, T {}, -tr::from_int(6) };
+
+	collision<T> r;
+	r.time = tr::one();
+	hop::test_solid(r, sph.get(), seg, floor.get(), tr::from_milli(1), T {}, true);
+
+	vec3<T> expN; // expected normal = R·ẑ
+	mul(expN, Rx45, vec3<T>(T {}, T {}, tr::one()));
+	printf("t=%.3f n=(%.2f,%.2f,%.2f) exp=(%.2f,%.2f,%.2f) ", tr::to_float(r.time),
+	       tr::to_float(r.normal.x), tr::to_float(r.normal.y), tr::to_float(r.normal.z),
+	       tr::to_float(expN.x), tr::to_float(expN.y), tr::to_float(expN.z));
+	assert(r.time < tr::one());
+	assert(approx(tr::to_float(r.normal.x), tr::to_float(expN.x), 0.02f));
+	assert(approx(tr::to_float(r.normal.y), tr::to_float(expN.y), 0.02f));
+	assert(approx(tr::to_float(r.normal.z), tr::to_float(expN.z), 0.02f));
+	printf("OK\n");
+}
+
 template <typename T> static void test_ray_traceable_floor(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  ray_traceable_floor[%s]: ", label);
@@ -1402,6 +1447,7 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_capsule_traceable_floor<T>(label);
 	test_convex_solid_traceable_floor<T>(label);
 	test_ray_traceable_floor<T>(label);
+	test_traceable_orientation<T>(label);
 }
 
 // Test: collision filter prevents two spheres from colliding

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hop/collision.h>
+#include <hop/math/mat3.h>
 #include <hop/math/segment.h>
 
 namespace hop {
@@ -53,8 +54,12 @@ template <typename T> class traceable {
 public:
 	virtual ~traceable() = default;
 	virtual void get_bound(aa_box<T> & result) = 0;
-	virtual void trace_segment(collision<T> & result, const vec3<T> & position, const segment<T> & seg) = 0;
-	virtual void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const segment<T> & seg, T margin) = 0;
+	// `orientation` is the traceable's world rotation (solid_orientation ·
+	// shape_local_rotation). The geometry is authored in the traceable's local
+	// frame; implementors transform the query into that frame with its transpose
+	// and map results back. Identity (the common case) is an exact no-op.
+	virtual void trace_segment(collision<T> & result, const vec3<T> & position, const mat3<T> & orientation, const segment<T> & seg) = 0;
+	virtual void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const mat3<T> & orientation, const segment<T> & seg, T margin) = 0;
 };
 
 } // namespace hop
