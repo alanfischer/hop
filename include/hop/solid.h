@@ -183,6 +183,14 @@ public:
 	// Position / Velocity / Force
 	void set_position(const vec3<T> & pos);
 	const vec3<T> & get_position() const { return position_; }
+	// Static orientation: a fixed body rotation the narrowphase honors (traceable
+	// + GJK paths). No angular velocity / torque — see the rotation design notes.
+	// Identity by default, in which case it is an exact no-op everywhere.
+	void set_orientation(const mat3<T> & r) {
+		orientation_ = r;
+		recompute_world_bound();
+	}
+	const mat3<T> & get_orientation() const { return orientation_; }
 	void set_velocity(const vec3<T> & vel) {
 		velocity_.set(vel);
 		activate();
@@ -290,16 +298,18 @@ public:
 		} else {
 			shape_types_ |= static_cast<int>(shapes_[0]->get_type());
 			shapes_[0]->get_bound(local_bound_);
+			rotate_aabb(local_bound_, local_bound_, shapes_[0]->get_local_rotation());
 			add(local_bound_, shapes_[0]->get_local_position());
 			aa_box<T> box;
 			for (int i = 1; i < static_cast<int>(shapes_.size()); ++i) {
 				shape_types_ |= static_cast<int>(shapes_[i]->get_type());
 				shapes_[i]->get_bound(box);
+				rotate_aabb(box, box, shapes_[i]->get_local_rotation());
 				add(box, shapes_[i]->get_local_position());
 				local_bound_.merge(box);
 			}
 		}
-		add(world_bound_, local_bound_, position_);
+		recompute_world_bound();
 	}
 
 private:
@@ -314,13 +324,21 @@ private:
 	// deactivation counter on every step and prevent solids from ever sleeping.
 	void set_position_direct(const vec3<T> & pos) {
 		position_.set(pos);
-		add(world_bound_, local_bound_, position_);
+		recompute_world_bound();
+	}
+
+	// world_bound_ = AABB enclosing (orientation_ · local_bound_) + position_.
+	// Identity orientation reproduces the old translate-only bound exactly.
+	void recompute_world_bound() {
+		rotate_aabb(world_bound_, local_bound_, orientation_);
+		add(world_bound_, position_);
 	}
 
 	// -- Hot: every-tick gates and integration math --
 	bool active_ = true;
 	int scope_ = -1;
 	vec3<T> position_;
+	mat3<T> orientation_;         // static body rotation (no angular dynamics); identity by default
 	vec3<T> velocity_;
 	vec3<T> force_;
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)

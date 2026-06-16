@@ -52,6 +52,17 @@ public:
 	}
 	const vec3<T> & get_local_position() const { return local_position_; }
 
+	// Local rotation: fixed orientation of this shape within its owning solid's
+	// frame (the collision-shape-within-body transform). Default identity. Static
+	// pose only — composed with the solid's orientation by the narrowphase; no
+	// angular dynamics. get_bound()/support() stay intrinsic; callers apply this.
+	void set_local_rotation(const mat3<T> & r) {
+		local_rotation_ = r;
+		if (solid_)
+			solid_->update_local_bound();
+	}
+	const mat3<T> & get_local_rotation() const { return local_rotation_; }
+
 	void set_box(const aa_box<T> & box) {
 		type_ = shape_type::box;
 		box_ = box;
@@ -134,6 +145,7 @@ private:
 	// rest of the engine which member of the union below is active.
 	shape_type type_ = shape_type::box;
 	vec3<T> local_position_;
+	mat3<T> local_rotation_; // identity by default
 	solid<T> * solid_ = nullptr;
 
 	// Variant payload. The trivially-destructible variants (box / sphere /

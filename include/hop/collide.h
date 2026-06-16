@@ -398,13 +398,12 @@ void trace_inverted_convex(collision<T> & col,
 	}
 }
 
-// Core (radius-excluded) support point of a primitive shape in world space,
-// for the GJK path: base = solid_position + shape_local_position. Sphere /
-// capsule contribute only their skeleton (point / segment); their radius is
-// handled by gjk_sweep as a combined margin. This is the shape-type dispatch
-// that keeps math/gjk.h shape-agnostic.
+// Core (radius-excluded) support point of a primitive shape in its OWN local
+// frame. Sphere/capsule contribute only their skeleton (point/segment); their
+// radius is handled by gjk_sweep as a combined margin. Shape-type dispatch that
+// keeps math/gjk.h shape-agnostic.
 template <typename T>
-inline void gjk_core_support(vec3<T> & out, const shape<T> * sh, const vec3<T> & base, const vec3<T> & dir) {
+inline void gjk_local_support(vec3<T> & out, const shape<T> * sh, const vec3<T> & dir) {
 	switch (sh->get_type()) {
 		case shape_type::box:
 			support(out, sh->get_box(), dir);
@@ -426,6 +425,27 @@ inline void gjk_core_support(vec3<T> & out, const shape<T> * sh, const vec3<T> &
 			out.reset();
 			break;
 	}
+}
+
+// World support, axis-aligned (no rotation): base = solid_position + local_position.
+template <typename T>
+inline void gjk_core_support(vec3<T> & out, const shape<T> * sh, const vec3<T> & base, const vec3<T> & dir) {
+	gjk_local_support(out, sh, dir);
+	add(out, base);
+}
+
+// World support, oriented by R (with Rt = Rᵀ precomputed): the shape is rotated
+// about its local origin then placed at base, so support_world(d) =
+// R·support_local(Rᵀ·d) + base. Used when a solid and/or shape carries a static
+// rotation; the result is in world space, so GJK runs unchanged and its normal
+// comes out world-space too (no post-rotation needed).
+template <typename T>
+inline void gjk_core_support(vec3<T> & out, const shape<T> * sh, const mat3<T> & R, const mat3<T> & Rt,
+                             const vec3<T> & base, const vec3<T> & dir) {
+	vec3<T> ld, ls;
+	mul(ld, Rt, dir);
+	gjk_local_support(ls, sh, ld);
+	mul(out, R, ls);
 	add(out, base);
 }
 
@@ -472,18 +492,39 @@ inline bool gjk_eligible_pair(shape_type a, shape_type b) {
 // on test_solid forces that path globally.
 template <typename T>
 inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
-                                  solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
+                                  solid<T> * s1, solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
                                   const vec3<T> & lp1, const vec3<T> & lp2,
                                   T margin, T epsilon) {
 	using tr = scalar_traits<T>;
-	vec3<T> base_a, base_b;
-	add(base_a, seg.origin, lp1);
-	add(base_b, s2->get_position(), lp2);
-	auto support_a = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh1, base_a, dir); };
-	auto support_b = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh2, base_b, dir); };
+	// Each shape's world rotation = solid_orientation · shape_local_rotation; its
+	// world origin = solid_position + solid_orientation · local_position. (For
+	// identity orientations this is exactly the old translate-only placement.)
+	mat3<T> Ra, Rb;
+	mul(Ra, s1->get_orientation(), sh1->get_local_rotation());
+	mul(Rb, s2->get_orientation(), sh2->get_local_rotation());
+	vec3<T> base_a, base_b, off;
+	mul(off, s1->get_orientation(), lp1);
+	add(base_a, seg.origin, off);
+	mul(off, s2->get_orientation(), lp2);
+	add(base_b, s2->get_position(), off);
+
 	T combined_radius = gjk_core_radius(sh1) + gjk_core_radius(sh2) + margin;
 	gjk_sweep_result<T> res;
-	gjk_sweep<T>(res, support_a, support_b, seg.direction, combined_radius, epsilon);
+	const mat3<T> identity;
+	if (Ra != identity || Rb != identity) {
+		// Oriented: bake each shape's rotation into its support (world-space).
+		mat3<T> Rat, Rbt;
+		transpose(Rat, Ra);
+		transpose(Rbt, Rb);
+		auto support_a = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh1, Ra, Rat, base_a, dir); };
+		auto support_b = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh2, Rb, Rbt, base_b, dir); };
+		gjk_sweep<T>(res, support_a, support_b, seg.direction, combined_radius, epsilon);
+	} else {
+		// Identity fast path — no rotation math.
+		auto support_a = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh1, base_a, dir); };
+		auto support_b = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh2, base_b, dir); };
+		gjk_sweep<T>(res, support_a, support_b, seg.direction, combined_radius, epsilon);
+	}
 	if (!res.valid)
 		return false;
 	if (res.hit) {
@@ -574,9 +615,12 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 			break;
 		}
 		case shape_type::traceable: {
-			vec3<T> traceable_origin;
-			add(traceable_origin, s->get_position(), lp);
-			sh->get_traceable()->trace_segment(col, traceable_origin, seg);
+			mat3<T> R;
+			mul(R, s->get_orientation(), sh->get_local_rotation());
+			vec3<T> traceable_origin, roff;
+			mul(roff, s->get_orientation(), lp);
+			add(traceable_origin, s->get_position(), roff);
+			sh->get_traceable()->trace_segment(col, traceable_origin, R, seg);
 			modify_scope = true;
 			break;
 		}
@@ -650,19 +694,27 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// the other side's primitive type, so dispatch on traceable-ness first.
 			if (sh1->get_type() == shape_type::traceable) {
 				segment<T> iseg;
-				add(iseg.origin, s2->get_position(), lp2);
+				vec3<T> roff;
+				mul(roff, s2->get_orientation(), lp2);
+				add(iseg.origin, s2->get_position(), roff);
 				mul(iseg.direction, seg.direction, -tr::one());
+				mat3<T> R;
+				mul(R, s1->get_orientation(), sh1->get_local_rotation());
 				vec3<T> tr_origin;
-				add(tr_origin, seg.origin, lp1);
-				sh1->get_traceable()->trace_solid(col, s2, tr_origin, iseg, margin);
+				mul(roff, s1->get_orientation(), lp1);
+				add(tr_origin, seg.origin, roff);
+				sh1->get_traceable()->trace_solid(col, s2, tr_origin, R, iseg, margin);
 				col.invert();
 				sub(iseg.origin, col.point);
 				add(col.point, seg.origin, iseg.origin);
 				modify_scope = true;
 			} else if (sh2->get_type() == shape_type::traceable) {
-				vec3<T> tr_origin;
-				add(tr_origin, s2->get_position(), lp2);
-				sh2->get_traceable()->trace_solid(col, s1, tr_origin, seg, margin);
+				mat3<T> R;
+				mul(R, s2->get_orientation(), sh2->get_local_rotation());
+				vec3<T> tr_origin, roff;
+				mul(roff, s2->get_orientation(), lp2);
+				add(tr_origin, s2->get_position(), roff);
+				sh2->get_traceable()->trace_solid(col, s1, tr_origin, R, seg, margin);
 				modify_scope = true;
 			}
 			// Accurate GJK for the rounded×polytope pairs (one decision, not a guard
@@ -672,7 +724,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// is skipped when narrowphase is set cheap; either way we fall through to
 			// the per-pair fallback chain below.
 			else if (use_gjk && gjk_eligible_pair(sh1->get_type(), sh2->get_type())
-			         && trace_pair_gjk(col, seg, s2, sh1, sh2, lp1, lp2, margin, epsilon)) {
+			         && trace_pair_gjk(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon)) {
 				// handled by GJK
 			}
 			// AABox vs *
