@@ -263,6 +263,30 @@ Now make orientation *evolve* from physics rather than script. Reuses the
   `scalar_traits`).
 - Angular component of deactivation threshold.
 
+**Disabling dynamic rotation (the documented toggle).** Through Phase 7,
+"ignore rotation" needs *no* switch: orientation and `angular_velocity` are
+zero/identity by default and take the exact identity fast path (`collide.h`
+gates on `Ra != identity || Rb != identity`; a zero `ω` makes the Phase 6
+`ω × r` surface-velocity term vanish). Dynamic spin is the only kind that
+appears *uninvited* — a finite-inertia body hit off-center acquires `ω` whether
+or not the game wanted it — so it is the one kind that needs an explicit
+off-switch. The contract:
+
+- **Per-solid:** `inv_inertia == 0` means "this body never rotates dynamically."
+  Store `inv_inertia` as the primary state (not derived from `inertia`), because
+  zero is exact in `fixed16` whereas infinite `inertia` is not — and every
+  angular term in the response formula (hard part #3) is gated by `I⁻¹`, so a
+  zero `inv_inertia` makes them all vanish to a multiply-by-zero rather than a
+  branch. This is the infinite-moment-of-inertia limit, stored as the reciprocal
+  so it stays numerically clean. It is the canonical marker for static/kinematic
+  level brushes (which must never tumble) and for any prop the game wants to
+  pin upright. `inv_inertia` defaults to **zero**, so a solid spins only once a
+  game explicitly gives it a finite inertia — rotation is opt-in, not opt-out.
+- **Global:** angular integration lives entirely in `integrator_type`, so a
+  simulator-level "skip angular integration" early-out is trivial. Keep it — it
+  is the clean A/B and deterministic-replay-bisection lever for the dynamic
+  phases.
+
 **End-of-phase state:** solids spin freely under torque; no collision response
 yet — they rotate through each other if hit.
 
@@ -329,6 +353,11 @@ work. This phase is mostly documenting that rolling now works.
 - [ ] Contact-point on traceable (hard part #6): Phases 6/9 need real
       `col.impact` for traceable collisions. Coordinate the
       `traceable::trace_*` extension with the `hop-godot` owner.
+- [x] How does a game opt *out* of rotation? **Resolved:** through Phase 7,
+      nothing — identity/zero defaults take the no-op fast path. For the dynamic
+      phases (8+), the toggle is per-solid `inv_inertia == 0` (default), with a
+      global integrator early-out for A/B and replay bisection. Rotation is
+      opt-in. See Phase 8's "Disabling dynamic rotation" note.
 
 ---
 
