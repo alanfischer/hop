@@ -64,6 +64,7 @@ public:
 				result.point.set(seg.origin);
 				result.normal = n;
 				result.depth = margin - deepest_dist;
+				fill_impact(result, position, n);
 			}
 			return;
 		}
@@ -76,7 +77,18 @@ public:
 			mul(result.point, seg.direction, t);
 			add(result.point, seg.origin);
 			result.normal = n;
+			fill_impact(result, position, n);
 		}
+	}
+
+private:
+	// traceable contract: impact = world contact point on the floor surface (the
+	// mover origin projected onto the plane through `position` with normal n).
+	void fill_impact(collision<T> & result, const vec3<T> & position, const vec3<T> & n) {
+		T g = dot(n, result.point) - dot(n, position);
+		vec3<T> ns;
+		mul(ns, n, g);
+		sub(result.impact, result.point, ns);
 	}
 };
 
@@ -684,6 +696,46 @@ template <typename T> static void test_impact_box_on_floor(const char * label) {
 	printf("point.z=%.2f impact.z=%.2f ", pz, iz);
 	assert(approx(pz, 0.5f, 0.15f));
 	assert(approx(iz, 0.0f, 0.15f));
+	printf("OK\n");
+}
+
+// Test: a solid resting on a TRACEABLE floor reports impact ON the floor surface,
+// not at the mover center. Guards the traceable contact-point contract and the
+// collide.h no-clobber (it used to copy col.point over the traceable's impact).
+template <typename T> static void test_impact_traceable_floor(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  impact_traceable_floor[%s]: ", label);
+	simulator<T> sim;
+
+	test_floor_traceable<T> traceable;
+	make_traceable_floor(sim, traceable);
+
+	collision<T> last_col;
+	bool got = false;
+
+	auto sph = std::make_shared<solid<T>>();
+	sph->set_mass(tr::one());
+	sph->set_coefficient_of_restitution(tr::one());
+	sph->set_restitution_combine(restitution_combine::minimum);
+	sph->set_coefficient_of_static_friction(T {});
+	sph->set_coefficient_of_dynamic_friction(T {});
+	sph->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
+	sph->set_position({ T {}, T {}, tr::from_int(2) });
+	sph->set_collision_callback([&](const collision<T> & c) {
+		last_col.set(c);
+		got = true;
+	});
+	sim.add_solid(sph);
+
+	for (int i = 0; i < 200 && !got; ++i)
+		sim.update(tr::from_milli(10));
+
+	assert(got);
+	float pz = tr::to_float(last_col.point.z);
+	float iz = tr::to_float(last_col.impact.z);
+	printf("point.z=%.2f impact.z=%.2f ", pz, iz);
+	assert(approx(pz, 0.5f, 0.2f)); // mover origin ~one radius above the floor
+	assert(approx(iz, 0.0f, 0.2f)); // contact ON the floor (was ≈point before fix)
 	printf("OK\n");
 }
 
@@ -1428,6 +1480,7 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_impact_sphere_on_floor<T>(label);
 	test_impact_segment_trace<T>(label);
 	test_impact_box_on_floor<T>(label);
+	test_impact_traceable_floor<T>(label);
 	test_sphere_capsule_collision<T>(label);
 	test_capsule_capsule_perpendicular<T>(label);
 	test_capsule_capsule_parallel<T>(label);
