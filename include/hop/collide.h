@@ -946,9 +946,12 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				support(sup, *sh1, neg_n);
 				add(col.impact, col.point, sup);
 				add(col.impact, lp1);
-			} else if (col.time < one) {
-				col.impact.set(col.point);
 			}
+			// For a traceable pair, trace_solid is responsible for filling col.impact
+			// with the world contact point on its surface (see the traceable contract
+			// in traceable.h). We must NOT overwrite it with col.point (the mover's
+			// origin at impact) — that breaks lever-arm math (kinematic carry / angular
+			// response) for anything resting on or pushed by a trimesh/heightfield.
 
 			// Per-pair reset of col.trigger_scope so stale bits from a previous
 			// shape pair don't leak in. Then OR collidee's trigger bits on

@@ -50,6 +50,16 @@ template <typename T> class solid;
 //                   (margin - depth).  Swept hits (t > 0) should likewise stop
 //                   at the inflated surface.  Treat margin == 0 as the exact
 //                   mesh so existing (non-speculative) callers are unaffected.
+//
+//                   CONTACT POINT: on a hit, set `result.impact` to the world
+//                   contact point ON THE TRACEABLE's surface (not the mover).
+//                   `result.point` is the mover's origin at impact; `result.impact`
+//                   is the witness point on the mesh/plane, which lever-arm math
+//                   (kinematic angular carry, angular impulse response) needs as
+//                   `r = impact - solid_position`.  collide.h no longer fabricates
+//                   one for traceables (it used to copy point), so a trace that
+//                   leaves impact unset reports the origin (0,0,0).  The built-in
+//                   traceables fill it; see HopTrimeshTraceable / HopPlaneTraceable.
 template <typename T> class traceable {
 public:
 	virtual ~traceable() = default;
