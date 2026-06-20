@@ -247,6 +247,72 @@ template <typename T> static void test_mixed_modes_push(const char * label) {
 	printf("  mixed_modes_push[%s]: OK\n", label);
 }
 
+// Phase 6 (kinematic angular carry): a spinning infinite-mass platform must
+// carry the rider resting on it. The platform spins about the vertical (z) axis;
+// at the off-axis rider the surface velocity ω×r is tangential, so friction
+// should drag the rider around the axis (ω×(r,0,·) = (0,ω·r,0) → +y first). The
+// platform's spin is scripted carry only — Phase 6 does not integrate orientation
+// from ω, so the geometry stays put and the term is isolated.
+//
+// The platform is a large sphere (its near-flat cap is the floor) rather than a
+// box: a sphere/sphere contact keeps the moving rider seated under fixed16, where
+// a sphere sliding across a box *top* tunnels — a pre-existing narrowphase
+// precision issue orthogonal to the carry under test.
+template <typename T> static void test_angular_carry(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  angular_carry[%s]: ", label);
+
+	auto run = [](const vec3<T> & omega) {
+		auto sim = std::make_shared<simulator<T>>();
+		sim->set_gravity({ T {}, T {}, -tr::from_int(10) });  // press the rider down for friction load
+
+		// Platform: infinite mass, big sphere whose cap sits at z≈0, spun about z.
+		// Inelastic + frictional so the rider settles and the surface can grip it.
+		auto platform = std::make_shared<solid<T>>();
+		platform->set_infinite_mass();
+		platform->set_position({ T {}, T {}, -tr::from_int(40) });
+		platform->set_coefficient_of_gravity(T {});
+		platform->set_coefficient_of_restitution(T {});
+		platform->set_coefficient_of_static_friction(tr::half());
+		platform->set_coefficient_of_dynamic_friction(tr::half());
+		platform->add_shape(std::make_shared<shape<T>>(hop::sphere<T> { vec3<T> {}, tr::from_int(40) }));
+		platform->set_angular_velocity(omega);
+		sim->add_solid(platform);
+
+		// Rider: finite-mass sphere resting on the cap, off-axis (lever arm ≈ +x).
+		// Restitution 0 so it stays seated rather than bouncing off the spin.
+		auto rider = std::make_shared<solid<T>>();
+		rider->set_mass(tr::one());
+		rider->set_position({ tr::from_int(3), T {}, tr::from_milli(600) });
+		rider->set_coefficient_of_restitution(T {});
+		rider->set_coefficient_of_static_friction(tr::half());
+		rider->set_coefficient_of_dynamic_friction(tr::half());
+		rider->add_shape(std::make_shared<shape<T>>(hop::sphere<T> { vec3<T> {}, tr::half() }));
+		sim->add_solid(rider);
+
+		for (int i = 0; i < 100; ++i)
+			sim->update(tr::from_milli(10));
+		return rider->get_position();
+	};
+
+	// Spin about +z: ω×r at (3,0,·) points +y, so the rider is carried +y first.
+	vec3<T> spun = run({ T {}, T {}, tr::one() });
+	// Control: no spin → the rider stays put (no tangential drift).
+	vec3<T> still = run({ T {}, T {}, T {} });
+
+	float sx = tr::to_float(spun.x), sy = tr::to_float(spun.y), sz = tr::to_float(spun.z);
+	float ty = tr::to_float(still.y), tz = tr::to_float(still.z);
+	float r_spun = std::sqrt(sx * sx + sy * sy);
+	printf("spun=(%.2f,%.2f,%.2f) r=%.2f  still_y=%.2f still_z=%.2f (carried +y, stays seated)\n",
+	       sx, sy, sz, r_spun, ty, tz);
+
+	assert(sy > 0.5f);             // the spinning platform dragged the rider tangentially (+y)
+	assert(std::fabs(ty) < 0.2f);  // without spin it does not drift
+	assert(sz > 0.2f);             // the rider stayed seated on the cap (did not tunnel through)
+	assert(r_spun > 2.0f && r_spun < 4.0f);  // carried around the axis, still on the cap
+	printf("  angular_carry[%s]: OK\n", label);
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -264,6 +330,7 @@ int main() {
 	test_speculative_manager_floor<float>("float");
 	test_speculative_manager_response<float>("float");
 	test_mixed_modes_push<float>("float");
+	test_angular_carry<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -292,6 +359,7 @@ int main() {
 	test_speculative_manager_floor<fixed16>("fixed16");
 	test_speculative_manager_response<fixed16>("fixed16");
 	test_mixed_modes_push<fixed16>("fixed16");
+	test_angular_carry<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;
