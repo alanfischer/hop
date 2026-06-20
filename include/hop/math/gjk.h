@@ -36,13 +36,55 @@ inline void gjk_acc(vec3<T> & r, const vec3<T> & a, T c) {
 	r.z += a.z * c;
 }
 
+// Largest power-of-two scale `s` that brings every simplex coordinate to |c| <= 4.
+// The closest-feature barycentric weights are invariant under a uniform scaling
+// about the origin (the query point maps to itself), so dividing the simplex
+// points by `s` before the closest-point math leaves the result unchanged while
+// keeping the degree-4 area products (and the degree-6 sign products in
+// gjk_origin_inside_face) inside fixed16's ±32768 range. Without this a large
+// polytope (e.g. a box with 40-unit half-extents) overflows those products, GJK
+// reduces to the wrong simplex feature, and the sweep loses the contact entirely.
+// A no-op (s == 1) whenever the simplex already fits — so float is unaffected.
+template <typename T>
+inline void gjk_fit_track(T & m, const vec3<T> & p) {
+	using tr = scalar_traits<T>;
+	m = tr::max_val(m, tr::abs(p.x));
+	m = tr::max_val(m, tr::abs(p.y));
+	m = tr::max_val(m, tr::abs(p.z));
+}
+template <typename T, typename... Ps>
+inline T gjk_fit_scale(const Ps &... pts) {
+	using tr = scalar_traits<T>;
+	T m {};
+	(gjk_fit_track(m, pts), ...);
+	T s = tr::one();
+	T bound = tr::four(); // = thresh * s, doubled in lockstep so the guard needs no multiply
+	while (m > bound) {
+		s = s + s;
+		bound = bound + bound;
+	}
+	return s;
+}
+
 // Closest point to the origin on a triangle (a,b,c), as barycentric weights —
 // the closest-to-origin specialization of math/triangle.h's closest_point_triangle.
+// The _raw form assumes the points are already within range (the caller scaled
+// them); gjk_closest_triangle scales first. gjk_closest_tetra works on points it
+// has already scaled, so it calls _raw to avoid a redundant rescale.
 template <typename T>
-inline void gjk_closest_triangle(const vec3<T> & a, const vec3<T> & b, const vec3<T> & c, T bary[3]) {
+inline void gjk_closest_triangle_raw(const vec3<T> & a, const vec3<T> & b, const vec3<T> & c, T bary[3]) {
 	vec3<T> origin;
 	origin.reset();
 	closest_point_triangle(origin, a, b, c, bary);
+}
+template <typename T>
+inline void gjk_closest_triangle(const vec3<T> & a, const vec3<T> & b, const vec3<T> & c, T bary[3]) {
+	T s = gjk_fit_scale<T>(a, b, c);
+	vec3<T> as, bs, cs;
+	div(as, a, s);
+	div(bs, b, s);
+	div(cs, c, s);
+	gjk_closest_triangle_raw(as, bs, cs, bary);
 }
 
 // True if the origin lies on the inner side of plane (a,b,c) — the side that
@@ -65,10 +107,23 @@ inline bool gjk_origin_inside_face(const vec3<T> & a, const vec3<T> & b, const v
 // weights in bary[0..3]; sets `inside` when the origin is contained (distance
 // zero — deep core penetration).
 template <typename T>
-inline void gjk_closest_tetra(const vec3<T> & a, const vec3<T> & b, const vec3<T> & c, const vec3<T> & d,
-                              T bary[4], bool & inside) {
+inline void gjk_closest_tetra(const vec3<T> & a_in, const vec3<T> & b_in, const vec3<T> & c_in,
+                              const vec3<T> & d_in, T bary[4], bool & inside) {
 	using tr = scalar_traits<T>;
 	const T zero {};
+
+	// Scale the simplex to a safe magnitude before the closest-point math. The
+	// face-side tests below (gjk_origin_inside_face) form degree-6 sign products
+	// of the vertex coordinates, which overflow fixed16 for a large polytope; the
+	// barycentric weights are scale-invariant about the origin, so this only keeps
+	// the intermediates in range (see gjk_fit_scale). No-op for float / small simplices.
+	T s = gjk_fit_scale<T>(a_in, b_in, c_in, d_in);
+	vec3<T> a, b, c, d;
+	div(a, a_in, s);
+	div(b, b_in, s);
+	div(c, c_in, s);
+	div(d, d_in, s);
+
 	inside = true;
 	T best = tr::default_max_position_component();
 	best = best * best;
@@ -78,7 +133,7 @@ inline void gjk_closest_tetra(const vec3<T> & a, const vec3<T> & b, const vec3<T
 	auto consider = [&](const vec3<T> & p0, const vec3<T> & p1, const vec3<T> & p2,
 	                    int i0, int i1, int i2) {
 		T tb[3];
-		gjk_closest_triangle(p0, p1, p2, tb);
+		gjk_closest_triangle_raw(p0, p1, p2, tb); // points already scaled by the tetra above
 		vec3<T> q;
 		mul(q, p0, tb[0]);
 		gjk_acc(q, p1, tb[1]);

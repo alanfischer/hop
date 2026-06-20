@@ -254,10 +254,10 @@ template <typename T> static void test_mixed_modes_push(const char * label) {
 // platform's spin is scripted carry only — Phase 6 does not integrate orientation
 // from ω, so the geometry stays put and the term is isolated.
 //
-// The platform is a large sphere (its near-flat cap is the floor) rather than a
-// box: a sphere/sphere contact keeps the moving rider seated under fixed16, where
-// a sphere sliding across a box *top* tunnels — a pre-existing narrowphase
-// precision issue orthogonal to the carry under test.
+// The platform here is a large sphere (its near-flat cap is the floor); the
+// box-top version of this carry lives in test_angular_carry_box. Both stay seated
+// under fixed16 now — the sphere×box top-face tunnel that once forced the sphere
+// platform here has been fixed (analytic sphere×box closest point, see collide.h).
 template <typename T> static void test_angular_carry(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  angular_carry[%s]: ", label);
@@ -313,6 +313,67 @@ template <typename T> static void test_angular_carry(const char * label) {
 	printf("  angular_carry[%s]: OK\n", label);
 }
 
+// Box-platform variant of the angular carry, and the regression for the fixed16
+// sphere×box narrowphase bug: a finite-mass sphere rests on the flat top of a
+// large, spinning, infinite-mass box and must be carried tangentially while
+// staying seated. Pre-fix this tunnelled under fixed16 — the spin walks the
+// contact point off the box's symmetry axes, where GJK's closest-point
+// reconstruction lost the contact vector to fixed-point cancellation, so the
+// resting contact vanished and the rider fell through. With the analytic
+// sphere×box closest point it stays on the cap exactly as on a sphere platform.
+template <typename T> static void test_angular_carry_box(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  angular_carry_box[%s]: ", label);
+
+	auto run = [](const vec3<T> & omega) {
+		auto sim = std::make_shared<simulator<T>>();
+		sim->set_gravity({ T {}, T {}, -tr::from_int(10) });
+
+		// Platform: large box, top face at z=0 (centre z=-10, half-extent 10 thick,
+		// 40 wide). Infinite mass, spun about z, inelastic + frictional.
+		auto platform = std::make_shared<solid<T>>();
+		platform->set_infinite_mass();
+		platform->set_position({ T {}, T {}, -tr::from_int(10) });
+		platform->set_coefficient_of_gravity(T {});
+		platform->set_coefficient_of_restitution(T {});
+		platform->set_coefficient_of_static_friction(tr::half());
+		platform->set_coefficient_of_dynamic_friction(tr::half());
+		platform->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(-tr::from_int(40), -tr::from_int(40), -tr::from_int(10),
+		              tr::from_int(40), tr::from_int(40), tr::from_int(10))));
+		platform->set_angular_velocity(omega);
+		sim->add_solid(platform);
+
+		auto rider = std::make_shared<solid<T>>();
+		rider->set_mass(tr::one());
+		rider->set_position({ tr::from_int(3), T {}, tr::from_milli(600) });
+		rider->set_coefficient_of_restitution(T {});
+		rider->set_coefficient_of_static_friction(tr::half());
+		rider->set_coefficient_of_dynamic_friction(tr::half());
+		rider->add_shape(std::make_shared<shape<T>>(hop::sphere<T> { vec3<T> {}, tr::half() }));
+		sim->add_solid(rider);
+
+		for (int i = 0; i < 100; ++i)
+			sim->update(tr::from_milli(10));
+		return rider->get_position();
+	};
+
+	vec3<T> spun = run({ T {}, T {}, tr::one() });
+	vec3<T> still = run({ T {}, T {}, T {} });
+
+	float sx = tr::to_float(spun.x), sy = tr::to_float(spun.y), sz = tr::to_float(spun.z);
+	float ty = tr::to_float(still.y), tz = tr::to_float(still.z);
+	float r_spun = std::sqrt(sx * sx + sy * sy);
+	printf("spun=(%.2f,%.2f,%.2f) r=%.2f still_y=%.2f still_z=%.2f\n", sx, sy, sz, r_spun, ty, tz);
+
+	assert(sy > 0.5f);            // dragged tangentially (+y) by the spinning box top
+	assert(std::fabs(ty) < 0.2f); // no drift without spin
+	assert(sz > 0.4f);            // stayed seated on the top face (did NOT tunnel)
+	assert(std::fabs(tz - 0.5f) < 0.1f);     // rests at sphere radius above z=0
+	assert(r_spun > 2.0f && r_spun < 4.0f);  // carried around the axis, still on top
+	printf("  angular_carry_box[%s]: OK\n", label);
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -331,6 +392,7 @@ int main() {
 	test_speculative_manager_response<float>("float");
 	test_mixed_modes_push<float>("float");
 	test_angular_carry<float>("float");
+	test_angular_carry_box<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -360,6 +422,7 @@ int main() {
 	test_speculative_manager_response<fixed16>("fixed16");
 	test_mixed_modes_push<fixed16>("fixed16");
 	test_angular_carry<fixed16>("fixed16");
+	test_angular_carry_box<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

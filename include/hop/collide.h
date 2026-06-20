@@ -490,6 +490,55 @@ inline bool gjk_eligible_pair(shape_type a, shape_type b) {
 // (one rounded shape, one polytope). On a false return the caller's per-pair
 // fallback chain runs the cheap plane-inflation / AABB path; the `use_gjk` flag
 // on test_solid forces that path globally.
+// Analytic core closest point between a point (a sphere's center) and an oriented
+// box, in the form conservative_advance's closest functor wants: `dist` is the
+// core separation, `n` the unit axis outward from the box toward the point, `deep`
+// set when the point is inside the box.
+//
+// This is the fixed-point-robust replacement for GJK on the sphere×box pair. GJK
+// reconstructs the (small) closest vector as v = Σ wᵢ·yᵢ, a weighted average of
+// the box's far vertices; for a large box that is a small difference of large
+// terms, and fixed16 loses it to cancellation — the sweep then misses the resting
+// contact and the sphere tunnels (see math/gjk.h). Clamping the point to the box
+// and subtracting computes that small vector directly, exact at any box size.
+template <typename T>
+inline void box_point_core_closest(const vec3<T> & center, const vec3<T> & box_base,
+                                   const mat3<T> & Rbox, const mat3<T> & RboxT,
+                                   const aa_box<T> & box, bool identity,
+                                   T & dist, vec3<T> & n, bool & deep, T epsilon) {
+	using tr = scalar_traits<T>;
+	vec3<T> pl; // center in the box's local frame
+	if (identity) {
+		sub(pl, center, box_base);
+	} else {
+		vec3<T> d;
+		sub(d, center, box_base);
+		mul(pl, RboxT, d);
+	}
+	vec3<T> cl;
+	cl.x = tr::clamp(box.mins.x, box.maxs.x, pl.x);
+	cl.y = tr::clamp(box.mins.y, box.maxs.y, pl.y);
+	cl.z = tr::clamp(box.mins.z, box.maxs.z, pl.z);
+	// No axis clamped ⇒ the center is inside the box: genuine core penetration, no
+	// usable separating axis — let conservative_advance fall back (matches GJK's deep).
+	deep = (cl.x == pl.x && cl.y == pl.y && cl.z == pl.z);
+	if (deep) {
+		dist = T {};
+		n.reset();
+		return;
+	}
+	vec3<T> diff_l;
+	sub(diff_l, pl, cl); // outward from box surface toward the center, box-local
+	vec3<T> diff;
+	if (identity)
+		diff.set(diff_l);
+	else
+		mul(diff, Rbox, diff_l);
+	dist = length(diff);
+	n.set(diff);
+	normalize_carefully(n, epsilon);
+}
+
 template <typename T>
 inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
                                   solid<T> * s1, solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
@@ -511,7 +560,40 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 	T combined_radius = gjk_core_radius(sh1) + gjk_core_radius(sh2) + margin;
 	gjk_sweep_result<T> res;
 	const mat3<T> identity;
-	if (Ra != identity || Rb != identity) {
+
+	// Sphere × box: use the analytic clamp closest point instead of GJK. GJK's
+	// closest-point reconstruction loses the (small) contact vector to fixed-point
+	// cancellation on a large box (see box_point_core_closest); the analytic form is
+	// exact at any box size, so a sphere resting on / sliding across a big box top
+	// keeps its contact under fixed16. conservative_advance still owns the swept
+	// semantics — only the closest-point method changes.
+	const bool a_sphere_b_box = sh1->get_type() == shape_type::sphere && sh2->get_type() == shape_type::box;
+	const bool a_box_b_sphere = sh1->get_type() == shape_type::box && sh2->get_type() == shape_type::sphere;
+	if (a_sphere_b_box || a_box_b_sphere) {
+		// The mover (shape A) always sits at base_a + xA. When A is the sphere, that
+		// moving point is the sphere center and B is the box; when A is the box, it is
+		// the box origin and the (static) sphere center is base_b. box_point_core_closest
+		// always returns the axis outward from the box toward the point, so the box-mover
+		// case negates it (conservative_advance wants outward from B(target) toward A).
+		const bool box_is_target = a_sphere_b_box;
+		const mat3<T> & Rbox = box_is_target ? Rb : Ra;
+		const aa_box<T> & box = (box_is_target ? sh2 : sh1)->get_box();
+		const bool id = (Rbox == identity);
+		mat3<T> RboxT;
+		if (!id)
+			transpose(RboxT, Rbox);
+		conservative_advance<T>(res, seg.direction, combined_radius, epsilon,
+		    [&](const vec3<T> & xA, const vec3<T> &, T & dist, vec3<T> & n, bool & deep) {
+			    vec3<T> moved;
+			    add(moved, base_a, xA);
+			    if (box_is_target) {
+				    box_point_core_closest(moved, base_b, Rbox, RboxT, box, id, dist, n, deep, epsilon);
+			    } else {
+				    box_point_core_closest(base_b, moved, Rbox, RboxT, box, id, dist, n, deep, epsilon);
+				    neg(n);
+			    }
+		    });
+	} else if (Ra != identity || Rb != identity) {
 		// Oriented: bake each shape's rotation into its support (world-space).
 		mat3<T> Rat, Rbt;
 		transpose(Rat, Ra);
