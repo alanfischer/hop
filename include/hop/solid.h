@@ -56,6 +56,7 @@ public:
 	struct touch {
 		solid<T> * partner = nullptr;
 		vec3<T>    normal;            // points from partner toward this solid (the separating direction for self)
+		vec3<T>    impact;            // world contact point on the surface (lever-arm origin for angular surface velocity)
 		T          accum_n {};        // accumulated normal impulse magnitude (>= 0)
 		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
 		T          impact_speed {};   // approach speed at TOI; drives restitution target
@@ -92,6 +93,7 @@ public:
 		inv_mass_ = tr::one();
 		position_.reset();
 		velocity_.reset();
+		angular_velocity_.reset();
 		force_.reset();
 		coefficient_of_gravity_ = tr::one();
 		coefficient_of_restitution_ = tr::half();
@@ -196,6 +198,17 @@ public:
 		activate();
 	}
 	const vec3<T> & get_velocity() const { return velocity_; }
+	// Kinematic angular velocity (axis·rate about `position_`). Phase 6: this is
+	// scripted spin only — there is no inertia/torque integration, so a finite-mass
+	// body does not acquire it from collisions. Its sole effect is the surface
+	// velocity ω × (contact − position) the contact solver feeds into the existing
+	// non-penetration / friction constraints, so a spinning kinematic platform
+	// carries the riders touching it. Zero by default → exact no-op everywhere.
+	void set_angular_velocity(const vec3<T> & av) {
+		angular_velocity_.set(av);
+		activate();
+	}
+	const vec3<T> & get_angular_velocity() const { return angular_velocity_; }
 	void add_force(const vec3<T> & f) {
 		add(force_, f);
 		activate();
@@ -340,6 +353,7 @@ private:
 	vec3<T> position_;
 	mat3<T> orientation_;         // static body rotation (no angular dynamics); identity by default
 	vec3<T> velocity_;
+	vec3<T> angular_velocity_;    // kinematic scripted spin (axis·rate about position_); zero by default = no-op
 	vec3<T> force_;
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve

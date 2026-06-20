@@ -1,20 +1,22 @@
 # Rotation support — plan
 
 Roadmap for adding rotation to hop. Current as of June 2026: **static
-orientation** (Phase 4) and the **real traceable contact point** (the Phase 6/9
-prerequisite) have shipped.
+orientation** (Phase 4), the **real traceable contact point** (the Phase 6/9
+prerequisite), and **kinematic angular carry** (Phase 6 — spinning platforms
+carry their riders) have shipped.
 
 The roadmap builds up to full dynamic rotation in graded milestones, each
 shippable on its own:
 
-  static orientation (done) → finish the static narrowphase → **kinematic
-  angular carry / blocking** (GoldSrc `func_rotating` parity) → dynamic spin
-  under torque → angular impulse response → constraints/friction.
+  static orientation (done) → **kinematic angular carry** (done) → finish the
+  static narrowphase → kinematic blocking → dynamic spin under torque → angular
+  impulse response → constraints/friction.
 
 The kinematic-carry milestones (6–7) are deliberately ahead of the dynamic ones:
 they deliver the GoldSrc rotating-platform feel with no inertia/torque math, and
 the dynamic phases reuse the same `angular_velocity` state and contact-point
-plumbing.
+plumbing. Phase 6 shipped before Phase 5, exactly as anticipated below — the
+capsule-rider carry needed nothing from the polytope narrowphase.
 
 ## Status at a glance
 
@@ -25,7 +27,7 @@ plumbing.
 | 3. Rotation math primitives (`quat`, `mat3`, `asin`/`acos`) | done | |
 | 4. **Static orientation** — `solid.orientation` + `shape.local_rotation`, honored by GJK + traceables | done | |
 | 5. Close the static narrowphase gap (rotated polytope×polytope + box-mover-vs-traceable, OBB) | **next** | not started |
-| 6. Kinematic angular carry (`ω×r` surface velocity; spinning platforms carry riders) | pending — **unblocked** | contact point ready |
+| 6. Kinematic angular carry (`ω×r` surface velocity; spinning platforms carry riders) | done | `solid.angular_velocity`; solver biases relative velocity by `ω×r`; hop-godot derives ω from the per-frame orientation delta. Capsule/sphere riders only until Phase 5 |
 | 7. Kinematic blocking/crush + rider yaw carry (rotating-door parity) | pending | |
 | 8. Dynamic orientation state (angular integration under torque) | pending | |
 | 9. Angular impulse response | pending | contact point ready |
@@ -218,38 +220,48 @@ Many users (and all of GoldSrc's non-moving angled brushes) can stop here.
 
 **Estimated effort:** 1–1.5 weeks.
 
-### Phase 6 — kinematic angular carry (GoldSrc `func_rotating` parity)
+### Phase 6 — kinematic angular carry (GoldSrc `func_rotating` parity) — **SHIPPED**
 
-Make a spinning kinematic platform **carry** the bodies resting on / touching it,
+A spinning kinematic platform **carries** the bodies resting on / touching it,
 the way the existing kinematic *linear* movers carry riders. No inertia, torque,
 or angular impulse — the platform's spin is scripted; physics just transports
 riders.
 
-**Add:**
-- `vec3<T> angular_velocity_` on `solid` (axis·rate; pivot = `position`),
-  with set/get. Always-present, zero when unset.
-- In the contact solver, use the **surface velocity at the contact point** for
-  the collidee: `v_surface = v_linear + ω × (col.impact − position)`. Today it
-  reads linear velocity only; this one change makes an infinite-mass kinematic
-  pusher drag the rider tangentially through the existing non-penetration /
-  friction path — no new resolution code. `col.impact` is now the real surface
-  point on every pair, so the lever arm is correct for trimesh brushes too.
-- **hop-godot:** in the pre-step loop (mirrors the linear `velocity = delta/dt`
-  block), derive `ω` from the per-frame orientation delta
-  (`ΔR = R_new·R_oldᵀ` → axis-angle → `ω = axis·angle/dt`) and call
-  `set_angular_velocity`; snap orientation back post-step like position. Wire
-  `_body_set_state(ANGULAR_VELOCITY)` (currently a stored no-op) for scripts
-  that set `avelocity` directly.
+**Shipped:**
+- `vec3<T> angular_velocity_` on `solid` (axis·rate; pivot = `position`), with
+  set/get. Always-present, zero when unset, reset in `reset()`.
+- The contact solver biases the relative velocity by the **surface velocity at
+  the contact point**: it precomputes per-pair `v_bias = ω_b×r_b − ω_a×r_a`
+  (`r = touch.impact − position`) once at build, then adds it everywhere the GS
+  solver and restitution snapshot read `v_b − v_a` (`vn0`, the normal solve, and
+  the friction sweep). An infinite-mass kinematic pusher therefore drags the
+  rider tangentially through the existing non-penetration / friction path — no
+  new resolution code. The real contact point is now persisted into the `touch`
+  slot (`add_or_refresh_touch` takes `col.impact`), correct for trimesh brushes
+  too. Zero `ω` makes `v_bias` exactly zero (skipped) — an exact translation-only
+  no-op. Test: `test_angular_carry` in `tests/test_simulator.cpp` (float +
+  fixed16; a rider orbits a spinning platform, a no-spin control stays put).
+- **hop-godot:** the kinematic pre-step loop (alongside the linear
+  `velocity = delta/dt` block) derives `ω` from the per-frame orientation delta
+  (`ΔR = R_new·R_oldᵀ` → `set_quat_from_mat3` → `get_axis_angle_from_quat` →
+  `ω = axis·angle/dt`), commits the new orientation, and calls
+  `set_angular_velocity`; the post-step snap-back zeroes `ω` (orientation is
+  already the frame target). A per-frame angle past ~0.5 rad is treated as a
+  placement snap (discontinuous), mirroring the positional teleport guard.
+  `_body_set_state(ANGULAR_VELOCITY)` still only stores (kinematic carry is
+  transform-derived, like kinematic linear velocity; a directly-set `avelocity`
+  on a *dynamic* body awaits Phase 8 integration).
 
-**Note:** unblocked — the player-capsule-on-rotating-brush case has correct
-contacts from Phase 4 and a real contact point from the Phase 1 follow-up, so
-this can ship *before* Phase 5; Phase 5 only matters for box/convex riders
-(crates on a platform).
+**Scope:** capsule/sphere riders are carried correctly now; box/convex riders
+(crates on a platform) wait on Phase 5's polytope narrowphase. wizardwars riders
+are capsules, so this is fully usable.
 
 **End-of-phase state:** stand on a `func_rotating`, get carried around. The
 single biggest gameplay payoff in the roadmap.
 
-**Estimated effort:** 3–5 days.
+**Verification still owed:** in-engine smoke test (a `func_rotating` platform in
+the test-project carrying the player) — the C++ unit test passes, but the
+hop-godot wiring has only been compile-checked, not run in Godot.
 
 ### Phase 7 — kinematic blocking/crush + rider yaw carry
 
@@ -411,6 +423,13 @@ work. This phase is mostly documenting that rolling now works.
   contract in `traceable.h`, the no-clobber in `collide.h`, and tests
   `test_impact_traceable_floor` (hop) / `test_contact_point_on_surface`
   (hop-godot).
+- Phase 6 (kinematic angular carry): `solid.angular_velocity_` +
+  `set/get_angular_velocity` and `touch.impact` in `solid.h`; the per-pair
+  `v_bias` build and its use in the GS normal/friction sweeps in `simulator.h`
+  (`solve_contacts`); `add_or_refresh_touch` now carries `col.impact`. hop-godot:
+  the ω-from-orientation-delta derivation in `HopPhysicsServer::_step`
+  (kinematic pre-step loop). Test: `test_angular_carry` in
+  `tests/test_simulator.cpp`.
 - Toadlet port reference:
   `/Users/afischer/personal/toadlet/source/cpp/toadlet/egg/mathfixed/` —
   original quaternion/matrix3x3 ops and fixed-point polynomial asin/acos.

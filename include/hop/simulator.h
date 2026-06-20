@@ -421,6 +421,7 @@ private:
 	typename solid<T>::touch * add_or_refresh_touch(solid<T> * s,
 	                                                solid<T> * partner,
 	                                                const vec3<T> & normal,
+	                                                const vec3<T> & impact,
 	                                                T impact_speed,
 	                                                T separation,
 	                                                int tick);
@@ -481,6 +482,7 @@ private:
 		solid<T> * a;                // canonical: indexed earlier in solids_/iteration order
 		solid<T> * b;
 		vec3<T> normal;              // points from a's free side toward b
+		vec3<T> v_bias;              // angular surface-velocity bias added to (v_b - v_a): ω_b×r_b - ω_a×r_a (kinematic carry; zero when neither body spins)
 		T accum_n {};                // accumulated normal impulse magnitude (>= 0)
 		vec3<T> accum_t;             // accumulated friction impulse (a-side convention)
 		T impact_speed {};           // approach speed at TOI, for restitution
@@ -766,7 +768,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// the legacy restitution response for this contact (the speculative
 				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
-				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, impact_speed, separation, current_tick_);
+				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, impact_speed, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly.
 				if ((hit_solid->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
@@ -1057,7 +1059,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			}
 		}
 
-		add_or_refresh_touch(solid_ptr, partner, n, impact_speed, separation, current_tick_);
+		add_or_refresh_touch(solid_ptr, partner, n, col.impact, impact_speed, separation, current_tick_);
 
 		// Wake a real sleeping partner so it participates in the solve (the world
 		// anchor never sleeps).
@@ -1382,7 +1384,7 @@ typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * par
 
 template <typename T>
 typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
-    solid<T> * s, solid<T> * partner, const vec3<T> & normal, T impact_speed, T separation, int tick) {
+    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, T impact_speed, T separation, int tick) {
 	const T zero_val {};
 
 	// Refresh-in-place if this partner already has a slot. Sub-step iterations
@@ -1398,6 +1400,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 				slot.accum_t.reset();
 			}
 			slot.normal.set(normal);
+			slot.impact.set(impact);
 			if (slot.last_tick != tick) {
 				slot.impact_speed = impact_speed;
 			} else if (impact_speed > slot.impact_speed) {
@@ -1414,6 +1417,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 		auto & slot = s->touches_[s->touch_count_++];
 		slot.partner = partner;
 		slot.normal.set(normal);
+		slot.impact.set(impact);
 		slot.accum_n = zero_val;
 		slot.accum_t.reset();
 		slot.impact_speed = impact_speed;
@@ -1547,6 +1551,28 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			p.slot_a = slot_is_a ? &slot : other_slot;
 			p.slot_b = slot_is_a ? other_slot : &slot;
 
+			// Angular surface-velocity bias for kinematic carry (Phase 6). The
+			// solver drives the relative *surface* velocity (v + ω×r) to its
+			// targets, so a spinning kinematic platform drags the riders touching
+			// it through the existing non-penetration / friction constraints — no
+			// dedicated resolution code. ω is zero on every non-spinning body, so
+			// the bias is an exact no-op (and skipped) in translation-only scenes.
+			// The contact point comes from the iterating slot (authoritative for
+			// normal/impact); for Phase 6 only an infinite-mass platform carries an
+			// ω, and that point lies on its surface, so its lever arm is exact.
+			p.v_bias.reset();
+			const vec3<T> & wa = a->angular_velocity_;
+			const vec3<T> & wb = b->angular_velocity_;
+			const vec3<T> no_spin {};
+			if (!(wa == no_spin && wb == no_spin)) {
+				vec3<T> ra, rb, term_a, term_b;
+				sub(ra, slot.impact, a->position_);
+				sub(rb, slot.impact, b->position_);
+				cross(term_a, wa, ra);
+				cross(term_b, wb, rb);
+				sub(p.v_bias, term_b, term_a);  // ω_b×r_b − ω_a×r_a
+			}
+
 			contact_pairs_.push_back(p);
 			slot.pair_built_tick = current_tick_;
 			if (other_slot)
@@ -1566,6 +1592,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	for (auto & p : contact_pairs_) {
 		vec3<T> vrel0;
 		sub(vrel0, p.b->velocity_, p.a->velocity_);
+		add(vrel0, p.v_bias);  // include kinematic surface velocity (ω×r) for the carry
 		p.vn0 = dot(vrel0, p.normal);
 		// Restitution target and the λ mass-scale are constant across all GS
 		// sweeps for this pair, so derive them once here rather than per
@@ -1658,6 +1685,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	auto solve_normal = [&apply_pair_impulse, zero_val](contact_pair & p, T inv_a, T inv_b, T inv_sum) {
 		vec3<T> vrel;
 		sub(vrel, p.b->velocity_, p.a->velocity_);
+		add(vrel, p.v_bias);  // surface velocity (ω×r): the kinematic carry term
 		T vn = dot(vrel, p.normal);
 		T lambda_n = (p.target - vn) / inv_sum;
 		T new_acc = p.accum_n + lambda_n;
@@ -1700,6 +1728,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				continue;
 			vec3<T> vrel;
 			sub(vrel, p.b->velocity_, p.a->velocity_);
+			add(vrel, p.v_bias);  // surface velocity (ω×r): friction drags the rider to match the spin
 			T vn = dot(vrel, p.normal);
 			vec3<T> vn_vec;
 			mul(vn_vec, p.normal, vn);
