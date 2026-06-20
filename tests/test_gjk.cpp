@@ -218,6 +218,30 @@ template <typename T> static void test_gjk_sphere_box_drop(const char * label) {
 	printf("OK\n");
 }
 
+// LARGE-BOX FIXED-POINT REGRESSION: a sphere resting (slightly overlapping) on the
+// top face of a *large* box, off-axis in x. The CSO support points are then far
+// from the origin (~box half-extent), so the simplex closest-point math forms
+// degree-4 area products (and degree-6 face-side products in the tetra) that
+// overflow fixed16's ±32768 range. Pre-fix, GJK diverged from its default x-axis
+// warm-start and reported a bogus large distance with the wrong normal, so the
+// resting contact was lost and the sphere tunnelled through the box top. The sweep
+// here uses the same x-axis seed conservative_advance starts from, so it exercises
+// exactly that path; the contact must be found with an upward normal.
+template <typename T> static void test_gjk_large_box_contact(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  gjk_large_box_contact[%s]: ", label);
+	const T h = tr::from_int(40); // 40-unit half-extents: far CSO support points
+	shape<T> box(aa_box<T>(-h, -h, -h, h, h, h)); // top face at y=40
+	shape<T> sph(sphere<T>(v3<T>(0, 0, 0), tr::half()));
+	// Centre 0.45 above the top face (0.05 overlap for radius 0.5), off-axis in x.
+	auto r = sweep<T>(sph, v3<T>(2.75f, 40.45f, 0), v3<T>(0, -0.1f, 0), box, v3<T>(0, 0, 0), tr::half());
+	float ny = tr::to_float(r.normal.y);
+	printf("hit=%d valid=%d ny=%.3f depth=%.4f ", r.hit, r.valid, ny, tr::to_float(r.depth));
+	assert(r.valid && r.hit);     // pre-fix: missed entirely (bogus large distance)
+	assert(ny > 0.85f);           // upward contact normal, not a divergent garbage axis
+	printf("OK\n");
+}
+
 // THE BOX EQUIVALENT OF THE BOARDING FIX: capsule mounting a box's top edge must
 // get an upward normal. The old AABB-expansion path (trace_aa_box) returned only
 // axis-aligned normals, so ride-up over a box edge was impossible.
@@ -277,6 +301,45 @@ template <typename T> static void test_gjk_flag_switches_path(const char * label
 	assert(acc.time < tr::one() && cheap.time < tr::one()); // both contact
 	assert(acc_ny > 0.25f);                                  // GJK rides up
 	assert(std::fabs(cheap_ny) < 0.1f);                      // cheap path is flat
+	printf("OK\n");
+}
+
+// ANALYTIC SPHERE×BOX, driven through hop::test_solid so the real dispatch (which
+// routes sphere×box to the analytic clamp, not GJK) is exercised. A sphere resting
+// just inside the top face of a *large* box, off BOTH lateral axes (the case the
+// spin carry walks the contact into), must report an upward contact in fixed16.
+// Pre-fix, GJK reconstructed the contact vector as a weighted average of the box's
+// far vertices and lost it to cancellation: the distance came back ~0.19 too large
+// with a sideways normal, so the contact was dropped and the rider tunnelled. The
+// scaling fix in math/gjk.h covers the single-axis-offset case; this two-axis case
+// needs the analytic path. Swept tangentially (the carry direction) to match the
+// failing scenario.
+template <typename T> static void test_gjk_large_box_offaxis_solid(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  gjk_large_box_offaxis_solid[%s]: ", label);
+	const T h = tr::from_int(40);
+	auto box = std::make_shared<solid<T>>();
+	box->add_shape(std::make_shared<shape<T>>(aa_box<T>(-h, -h, -h, h, h, h))); // top face at y=40
+	box->set_position(v3<T>(0, 0, 0));
+
+	auto sph = std::make_shared<solid<T>>();
+	sph->set_mass(tr::one());
+	sph->add_shape(std::make_shared<shape<T>>(sphere<T>(v3<T>(0, 0, 0), tr::half())));
+	// Off-axis in BOTH x and z; centre 0.45 above the top (0.05 overlap for radius 0.5).
+	sph->set_position(v3<T>(2.75f, 40.45f, 1.5f));
+
+	segment<T> seg;
+	seg.origin = v3<T>(2.75f, 40.45f, 1.5f);
+	seg.direction = v3<T>(2, -0.1f, 0); // slide tangentially with a small downward sliver
+
+	const T eps = tr::from_milli(1);
+	collision<T> c;
+	c.time = tr::one();
+	hop::test_solid(c, sph.get(), seg, box.get(), eps, eps * tr::from_int(8), /*use_gjk=*/true);
+	float ny = tr::to_float(c.normal.y);
+	printf("time=%.3f ny=%.3f depth=%.4f ", tr::to_float(c.time), ny, tr::to_float(c.depth));
+	assert(c.time <= T {});  // overlapping the inflated shell ⇒ contact at t==0
+	assert(ny > 0.95f);      // clean upward normal (pre-fix fixed16: sideways, contact lost)
 	printf("OK\n");
 }
 
@@ -442,8 +505,10 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_gjk_wall_side<T>(label);
 	test_gjk_convex_mover_vs_capsule<T>(label);
 	test_gjk_sphere_box_drop<T>(label);
+	test_gjk_large_box_contact<T>(label);
 	test_gjk_capsule_box_edge_rideup<T>(label);
 	test_gjk_flag_switches_path<T>(label);
+	test_gjk_large_box_offaxis_solid<T>(label);
 	test_gjk_rest_tangential_free<T>(label);
 	test_gjk_penetration_reports<T>(label);
 	test_ca_custom_closest<T>(label);
