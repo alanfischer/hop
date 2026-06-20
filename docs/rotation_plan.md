@@ -84,6 +84,45 @@ Mitigations land in Phase 9:
 - Broad-phase AABB inflation for spinning solids: `+= |ω|·dt·r`.
 - End-of-step SAT-based penetration recovery.
 
+### Sub-frame rotation: snapshot → substep → conservative advancement
+
+The snapshot holds orientation fixed for a frame's trace and sweeps only
+*translation* in the rotated frame, so it loses the continuous guarantee for
+rotation: a contact that exists only at an intermediate angle (a thin rod
+spinning past a small obstacle — clear at both frame endpoints, sweeping through
+it at 90° between) is missed. The improvement spectrum, cheapest first — all
+deterministic for fixed-point replay:
+
+1. **Snapshot (today).** One orientation per frame. Fine when per-frame rotation
+   is small relative to clearance — which covers GoldSrc doors/platforms and most
+   gameplay. Rare overshoot is caught by the end-of-step SAT recovery above.
+
+2. **Angular substepping.** Subdivide the frame into N fixed-orientation
+   snapshots, interpolating `R(t)` between `R_old` and `R_new` (slerp / the
+   exponential-quat step from the integration decision) and sweeping translation
+   in each: `N ≈ ceil(|ω|·dt·r_max / clearance)`. Reuses the existing snapshot
+   trace entirely — just a loop — and is the **same lever** as the angular-velocity
+   cap: cap `|ω|` to force N=1, or substep to keep the speed. N=1 is today; N=2 is
+   the "trace the old and new frame, reconcile the contact" idea; N=k for fast
+   spinners. Recommended upgrade; lives in the same Phase 9 slot as the cap.
+
+3. **Rotational conservative advancement.** Extend hop's existing translation
+   `conservative_advance` with the rotational term — bound the max approach speed
+   of any point by `|ω|·r` and advance under the combined screw motion for a true
+   TOI. Principled but heavy: each iteration re-evaluates the closest point at the
+   interpolated `R(t)` (a rotated per-triangle query), and the bound math needs
+   fixed-point care. Reserve for a game with fast, thin, gameplay-critical
+   spinners (a blade trap you must not clip through). Note: Jolt's CCD is
+   linear-only and PhysX largely substeps — true angular CCD is nowhere
+   cheap-and-standard, so this is an escape hatch, not a planned phase.
+
+What does **not** work as a shortcut: tracing the two frame endpoints and
+interpolating the contact point as a *replacement* for the above. It catches
+contacts present at either endpoint (strictly better than one snapshot) but
+cannot reconstruct one that exists only between them — interpolating two misses
+is still a miss. That is exactly the N=2 case of substepping; use it as such, not
+as a substitute.
+
 ### Inertia model: principal-axis diagonal only
 
 Store inertia as a `vec3<T>` (Ix, Iy, Iz), not a full 3×3 tensor. Simpler
