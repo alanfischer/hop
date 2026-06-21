@@ -1,6 +1,16 @@
 # Tests rely on assert() — keep it live regardless of CMAKE_BUILD_TYPE.
 add_compile_options(-UNDEBUG)
 
+# Opt-in UndefinedBehaviorSanitizer for the test build. The fixed-point types do
+# signed shift/overflow-prone bit math; a negative `<< bits` shipped undetected
+# because the suite ran without UBSan. Build with -DHOP_UBSAN=ON to catch that
+# class (CI runs a dedicated UBSan job — see .github/workflows).
+option(HOP_UBSAN "Build tests with UndefinedBehaviorSanitizer" OFF)
+if(HOP_UBSAN)
+    add_compile_options(-fsanitize=undefined -fno-sanitize-recover=undefined)
+    add_link_options(-fsanitize=undefined)
+endif()
+
 add_executable(test_fixed16 test_fixed16.cpp)
 target_link_libraries(test_fixed16 PRIVATE hop)
 add_test(NAME test_fixed16 COMMAND test_fixed16)

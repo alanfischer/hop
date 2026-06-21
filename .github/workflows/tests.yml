@@ -24,3 +24,19 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build -C Debug --output-on-failure
+
+  ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure (UBSan)
+        run: cmake -B build-ubsan -DHOP_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug -DHOP_UBSAN=ON
+
+      - name: Build
+        run: cmake --build build-ubsan
+
+      # -fno-sanitize-recover makes any undefined behavior a hard failure, so a
+      # negative `<< bits` / signed overflow in the fixed-point types fails CI.
+      - name: Run tests (UBSan)
+        run: ctest --test-dir build-ubsan --output-on-failure

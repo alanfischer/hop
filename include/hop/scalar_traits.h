@@ -289,11 +289,13 @@ template <> struct scalar_traits<fixed16> {
 
 		int32_t absy = ((y.raw ^ (y.raw >> 31)) - (y.raw >> 31)) + 1;
 		int32_t angle;
+		// The ratio is a fixed16 divide; use operator/ (UB-safe) rather than inlining
+		// `(num << 32) / den >> 16`, whose left-shift is UB when num is negative.
 		if (x.raw >= 0) {
-			int32_t r = static_cast<int32_t>((((static_cast<int64_t>(x.raw - absy)) << 32) / (x.raw + absy)) >> 16);
+			int32_t r = (fixed16::from_raw(x.raw - absy) / fixed16::from_raw(x.raw + absy)).raw;
 			angle = quarter_pi_raw - static_cast<int32_t>((static_cast<int64_t>(quarter_pi_raw) * r) >> 16);
 		} else {
-			int32_t r = static_cast<int32_t>((((static_cast<int64_t>(x.raw + absy)) << 32) / (y.raw - absy)) >> 16);
+			int32_t r = (fixed16::from_raw(x.raw + absy) / fixed16::from_raw(y.raw - absy)).raw;
 			angle = three_quarter_pi_raw - static_cast<int32_t>((static_cast<int64_t>(quarter_pi_raw) * r) >> 16);
 		}
 		return fixed16::from_raw(y.raw < 0 ? -angle : angle);
@@ -301,13 +303,10 @@ template <> struct scalar_traits<fixed16> {
 
 	static constexpr bool is_real(fixed16) { return true; }
 
-	static constexpr fixed16 min_val(fixed16 a, fixed16 b) {
-		return fixed16::from_raw(b.raw + ((a.raw - b.raw) & -(a.raw < b.raw)));
-	}
-
-	static constexpr fixed16 max_val(fixed16 a, fixed16 b) {
-		return fixed16::from_raw(a.raw - ((a.raw - b.raw) & -(a.raw < b.raw)));
-	}
+	// Ternary, not the branchless `b + ((a-b) & -(a<b))` bit-hack: `a.raw - b.raw`
+	// overflows int32 for far-apart operands (UB). The compiler still emits a cmov.
+	static constexpr fixed16 min_val(fixed16 a, fixed16 b) { return a.raw < b.raw ? a : b; }
+	static constexpr fixed16 max_val(fixed16 a, fixed16 b) { return a.raw < b.raw ? b : a; }
 
 	static constexpr fixed16 clamp(fixed16 low, fixed16 high, fixed16 v) { return min_val(high, max_val(low, v)); }
 
@@ -325,6 +324,9 @@ template <> struct scalar_traits<fixed16> {
 	static fixed16 epsilon_squared(fixed16 epsilon) { return max_val(epsilon * epsilon, fixed16::from_raw(1)); }
 
 	static int default_epsilon_bits() { return 4; }
+	// Parity with the float traits so generic callers can ask for an epsilon without
+	// branching on is_fixed_scalar (e.g. get_axis_angle_from_quat's tolerance).
+	static fixed16 default_epsilon() { return make_epsilon(default_epsilon_bits()); }
 	static fixed16 default_max_position_component() { return fixed16::from_raw(0x7FFF0000); } // ~32767
 	static fixed16 default_max_velocity_component() { return fixed16::from_int(104); }
 	static fixed16 default_max_force_component() { return fixed16::from_int(104); }
@@ -500,13 +502,10 @@ template <> struct scalar_traits<fixed32> {
 
 	static constexpr bool is_real(fixed32) { return true; }
 
-	static constexpr fixed32 min_val(fixed32 a, fixed32 b) {
-		return fixed32::from_raw(b.raw + ((a.raw - b.raw) & -(int64_t)(a.raw < b.raw)));
-	}
-
-	static constexpr fixed32 max_val(fixed32 a, fixed32 b) {
-		return fixed32::from_raw(a.raw - ((a.raw - b.raw) & -(int64_t)(a.raw < b.raw)));
-	}
+	// Ternary, not the branchless `b + ((a-b) & -(a<b))` bit-hack: `a.raw - b.raw`
+	// overflows int64 for far-apart operands (UB). The compiler still emits a cmov.
+	static constexpr fixed32 min_val(fixed32 a, fixed32 b) { return a.raw < b.raw ? a : b; }
+	static constexpr fixed32 max_val(fixed32 a, fixed32 b) { return a.raw < b.raw ? b : a; }
 
 	static constexpr fixed32 clamp(fixed32 low, fixed32 high, fixed32 v) { return min_val(high, max_val(low, v)); }
 
@@ -523,6 +522,7 @@ template <> struct scalar_traits<fixed32> {
 	static fixed32 epsilon_squared(fixed32 epsilon) { return max_val(epsilon * epsilon, fixed32::from_raw(1)); }
 
 	static int default_epsilon_bits() { return 20; }
+	static fixed32 default_epsilon() { return make_epsilon(default_epsilon_bits()); }
 	static fixed32 default_max_position_component() { return fixed32::from_int(100000); }
 	static fixed32 default_max_velocity_component() { return fixed32::from_int(1000); }
 	static fixed32 default_max_force_component() { return fixed32::from_int(1000); }
