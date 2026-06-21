@@ -343,6 +343,41 @@ template <typename T> static void test_gjk_large_box_offaxis_solid(const char * 
 	printf("OK\n");
 }
 
+// The capsule analogue of test_gjk_large_box_offaxis_solid: a horizontal capsule
+// resting just inside the top of a *large* box, off both lateral axes. Capsule×box
+// routes through the analytic segment-vs-box closest point (alternating projection);
+// like sphere×box it has to keep the resting contact under fixed16 where GJK lost it.
+template <typename T> static void test_gjk_large_box_offaxis_capsule(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  gjk_large_box_offaxis_capsule[%s]: ", label);
+	const T h = tr::from_int(40);
+	auto box = std::make_shared<solid<T>>();
+	box->add_shape(std::make_shared<shape<T>>(aa_box<T>(-h, -h, -h, h, h, h))); // top face at y=40
+	box->set_position(v3<T>(0, 0, 0));
+
+	auto cap_solid = std::make_shared<solid<T>>();
+	cap_solid->set_mass(tr::one());
+	capsule<T> c;
+	c.set(v3<T>(0, 0, 0), v3<T>(1, 0, 0), tr::from_milli(400)); // horizontal spine, radius 0.4
+	cap_solid->add_shape(std::make_shared<shape<T>>(c));
+	// Spine 0.35 above the top (0.05 overlap for radius 0.4), off both lateral axes.
+	cap_solid->set_position(v3<T>(2.75f, 40.35f, 1.5f));
+
+	segment<T> seg;
+	seg.origin = v3<T>(2.75f, 40.35f, 1.5f);
+	seg.direction = v3<T>(0, -0.1f, 2); // slide tangentially (+z) with a small downward sliver
+
+	const T eps = tr::from_milli(1);
+	collision<T> col;
+	col.time = tr::one();
+	hop::test_solid(col, cap_solid.get(), seg, box.get(), eps, eps * tr::from_int(8), /*use_gjk=*/true);
+	float ny = tr::to_float(col.normal.y);
+	printf("time=%.3f ny=%.3f depth=%.4f ", tr::to_float(col.time), ny, tr::to_float(col.depth));
+	assert(col.time <= T {}); // contact at t==0
+	assert(ny > 0.95f);       // upward normal (pre-fix fixed16: contact lost off-axis on a big box)
+	printf("OK\n");
+}
+
 // THE "CAN'T GET OFF" REGRESSION: a capsule resting on a convex surface and
 // moving horizontally (tangent to the contact) must NOT be blocked — otherwise
 // it sticks at t==0 and can neither walk across the platform nor step off its
@@ -509,6 +544,7 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_gjk_capsule_box_edge_rideup<T>(label);
 	test_gjk_flag_switches_path<T>(label);
 	test_gjk_large_box_offaxis_solid<T>(label);
+	test_gjk_large_box_offaxis_capsule<T>(label);
 	test_gjk_rest_tangential_free<T>(label);
 	test_gjk_penetration_reports<T>(label);
 	test_ca_custom_closest<T>(label);

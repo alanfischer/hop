@@ -57,6 +57,12 @@ template <> struct scalar_traits<float> {
 	// Epsilon
 	static float make_epsilon(float epsilon) { return epsilon; }
 
+	// A representable squared-magnitude threshold for "this vector is ~zero" tests.
+	// For float this is just epsilon²; the fixed-point specializations floor it at
+	// the smallest representable value, because epsilon² underflows to 0 there
+	// (e.g. epsilon=0.001 in Q16.16) and would silently disable the guard.
+	static float epsilon_squared(float epsilon) { return epsilon * epsilon; }
+
 	static float default_epsilon() { return 0.001f; }
 	static float default_max_position_component() { return 100000.0f; }
 	static float default_max_velocity_component() { return 1000.0f; }
@@ -114,6 +120,7 @@ template <> struct scalar_traits<double> {
 
 	// Epsilon
 	static double make_epsilon(double epsilon) { return epsilon; }
+	static double epsilon_squared(double epsilon) { return epsilon * epsilon; }
 
 	static double default_epsilon() { return 0.001; }
 	static double default_max_position_component() { return 100000.0; }
@@ -312,6 +319,11 @@ template <> struct scalar_traits<fixed16> {
 	// Epsilon (fixed uses bit-shift)
 	static fixed16 make_epsilon(int epsilon_bits) { return fixed16::from_raw(1 << epsilon_bits); }
 
+	// epsilon² underflows to 0 in Q16.16 (e.g. epsilon=0.001 → raw 65, 65²>>16 = 0),
+	// which would disable every "vector ~zero" guard that compares against it. Floor
+	// at the smallest representable positive so the guard can still fire.
+	static fixed16 epsilon_squared(fixed16 epsilon) { return max_val(epsilon * epsilon, fixed16::from_raw(1)); }
+
 	static int default_epsilon_bits() { return 4; }
 	static fixed16 default_max_position_component() { return fixed16::from_raw(0x7FFF0000); } // ~32767
 	static fixed16 default_max_velocity_component() { return fixed16::from_int(104); }
@@ -505,6 +517,10 @@ template <> struct scalar_traits<fixed32> {
 
 	// Epsilon (fixed uses bit-shift; default gives same float epsilon as fixed16's default of 4 bits)
 	static fixed32 make_epsilon(int epsilon_bits) { return fixed32::from_raw(1LL << epsilon_bits); }
+
+	// Q32.32 has the range to hold the default epsilon² (unlike fixed16), but floor
+	// it anyway so a caller passing a tiny epsilon can't drive the guard to 0.
+	static fixed32 epsilon_squared(fixed32 epsilon) { return max_val(epsilon * epsilon, fixed32::from_raw(1)); }
 
 	static int default_epsilon_bits() { return 20; }
 	static fixed32 default_max_position_component() { return fixed32::from_int(100000); }

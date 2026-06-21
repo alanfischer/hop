@@ -374,6 +374,61 @@ template <typename T> static void test_angular_carry_box(const char * label) {
 	printf("  angular_carry_box[%s]: OK\n", label);
 }
 
+// Capsule-rider variant: an upright capsule on the spinning large box top. Exercises
+// the analytic capsule×box (segment-vs-box) path end-to-end under fixed16 — it must
+// keep the rider seated and carry it tangentially, just like the sphere rider.
+template <typename T> static void test_angular_carry_box_capsule(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  angular_carry_box_capsule[%s]: ", label);
+
+	auto run = [](const vec3<T> & omega) {
+		auto sim = std::make_shared<simulator<T>>();
+		sim->set_gravity({ T {}, T {}, -tr::from_int(10) });
+
+		auto platform = std::make_shared<solid<T>>();
+		platform->set_infinite_mass();
+		platform->set_position({ T {}, T {}, -tr::from_int(10) });
+		platform->set_coefficient_of_gravity(T {});
+		platform->set_coefficient_of_restitution(T {});
+		platform->set_coefficient_of_static_friction(tr::half());
+		platform->set_coefficient_of_dynamic_friction(tr::half());
+		platform->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(-tr::from_int(40), -tr::from_int(40), -tr::from_int(10),
+		              tr::from_int(40), tr::from_int(40), tr::from_int(10))));
+		platform->set_angular_velocity(omega);
+		sim->add_solid(platform);
+
+		// Upright capsule: spine 0..0.5 in z, radius 0.4 — bottom cap rests on z=0.
+		auto rider = std::make_shared<solid<T>>();
+		rider->set_mass(tr::one());
+		rider->set_position({ tr::from_int(3), T {}, tr::from_milli(600) });
+		rider->set_coefficient_of_restitution(T {});
+		rider->set_coefficient_of_static_friction(tr::half());
+		rider->set_coefficient_of_dynamic_friction(tr::half());
+		capsule<T> c;
+		c.set({ T {}, T {}, T {} }, { T {}, T {}, tr::half() }, tr::from_milli(400));
+		rider->add_shape(std::make_shared<shape<T>>(c));
+		sim->add_solid(rider);
+
+		for (int i = 0; i < 100; ++i)
+			sim->update(tr::from_milli(10));
+		return rider->get_position();
+	};
+
+	vec3<T> spun = run({ T {}, T {}, tr::one() });
+	vec3<T> still = run({ T {}, T {}, T {} });
+	float sx = tr::to_float(spun.x), sy = tr::to_float(spun.y), sz = tr::to_float(spun.z);
+	float ty = tr::to_float(still.y), tz = tr::to_float(still.z);
+	float r_spun = std::sqrt(sx * sx + sy * sy);
+	printf("spun=(%.2f,%.2f,%.2f) r=%.2f still_y=%.2f still_z=%.2f\n", sx, sy, sz, r_spun, ty, tz);
+
+	assert(sy > 0.5f);            // carried tangentially (+y) by the spinning box top
+	assert(std::fabs(ty) < 0.2f); // no drift without spin
+	assert(sz > 0.3f);            // bottom cap stayed on the top face (did NOT tunnel)
+	assert(r_spun > 2.0f && r_spun < 4.0f);
+	printf("  angular_carry_box_capsule[%s]: OK\n", label);
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -393,6 +448,7 @@ int main() {
 	test_mixed_modes_push<float>("float");
 	test_angular_carry<float>("float");
 	test_angular_carry_box<float>("float");
+	test_angular_carry_box_capsule<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -423,6 +479,7 @@ int main() {
 	test_mixed_modes_push<fixed16>("fixed16");
 	test_angular_carry<fixed16>("fixed16");
 	test_angular_carry_box<fixed16>("fixed16");
+	test_angular_carry_box_capsule<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

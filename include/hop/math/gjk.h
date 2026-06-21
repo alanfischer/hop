@@ -188,7 +188,7 @@ inline void gjk_core_distance(SupA && supportA, SupB && supportB, const vec3<T> 
 		sub(oy, b, a);
 	};
 
-	const T eps2 = epsilon * epsilon;
+	const T eps2 = tr::epsilon_squared(epsilon); // representable even in fixed16 (epsilon² underflows there)
 
 	vec3<T> y[4];
 	vec3<T> dir = seed_dir;
@@ -329,7 +329,7 @@ inline void conservative_advance(gjk_sweep_result<T> & res, const vec3<T> & moti
 	res.depth = zero;
 
 	const T tol = tr::max_val(epsilon, tr::from_milli(1));
-	const T eps2 = epsilon * epsilon;
+	const T eps2 = tr::epsilon_squared(epsilon); // representable even in fixed16 (epsilon² underflows there)
 	// "Tangential" is measured relative to the motion length, not an absolute
 	// epsilon: a body settling under gravity has a tiny-but-real approach (~the
 	// per-tick gravity sliver) that an absolute cutoff would wrongly discard,
