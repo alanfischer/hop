@@ -109,7 +109,7 @@ inline T closest_segment_triangle(const vec3<T> & p, const vec3<T> & q, const ve
 				closest_point_triangle(tx, x, a, b, c);
 				vec3<T> diff;
 				sub(diff, x, tx);
-				if (length_squared(diff) <= epsilon * epsilon) { cs = x; ct = x; return zero; }
+				if (length_squared(diff) <= tr::epsilon_squared(epsilon)) { cs = x; ct = x; return zero; } // epsilon² underflows in fixed16
 			}
 		}
 	}
