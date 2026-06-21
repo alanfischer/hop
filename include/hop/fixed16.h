@@ -16,10 +16,15 @@ struct fixed16 {
 	constexpr explicit fixed16(int32_t r, raw_tag) : raw(r) {}
 
 	static constexpr fixed16 from_raw(int32_t r) { return fixed16(r, raw_tag {}); }
-	static constexpr fixed16 from_int(int i) { return from_raw(i << bits); }
+	// i·2^bits as a raw value. Shift as unsigned: `i << bits` is UB for negative i
+	// (UBSan-fatal in debug); the unsigned bit pattern is identical. Shared by from_int
+	// and the integer comparison operators so the conversion lives in one place.
+	static constexpr int32_t int_raw(int i) { return static_cast<int32_t>(static_cast<uint32_t>(i) << bits); }
+	static constexpr fixed16 from_int(int i) { return from_raw(int_raw(i)); }
 	static constexpr fixed16 from_float(float f) { return from_raw(static_cast<int32_t>(f * one_raw)); }
 	static constexpr fixed16 from_milli(int m) {
-		return from_raw(static_cast<int32_t>(((static_cast<int64_t>(m) << 32) / 1000) >> bits));
+		// m·2^32 via multiply (a negative `<< 32` is UB); the trailing >> is a value shift.
+		return from_raw(static_cast<int32_t>((static_cast<int64_t>(m) * (static_cast<int64_t>(1) << 32) / 1000) >> bits));
 	}
 
 	constexpr int to_int() const { return raw >> bits; }
@@ -37,7 +42,9 @@ struct fixed16 {
 	constexpr fixed16 operator/(fixed16 b) const {
 		if (b.raw == 0)
 			return (raw >= 0) ? from_raw(INT32_MAX) : from_raw(INT32_MIN);
-		return from_raw(static_cast<int32_t>((((static_cast<int64_t>(raw)) << 32) / b.raw) >> bits));
+		// Shift the dividend as unsigned (a negative `<< 32` is UB); the bit pattern is raw·2^32.
+		int64_t num = static_cast<int64_t>(static_cast<uint64_t>(static_cast<int64_t>(raw)) << 32);
+		return from_raw(static_cast<int32_t>((num / b.raw) >> bits));
 	}
 
 	constexpr fixed16 operator%(fixed16 b) const { return from_raw(raw % b.raw); }
@@ -77,12 +84,12 @@ struct fixed16 {
 		return from_raw(raw / b);
 	}
 
-	constexpr bool operator==(int b) const { return raw == (b << bits); }
-	constexpr bool operator!=(int b) const { return raw != (b << bits); }
-	constexpr bool operator<(int b) const { return raw < (b << bits); }
-	constexpr bool operator<=(int b) const { return raw <= (b << bits); }
-	constexpr bool operator>(int b) const { return raw > (b << bits); }
-	constexpr bool operator>=(int b) const { return raw >= (b << bits); }
+	constexpr bool operator==(int b) const { return raw == int_raw(b); }
+	constexpr bool operator!=(int b) const { return raw != int_raw(b); }
+	constexpr bool operator<(int b) const { return raw < int_raw(b); }
+	constexpr bool operator<=(int b) const { return raw <= int_raw(b); }
+	constexpr bool operator>(int b) const { return raw > int_raw(b); }
+	constexpr bool operator>=(int b) const { return raw >= int_raw(b); }
 };
 
 // Commutative int ops
