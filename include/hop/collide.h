@@ -580,6 +580,7 @@ inline void box_segment_core_closest(const vec3<T> & p0, const vec3<T> & p1, con
 	T dd = length_squared(d);
 	vec3<T> pl(l0), cl;
 	if (dd > T {}) {
+		const T converged = tr::epsilon_squared(epsilon);
 		const int max_iter = 8;
 		for (int i = 0; i < max_iter; ++i) {
 			box_clamp_local(box, pl, cl); // closest box point to the current spine point
@@ -592,7 +593,7 @@ inline void box_segment_core_closest(const vec3<T> & p0, const vec3<T> & p1, con
 			vec3<T> moved;
 			sub(moved, next, pl);
 			pl.set(next);
-			if (length_squared(moved) <= tr::epsilon_squared(epsilon))
+			if (length_squared(moved) <= converged)
 				break; // converged
 		}
 	}
@@ -633,9 +634,8 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 	// analytic form is exact at any box size, so a sphere/capsule resting on or
 	// sliding across a big box top keeps its contact under fixed16. conservative_advance
 	// still owns the swept semantics — only the closest-point method changes.
-	auto is_rounded = [](shape_type t) { return t == shape_type::sphere || t == shape_type::capsule; };
-	const bool sh1_rounded_sh2_box = is_rounded(sh1->get_type()) && sh2->get_type() == shape_type::box;
-	const bool sh1_box_sh2_rounded = sh1->get_type() == shape_type::box && is_rounded(sh2->get_type());
+	const bool sh1_rounded_sh2_box = is_rounded_shape(sh1->get_type()) && sh2->get_type() == shape_type::box;
+	const bool sh1_box_sh2_rounded = sh1->get_type() == shape_type::box && is_rounded_shape(sh2->get_type());
 	if (sh1_rounded_sh2_box || sh1_box_sh2_rounded) {
 		// Roles: the mover is shape A (swept by xA); the box may be the mover or the
 		// target. box_*_core_closest returns the axis outward from the box toward the
@@ -653,7 +653,9 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 		mat3<T> RboxT;
 		if (!box_id)
 			transpose(RboxT, Rbox);
-		// Rounded core endpoints in the rounded shape's local frame (e1 == e0 for a sphere).
+		// Rounded core endpoints in the rounded shape's local frame (e1 == e0 for a
+		// sphere), rotated into world orientation ONCE here — they are invariant across
+		// the conservative_advance iterations, so the lambda only adds the (moving) base.
 		const bool is_capsule = rsh->get_type() == shape_type::capsule;
 		vec3<T> e0, e1;
 		if (is_capsule) {
@@ -662,6 +664,14 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 		} else {
 			e0.set(rsh->get_sphere().origin);
 			e1.set(e0);
+		}
+		vec3<T> re0, re1; // world-oriented offsets of the endpoints from the rounded base
+		if (rnd_id) {
+			re0.set(e0);
+			re1.set(e1);
+		} else {
+			mul(re0, Rr, e0);
+			mul(re1, Rr, e1);
 		}
 		conservative_advance<T>(res, seg.direction, combined_radius, epsilon,
 		    [&](const vec3<T> & xA, const vec3<T> &, T & dist, vec3<T> & n, bool & deep) {
@@ -672,16 +682,8 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 			    else
 				    add(bbase, xA);
 			    vec3<T> p0, p1; // rounded core endpoints in world
-			    if (rnd_id) {
-				    add(p0, rnd_base, e0);
-				    add(p1, rnd_base, e1);
-			    } else {
-				    vec3<T> t;
-				    mul(t, Rr, e0);
-				    add(p0, rnd_base, t);
-				    mul(t, Rr, e1);
-				    add(p1, rnd_base, t);
-			    }
+			    add(p0, rnd_base, re0);
+			    add(p1, rnd_base, re1);
 			    if (is_capsule)
 				    box_segment_core_closest(p0, p1, bbase, Rbox, RboxT, box, box_id, dist, n, deep, epsilon);
 			    else
