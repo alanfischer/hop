@@ -5,24 +5,34 @@ orientation** (Phase 4), the **real traceable contact point** (the Phase 6/9
 prerequisite), **kinematic angular carry** (Phase 6 — spinning platforms carry
 their riders, verified), the **complete static narrowphase** (Phase 5 — every
 collision pair honors a static orientation), **dynamic free spin under torque**
-(Phase 8 — solids integrate their own orientation), and **angular impulse response**
-(Phase 9 — bodies bounce/tumble off what they hit) have shipped.
+(Phase 8 — solids integrate their own orientation), **angular impulse response**
+(Phase 9 — bodies bounce/tumble off what they hit), **angular constraints**
+(Phase 10 — off-center anchors torque their bodies), and the **docs/examples/bindings**
+(Phase 11) have shipped. The rotation roadmap is functionally complete; only the
+game-side Phase 7 (deferred) and in-engine Godot smoke tests remain.
 
 The roadmap builds up to full dynamic rotation in graded milestones, each
 shippable on its own:
 
   static orientation (done) → **kinematic angular carry** (done) → finish the
   static narrowphase (done) → dynamic spin under torque (done) → angular impulse
-  response (done) → constraints/friction use angular (Phase 10, next).  (Phase 7,
-  kinematic door blocking/yaw carry, is deferred — its data is already exposed, so
-  it's a game-side feature, not hop work.)
+  response (done) → constraints/friction use angular (done) → docs/examples/bindings
+  (done).  (Phase 7, kinematic door blocking/yaw carry, is deferred — its data is
+  already exposed, so it's a game-side feature, not hop work.)
 
 Phases were not done strictly in order: 6 before 5 (capsule carry needed nothing
 from the polytope narrowphase), and 8/9 before 7 (the dynamic arc is the real library
 work; Phase 7 is game-side). The full dynamic-rotation feel is now in — off-center
-hits induce spin, spinning bodies tumble and roll. The next milestone is **Phase 10**
-(constraints use angular attach points); Phase 9's deferred end-of-step SAT recovery
-(for fast/thin spinners) is the remaining hardening item.
+hits induce spin, spinning bodies tumble and roll, and off-center constraint anchors
+torque their bodies (Phase 10), and the docs/examples/bindings are updated (Phase 11).
+**The rotation roadmap is functionally complete.** The only open item is the Phase 7
+game-side decision (kinematic door blocking + rider yaw carry — implement in the game
+or formally drop from hop scope), plus the in-engine Godot smoke tests still owed.
+Phase 9's deferred end-of-step SAT recovery was **investigated and found redundant** —
+the broad-phase inflation + Phase 5 oriented narrowphase + Phase 9 angular response
+already stop a fast/thin spinner from tunnelling (measured; see
+`test_fast_spinner_no_tunnel`), so a parallel SAT pass would only duplicate that
+discovery and damping.
 
 ## Status at a glance
 
@@ -37,8 +47,8 @@ hits induce spin, spinning bodies tumble and roll. The next milestone is **Phase
 | 7. Kinematic blocking/crush + rider yaw carry (rotating-door parity) | deferred | data already exposed (`get_touch` partner/ω + contact depth); it's a game-side feature, not hop-library work — skipped to do the dynamic arc first |
 | 8. Dynamic orientation state (angular integration under torque) | done | `solid.inertia_/inv_inertia_/torque_/orientation_q_`; `integrate_angular` (body-frame Euler eq + gyroscopic + exponential quat step) in `simulator.h`; `inv_inertia==0` opt-out (default); angular cap + deactivation. hop-godot: inertia auto-compute, torque, ω state, orientation writeback |
 | 9. Angular impulse response | done | lever-arm impulse in the GS velocity solver (`solve_contacts`): off-center hits transfer linear↔angular, friction induces rolling, Phase 6 carry is the infinite-inertia limit. Gated on `rotates_dynamically()` so non-rotating pairs stay bit-identical. + broad-phase inflation for spinners. (End-of-step SAT recovery deferred) |
-| 10. Constraints and friction use angular | pending | |
-| 11. Docs, examples, bindings | pending | |
+| 10. Constraints and friction use angular | done | `constraint<T>` anchors rotate with their solid (`R·local_anchor`) and exert torque via lever arm (`accumulate_constraint_torque`, τ = r×F); anchor velocity carries `ω×r` for damping. Center anchors (the default) stay bit-identical. Friction already shipped in Phase 9 |
+| 11. Docs, examples, bindings | done | README de-"translation-only" + opt-in/identity-fast-path framing + traceable migration note; `demo_rotating_platform` (Phase 6 carry); web bindings expose orientation/angular-velocity/inertia/torque; hop-godot wrapper already wired |
 
 ---
 
@@ -88,9 +98,10 @@ hop's "zero overlap, ever" guarantee in exchange for tractability. (Note: the
 shipped Phase 4 already snapshots a fixed orientation per frame — same trade,
 and the same one GoldSrc makes by rotating brushes discretely per tick.)
 Mitigations land in Phase 9:
-- Angular velocity cap (like the existing linear cap).
-- Broad-phase AABB inflation for spinning solids: `+= |ω|·dt·r`.
-- End-of-step SAT-based penetration recovery.
+- Angular velocity cap (like the existing linear cap). **Shipped.**
+- Broad-phase AABB inflation for spinning solids: `+= |ω|·dt·r`. **Shipped.**
+- ~~End-of-step SAT-based penetration recovery.~~ **Not needed** — the inflation +
+  oriented narrowphase + angular response already cover it (see Phase 9).
 
 ### Sub-frame rotation: snapshot → substep → conservative advancement
 
@@ -192,9 +203,12 @@ per-query quat→matrix conversion). The dynamic phases integrate a `quat<T>`
    `set_orientation`, so static spinners refit each step. Probably fine for
    hop-scale scenes but measure on worst case.
 
-5. **End-of-step penetration recovery** — new code path. SAT over OBB pairs +
-   push-out along least-penetrating axis + dampen angular velocity along that
-   axis. Needs to preserve determinism for fixed16 replay.
+5. ~~**End-of-step penetration recovery**~~ — **resolved without new code.** The
+   intended SAT-over-OBB-pairs pass turned out to duplicate work already done: the
+   Phase 5 oriented narrowphase discovers the overlap, the existing position recovery
+   pushes out along the contact normal, and the Phase 9 angular solver damps the
+   spin at the lever arm. Verified against a pinned fast spinner
+   (`test_fast_spinner_no_tunnel`). See Phase 9 for the full reasoning.
 
 ---
 
@@ -438,34 +452,80 @@ hop-godot addon recompiles. Demo: `examples/demo_bounce.cpp`'s free box has fini
 inertia + oriented rendering — it now tumbles off the walls/floor (the headline
 payoff to "why doesn't the bounce demo tumble").
 
-**Deferred / owed:** end-of-step SAT penetration recovery for fast/thin spinners
-(per scope); in-engine Godot smoke (a `RigidBody3D` tumbling off a wall).
+**End-of-step SAT recovery — investigated, found redundant.** This was deferred out
+of Phase 9 as the hardening item for fast/thin spinners that sweep through a thin
+obstacle between orientation snapshots. Measuring the actual failure case showed it is
+already covered by three shipped mechanisms acting together: (1) the Phase 9
+broad-phase inflation `|ω|·dt·r_max` widens the query so the swept trace still finds
+the contact; (2) the Phase 5 oriented narrowphase discovers the OBB overlap at the
+endpoint orientation; (3) the existing position recovery pushes the bodies apart and
+feeds the contact (with `separation = −depth`) into the Phase 9 angular solver, which
+damps the spin-driven closing velocity at the lever arm. A blade spinning at 40 rad/s
+(tip sweeping 1.28 units/step against a 0.2-thick wall), **pinned at its center so it
+cannot recoil**, is still stopped at the wall's near face with its spin arrested
+(`test_fast_spinner_no_tunnel`, float + fixed16). A standalone SAT pass would only
+re-derive that same oriented overlap and angular damping, so it was not built. The one
+genuinely-uncovered case remains true mid-rotation tunnelling — a contact present only
+*between* two snapshots, clear at both endpoints — which the *Key decisions* section
+already classifies as an angular-CCD escape hatch (substepping / rotational
+conservative advancement), not a planned phase.
 
-### Phase 10 — constraints and friction use angular
+**Owed:** in-engine Godot smoke (a `RigidBody3D` tumbling off a wall).
 
-**Local attach points on `constraint<T>`:** anchor in solid's local frame,
-rotates with the solid. Spring force at offset produces torque via lever
-arm. Naturally subsumes existing spring behavior when attach point is at
-origin.
+### Phase 10 — constraints and friction use angular — **SHIPPED**
 
-**Nothing new for friction** — Phase 9 already did the tangential-impulse
-work. This phase is mostly documenting that rolling now works.
+**Local attach points on `constraint<T>`** now rotate with their solid and torque it:
 
-**Estimated effort:** 2–3 days.
+- The anchor's world lever arm is `R·local_anchor` (`anchor_lever`), so the anchor
+  tracks the body's orientation. A zero anchor — the default — gives a zero lever, so
+  every existing center-anchored constraint is **bit-identical** (`test_constraint_anchor_torque`'s
+  centered case spins at exactly 0, float and fixed16).
+- The spring/damping force at that lever exerts torque `τ = r × F`, summed once per
+  step into `torque_` by `accumulate_constraint_torque` (called inside
+  `integrate_angular`, alongside game-applied torque, only for `rotates_dynamically()`
+  bodies). The per-constraint force is factored into `constraint_force_on`, shared by
+  the linear `constraint_link` and the angular torque pass (one force function, two
+  consumers — no duplicated spring math).
+- The anchor's **velocity carries `ω×r`** (`anchor_velocity`) so the damping term
+  resists spin too; zero lever ⇒ plain body velocity ⇒ bit-identical.
 
-### Phase 11 — docs, examples, bindings
+**Nothing new for friction** — Phase 9 already did the tangential-impulse work; a
+sliding/rolling body torques itself through the contact. This phase adds the
+constraint-anchor half.
 
-- **README:** retire "translation-only" framing. Document the runtime
-  identity-fast-path (zero cost when unrotated) — there is no opt-in flag.
-- **Examples:** rotating-platform demo (Phase 6) and a cube tumbling on a ramp
-  (Phase 9).
-- **Web bindings:** expose `setOrientation`/`getOrientation`,
-  `setAngularVelocity`/`getAngularVelocity`, `setInertia` on `HopSolid`.
-- **hop-godot wrapper:** already adopted the Phase 4 API and fills `col.impact`;
-  extend for angular-velocity carry (Phase 6).
-- **Migration guide:** Phase 4 shipped with no API break for existing users
-  (identity no-op); document the traceable interface change (`orientation` arg +
-  the `impact` contract) for custom `traceable` implementors.
+**Tests:** `test_constraint_anchor_torque` in `tests/test_simulator.cpp` (float +
+fixed16): an off-center spring pull spins the body about +z while a centered pull
+gives pure translation (exactly zero spin). Full suite green; UBSan+ASan clean.
+
+**Owed:** in-engine Godot smoke (a joint/spring anchored off-center actually torquing
+a `RigidBody3D`) — the hop-godot binding does not yet plumb per-joint local anchors.
+
+### Phase 11 — docs, examples, bindings — **SHIPPED**
+
+- **README:** the "translation-only" framing is retired. The *Design Philosophy*
+  section now documents rotation as **opt-in by construction** via the runtime
+  identity fast path (no template flag, no global switch — you pay only on bodies
+  that set an orientation/inertia/angular velocity), and the *Features* list calls out
+  the rotation capabilities.
+- **Examples:** `examples/demo_rotating_platform.cpp` — a Phase 6 showcase: a spinning
+  infinite-mass platform carries its dynamic riders around by friction (`ω×r` bias),
+  and the riders' own inertia spins them up (Phase 9). Verified headlessly (a rider
+  orbits a half-circle at radius ≈3, stays on the platform, self-spins to the surface
+  rate). Dynamic tumbling is already covered by `demo_bounce` (free box, octahedron,
+  rolling sphere, constraint-linked bola) and `demo_static_rotation` (static tilt +
+  free spin), so no separate ramp demo was added.
+- **Web bindings:** `HopSolid` now exposes `setOrientation`/`getOrientation`
+  (quaternion `{x,y,z,w}`), `setAngularVelocity`/`getAngularVelocity`, `setInertia`,
+  and `addTorque` (`web/hop_bindings.cpp`). The WASM module rebuilds cleanly via the
+  canonical `HOP_BUILD_WEB` CMake path.
+- **hop-godot wrapper:** already adopted the Phase 4 API, fills `col.impact`, and
+  carries angular velocity (Phase 6) + dynamic spin/impulse (Phase 8/9) — shipped in
+  the earlier hop-godot PRs.
+- **Migration guide:** the README's *Migrating a custom `traceable` for rotation*
+  subsection documents the two interface changes for custom traceable implementors
+  (honor the mover's `orientation` via the `Rᵀ`/`R` local-frame trace; fill the real
+  `col.impact` witness point). The public `solid`/`simulator` API stayed
+  source-compatible (identity no-op).
 
 ---
 
@@ -551,6 +611,20 @@ work. This phase is mostly documenting that rolling now works.
   `solve_contacts` (`simulator.h`). Tests `test_angular_impulse` /
   `test_friction_rolling` in `tests/test_simulator.cpp`; demo `examples/demo_bounce.cpp`
   (the free box tumbles).
+- Phase 10 (constraint anchors use angular): `constraint<T>::local_anchor_a_/b_`
+  rotated by the solid orientation in `is_loaded` (`constraint.h`); `constraint_force_on`
+  (shared per-constraint force + lever), `accumulate_constraint_torque`, `anchor_lever`,
+  `anchor_velocity`, and the torque hook in `integrate_angular` (`simulator.h`). Test:
+  `test_constraint_anchor_torque` in `tests/test_simulator.cpp`.
+- Phase 9 SAT-recovery investigation (found redundant): no production code; regression
+  `test_fast_spinner_no_tunnel` in `tests/test_simulator.cpp` (a pinned blade spinning
+  at 40 rad/s is stopped at a thin wall, spin arrested) guards the broad-phase
+  inflation + oriented narrowphase + angular response that subsume it.
+- Phase 11 (docs/examples/bindings): the *Design Philosophy* + *Features* +
+  *Migrating a custom `traceable` for rotation* sections in `README.md`; the
+  `setOrientation`/`getOrientation`/`setAngularVelocity`/`getAngularVelocity`/`setInertia`/`addTorque`
+  bindings in `web/hop_bindings.cpp`; the `demo_rotating_platform` target in
+  `CMakeLists.txt` + `examples/demo_rotating_platform.cpp`.
 - Toadlet port reference:
   `/Users/afischer/personal/toadlet/source/cpp/toadlet/egg/mathfixed/` —
   original quaternion/matrix3x3 ops and fixed-point polynomial asin/acos.
