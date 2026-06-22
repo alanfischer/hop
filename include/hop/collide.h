@@ -720,6 +720,246 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 	return true;
 }
 
+// ── Oriented polytope × polytope (box/convex, either side rotated) ───────────
+//
+// The axis-aligned polytope branches in test_solid (trace_aa_box / Minkowski
+// difference) ignore a solid's orientation. Rounded×polytope is covered by the
+// GJK path, but polytope×polytope deliberately avoids GJK (zero combined radius
+// resolves contact at dist≈0 and loses fixed-point precision — see
+// gjk_eligible_pair). For an oriented pair we instead reduce to a point-vs-
+// convex_solid sweep against the Minkowski configuration-space obstacle (CSO)
+//   N = S_B ⊖ S_A = { b − a : a ∈ A(s1, mover), b ∈ B(s2, target) }
+// and trace it with the exact, plane-based trace_convex_solid: A overlaps B after
+// moving by t·dir iff the point t·dir lies inside N.
+//
+// CSO planes are built at each candidate normal's *support distance* h_N(n) =
+// sup_B(n) + sup_A(−n), which is tangent to N — it never cuts inside, so any set
+// of normals gives a bounding superset and adding more only tightens it toward
+// exact (never a false negative). Including both shapes' face normals bounds N;
+// adding the edge-edge cross products tightens OBB×OBB to exact. A degenerate
+// (near-zero) cross product is simply skipped. Verts/normals are built relative to
+// the mover's reference (seg.origin) so sup_*() stays in shape-local magnitudes,
+// keeping fixed16 dot products well inside range (N itself sits near the origin).
+
+// World-space (mover-relative) description of a polytope for the CSO build: its
+// vertices for support evaluation, outward face normals, and edge directions.
+template <typename T> struct world_polytope {
+	std::vector<vec3<T>> verts;
+	std::vector<vec3<T>> normals; // outward face normals
+	std::vector<vec3<T>> edges;   // edge directions (need not be unit)
+
+	// Support height in direction d: max over verts of d·v.
+	T support(const vec3<T> & d) const {
+		T best = dot(d, verts[0]);
+		for (size_t i = 1; i < verts.size(); ++i) {
+			T dp = dot(d, verts[i]);
+			if (dp > best)
+				best = dp;
+		}
+		return best;
+	}
+};
+
+// Fill `wp` for a box or convex shape rotated by R and placed at `base` (already
+// mover-relative). For a box: 8 corners, the 6 ±axis face normals, and the 3 axes
+// as edge directions. For a convex: rotated vertices/plane-normals, and edge
+// directions as the deduplicated pairwise cross products of its face normals (a
+// safe superset of its true edge directions — see header note).
+template <typename T>
+inline void build_world_polytope(world_polytope<T> & wp, const shape<T> * sh,
+                                 const mat3<T> & R, const vec3<T> & base, T epsilon) {
+	using tr = scalar_traits<T>;
+	wp.verts.clear();
+	wp.normals.clear();
+	wp.edges.clear();
+	const T eps2 = tr::epsilon_squared(epsilon);
+	// Map a shape-local point to a world vertex: R·local + base.
+	auto push_vert = [&](const vec3<T> & local) {
+		vec3<T> w;
+		mul(w, R, local);
+		add(w, base);
+		wp.verts.push_back(w);
+	};
+
+	if (sh->get_type() == shape_type::box) {
+		const aa_box<T> & b = sh->get_box();
+		vec3<T> center, half;
+		add(center, b.mins, b.maxs);
+		mul(center, tr::half());
+		sub(half, b.maxs, b.mins);
+		mul(half, tr::half());
+		vec3<T> ax[3];
+		mul(ax[0], R, constants<T>::x_unit_vec3());
+		mul(ax[1], R, constants<T>::y_unit_vec3());
+		mul(ax[2], R, constants<T>::z_unit_vec3());
+		for (int s = 0; s < 8; ++s)
+			push_vert(vec3<T>(center.x + ((s & 1) ? half.x : -half.x),
+			                  center.y + ((s & 2) ? half.y : -half.y),
+			                  center.z + ((s & 4) ? half.z : -half.z)));
+		for (int i = 0; i < 3; ++i) {
+			wp.normals.push_back(ax[i]);
+			wp.normals.push_back(-ax[i]);
+			wp.edges.push_back(ax[i]);
+		}
+		return;
+	}
+
+	// convex_solid
+	const convex_solid<T> & cs = sh->get_convex_solid();
+	ensure_vertices(cs);
+	for (const auto & v : cs.vertices)
+		push_vert(v);
+	for (const auto & p : cs.planes) {
+		vec3<T> n;
+		mul(n, R, p.normal);
+		wp.normals.push_back(n);
+	}
+	const size_t edge_cap = 64;
+	for (size_t i = 0; i < wp.normals.size() && wp.edges.size() < edge_cap; ++i) {
+		for (size_t j = i + 1; j < wp.normals.size() && wp.edges.size() < edge_cap; ++j) {
+			vec3<T> e;
+			cross(e, wp.normals[i], wp.normals[j]);
+			if (!normalize_carefully(e, epsilon))
+				continue; // parallel normals — no edge direction
+			bool dup = false;
+			for (const auto & ex : wp.edges) {
+				vec3<T> c;
+				cross(c, ex, e);
+				if (length_squared(c) <= eps2) { // collinear with an existing edge dir
+					dup = true;
+					break;
+				}
+			}
+			if (!dup)
+				wp.edges.push_back(e);
+		}
+	}
+}
+
+// Build the CSO N = S_B ⊖ S_A as a convex_solid. Each plane is the tangent of N
+// in some candidate normal direction n, at distance h_N(n) = sup_B(n)+sup_A(−n):
+// B's face normals, A's face normals negated, and ±(edge_A × edge_B).
+template <typename T>
+inline void build_polytope_cso(convex_solid<T> & out, const world_polytope<T> & A,
+                               const world_polytope<T> & B, T epsilon) {
+	using tr = scalar_traits<T>;
+	out.planes.clear();
+	out.vertices.clear();
+	out.planes.reserve(A.normals.size() + B.normals.size() + A.edges.size() * B.edges.size() * 2);
+	// Coincident planes are common here (a box edge direction crossed with the
+	// other box's axis reproduces a face normal), and an exact duplicate makes the
+	// plane-based trace reject its own entry under fixed-point rounding: the point
+	// recomputed at the entry plane's TOI lands an ulp *outside* its twin, failing
+	// the strict "inside all other planes" test. Drop a normal we already carry at
+	// (near-)equal distance — same half-space, so the CSO is unchanged.
+	const T dist_tol = tr::from_milli(1);
+	auto add_plane = [&](const vec3<T> & n) {
+		T d = B.support(n) + A.support(-n);
+		for (const auto & p : out.planes) {
+			if (dot(p.normal, n) > tr::from_milli(999) && tr::abs(p.distance - d) <= dist_tol)
+				return; // duplicate half-space
+		}
+		out.planes.push_back(plane<T>(n, d));
+	};
+	for (const auto & nb : B.normals)
+		add_plane(nb);
+	for (const auto & na : A.normals)
+		add_plane(-na);
+	for (const auto & ea : A.edges) {
+		for (const auto & eb : B.edges) {
+			vec3<T> n;
+			cross(n, ea, eb);
+			if (!normalize_carefully(n, epsilon))
+				continue; // parallel edges — degenerate, skip (only loosens the bound)
+			add_plane(n);
+			add_plane(-n);
+		}
+	}
+}
+
+// Oriented polytope×polytope swept trace. Mirrors trace_pair_gjk's placement math
+// (Ri = solid_orientation · shape_local_rotation; base = solid_position +
+// solid_orientation · local_position), builds N relative to the mover's reference
+// (seg.origin) so support magnitudes stay shape-local, then sweeps t·dir through N.
+template <typename T>
+inline void trace_pair_oriented_polytope(collision<T> & col, const segment<T> & seg,
+                                         solid<T> * s1, solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
+                                         const vec3<T> & lp1, const vec3<T> & lp2, T margin, T epsilon) {
+	using tr = scalar_traits<T>;
+	mat3<T> R1, R2;
+	mul(R1, s1->get_orientation(), sh1->get_local_rotation());
+	mul(R2, s2->get_orientation(), sh2->get_local_rotation());
+	// Mover-relative bases (subtract seg.origin from each world base):
+	//   base1 − seg.origin = orientation1 · lp1
+	//   base2 − seg.origin = (s2.position − s1.position) + orientation2 · lp2
+	vec3<T> base1, base2;
+	mul(base1, s1->get_orientation(), lp1);
+	mul(base2, s2->get_orientation(), lp2);
+	vec3<T> rel;
+	sub(rel, s2->get_position(), seg.origin);
+	add(base2, rel);
+
+	world_polytope<T> A, B;
+	build_world_polytope(A, sh1, R1, base1, epsilon);
+	build_world_polytope(B, sh2, R2, base2, epsilon);
+	if (A.verts.empty() || B.verts.empty())
+		return; // malformed convex — leave col untouched (no hit)
+
+	convex_solid<T> cso;
+	build_polytope_cso(cso, A, B, epsilon);
+	if (margin > T {})
+		for (auto & p : cso.planes)
+			p.distance = p.distance + margin;
+
+	// Sweep the config point (origin, moving by seg.direction) through N using
+	// conservative advancement, with the CSO's exact deepest-face signed distance as
+	// the closest-point function. trace_convex_solid's per-face swept entry MISSES an
+	// edge/vertex contact (the entry point on one face lands a hair outside an
+	// adjacent face and is rejected), so a body resting on a rotated edge is un-caught
+	// every frame and jitters/sinks. conservative_advance owns the swept-contact
+	// semantics (resting, tangential-free, undershoot) the same way it does for the
+	// GJK/rounded pairs — but here the distance is the plane-exact `max_i(n_i·xA −
+	// d_i)`, so there is no GJK simplex and no fixed-point precision loss. Signed:
+	// >0 separated (the true surface gap), ~0 touching, <0 penetrating.
+	gjk_sweep_result<T> res;
+	conservative_advance<T>(res, seg.direction, T {} /*combined_radius*/, epsilon,
+	    [&](const vec3<T> & xA, const vec3<T> &, T & dist, vec3<T> & n, bool & deep) {
+		    deep = false;
+		    T best = -tr::default_max_position_component();
+		    int bi = -1;
+		    for (int i = 0; i < static_cast<int>(cso.planes.size()); ++i) {
+			    T d = dot(cso.planes[i].normal, xA) - cso.planes[i].distance;
+			    if (d > best) { best = d; bi = i; }
+		    }
+		    dist = best; // signed distance of the config point to N (a polytope always has a normal)
+		    if (bi >= 0)
+			    n.set(cso.planes[bi].normal); // outward from N = outward from B(target) toward A(mover)
+		    else
+			    n.reset();
+	    });
+	if (res.valid && res.hit) {
+		col.time = res.time;
+		col.normal.set(res.normal);
+		col.depth = res.depth;
+		vec3<T> travel;
+		mul(travel, seg.direction, res.time);
+		add(col.point, seg.origin, travel);
+	} else {
+		col.time = tr::one();
+	}
+}
+
+// True when any of the pair's solid orientations or shape local rotations is
+// non-identity, i.e. the axis-aligned fast paths would be wrong. Cheap (4 matrix
+// compares) so the identity polytope path is not regressed.
+template <typename T>
+inline bool pair_is_oriented(const solid<T> * s1, const solid<T> * s2,
+                             const shape<T> * sh1, const shape<T> * sh2) {
+	const mat3<T> identity;
+	return s1->get_orientation() != identity || s2->get_orientation() != identity ||
+	       sh1->get_local_rotation() != identity || sh2->get_local_rotation() != identity;
+}
+
 // Intra-shape merge used by test_segment and test_solid. Unlike merge_collision
 // (inter-solid), this always averages normals at equal times — co-located shapes
 // on the same solid genuinely want the averaged normal. `modify_scope` is held
@@ -906,6 +1146,13 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			else if (use_gjk && gjk_eligible_pair(sh1->get_type(), sh2->get_type())
 			         && trace_pair_gjk(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon)) {
 				// handled by GJK
+			}
+			// Oriented polytope×polytope: the axis-aligned branches below ignore
+			// orientation, so a rotated box/convex pair goes through the Minkowski-CSO
+			// sweep instead. Identity pairs fall through to the cheaper exact AA paths.
+			else if (is_polytope_shape(sh1->get_type()) && is_polytope_shape(sh2->get_type())
+			         && pair_is_oriented(s1, s2, sh1, sh2)) {
+				trace_pair_oriented_polytope(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
 			}
 			// AABox vs *
 			else if (sh1->get_type() == shape_type::box && sh2->get_type() == shape_type::box) {
@@ -1119,13 +1366,35 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// Compute impact point for solid traces.
 			// col.point represents s1's center at impact time; sh1's world contact
 			// surface is offset from that by sh1's local_position + support(shape, -normal).
+			// support() is in sh1's own (un-rotated) frame, so when sh1 carries a
+			// world rotation R1 = orientation·local_rotation we must rotate the support
+			// query in (R1ᵀ·−n) and the result back (R1·support), and rotate lp1 by the
+			// solid orientation. The identity case is bit-identical to the plain offset.
+			// (Correct impact feeds the Phase 6/9 lever arm; was previously un-rotated
+			// for oriented GJK pairs too — fixed here in one place.)
 			if (col.time < one && sh1->get_type() != shape_type::traceable && sh2->get_type() != shape_type::traceable) {
+				mat3<T> R1;
+				mul(R1, s1->get_orientation(), sh1->get_local_rotation());
+				const mat3<T> identity;
 				vec3<T> sup;
 				vec3<T> neg_n;
 				neg(neg_n, col.normal);
-				support(sup, *sh1, neg_n);
-				add(col.impact, col.point, sup);
-				add(col.impact, lp1);
+				if (R1 == identity) {
+					support(sup, *sh1, neg_n);
+					add(col.impact, col.point, sup);
+					add(col.impact, lp1);
+				} else {
+					mat3<T> R1t;
+					transpose(R1t, R1);
+					vec3<T> ld, ls;
+					mul(ld, R1t, neg_n);
+					support(ls, *sh1, ld);
+					mul(sup, R1, ls);
+					add(col.impact, col.point, sup);
+					vec3<T> roff;
+					mul(roff, s1->get_orientation(), lp1);
+					add(col.impact, roff);
+				}
 			}
 			// For a traceable pair, trace_solid is responsible for filling col.impact
 			// with the world contact point on its surface (see the traceable contract

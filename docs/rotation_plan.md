@@ -2,21 +2,23 @@
 
 Roadmap for adding rotation to hop. Current as of June 2026: **static
 orientation** (Phase 4), the **real traceable contact point** (the Phase 6/9
-prerequisite), and **kinematic angular carry** (Phase 6 — spinning platforms
-carry their riders) have shipped.
+prerequisite), **kinematic angular carry** (Phase 6 — spinning platforms carry
+their riders, verified), and the **complete static narrowphase** (Phase 5 — every
+collision pair now honors a static orientation) have shipped.
 
 The roadmap builds up to full dynamic rotation in graded milestones, each
 shippable on its own:
 
   static orientation (done) → **kinematic angular carry** (done) → finish the
-  static narrowphase → kinematic blocking → dynamic spin under torque → angular
-  impulse response → constraints/friction.
+  static narrowphase (done) → kinematic blocking → dynamic spin under torque →
+  angular impulse response → constraints/friction.
 
 The kinematic-carry milestones (6–7) are deliberately ahead of the dynamic ones:
 they deliver the GoldSrc rotating-platform feel with no inertia/torque math, and
 the dynamic phases reuse the same `angular_velocity` state and contact-point
 plumbing. Phase 6 shipped before Phase 5, exactly as anticipated below — the
-capsule-rider carry needed nothing from the polytope narrowphase.
+capsule-rider carry needed nothing from the polytope narrowphase. With Phase 5
+now in, the next milestone is **Phase 7** (kinematic blocking + rider yaw carry).
 
 ## Status at a glance
 
@@ -26,9 +28,9 @@ capsule-rider carry needed nothing from the polytope narrowphase.
 | 2. Compound colliders via `shape::local_position` | done | |
 | 3. Rotation math primitives (`quat`, `mat3`, `asin`/`acos`) | done | |
 | 4. **Static orientation** — `solid.orientation` + `shape.local_rotation`, honored by GJK + traceables | done | |
-| 5. Close the static narrowphase gap (rotated polytope×polytope + box-mover-vs-traceable, OBB) | **next** | not started |
-| 6. Kinematic angular carry (`ω×r` surface velocity; spinning platforms carry riders) | done | `solid.angular_velocity`; solver biases relative velocity by `ω×r`; hop-godot derives ω from the per-frame orientation delta. Capsule/sphere riders only until Phase 5 |
-| 7. Kinematic blocking/crush + rider yaw carry (rotating-door parity) | pending | |
+| 5. Close the static narrowphase gap (rotated polytope×polytope + box-mover-vs-traceable, OBB) | done | oriented polytope×polytope via the world-space Minkowski-CSO sweep (`trace_pair_oriented_polytope` in `collide.h`); box-mover-vs-rotated-traceable via OBB-vs-triangle (`obb_local_vs_triangle` in hop-godot). Both halves shipped |
+| 6. Kinematic angular carry (`ω×r` surface velocity; spinning platforms carry riders) | done | `solid.angular_velocity`; solver biases relative velocity by `ω×r`; hop-godot derives ω from the per-frame orientation delta. **Verified in-engine.** Box/convex riders now carried too (Phase 5) |
+| 7. Kinematic blocking/crush + rider yaw carry (rotating-door parity) | **next** | not started |
 | 8. Dynamic orientation state (angular integration under torque) | pending | |
 | 9. Angular impulse response | pending | contact point ready |
 | 10. Constraints and friction use angular | pending | |
@@ -47,11 +49,11 @@ What collides correctly under a static orientation today:
   either level (solid/shape) oriented. The mover against a traceable is reduced
   to an explicit capsule/sphere spine.
 
-What is **not** yet honored (→ Phase 5): **polytope×polytope** pairs (box×box,
-box×convex, convex×convex) collide as if unrotated (they route through
-`trace_aa_box` / Minkowski-AABB, not GJK), and a **box mover vs a traceable** is
-skipped (no rotation-invariant spine). A rotated box/convex only collides
-correctly today when it meets a *rounded* shape via the GJK path.
+~~What is not yet honored (→ Phase 5): polytope×polytope pairs … and a box mover
+vs a traceable …~~ — **closed in Phase 5.** Oriented polytope×polytope now routes
+through the Minkowski-CSO sweep (`trace_pair_oriented_polytope`), and a box mover
+is honored against a rotated traceable via OBB-vs-triangle. Identity-orientation
+pairs still take the cheaper axis-aligned fast paths unchanged.
 
 **Contact point (`col.impact`).** Every collision pair — including all traceables
 — now reports the real world contact point on the collidee surface, not the mover
@@ -194,31 +196,76 @@ per-query quat→matrix conversion). The dynamic phases integrate a `quat<T>`
 
 ## Phase-by-phase detail
 
-### Phase 5 — close the static narrowphase gap (oriented polytope pairs)
+### Phase 5 — close the static narrowphase gap (oriented polytope pairs) — **SHIPPED**
 
-Finish what Phase 4 scoped out, so **every** pair honors a static orientation
+Finished what Phase 4 scoped out: **every** pair now honors a static orientation
 (prerequisite for both static completeness and dynamic OBBs tumbling).
 
-**Add:**
-- `oriented_box`-style handling for the polytope×polytope pairs (box×box,
-  box×convex, convex×convex) via the Minkowski-zonotope reduction above:
-  enumerate the plane set, fill a `convex_solid<T>` in one OBB's local frame,
-  transform the sweep segment in, call existing swept point-vs-convex_solid,
-  map the contact back.
-- Oriented-box-vs-triangle path so a **box mover** is honored against a
-  rotated traceable (lift the Phase-4 capsule/sphere-only restriction in
-  `hoptri::mover_world_*`). When added, fill `col.impact` for it too — the
-  capsule/sphere/box support-plane paths already do.
-- Broad-phase AABB already encloses oriented shapes (`rotate_aabb`, shipped in
-  Phase 4) — verify it covers OBB corners for the new pairs.
+**Shipped:**
+- Oriented polytope×polytope (box×box, box×convex, convex×convex) via
+  `trace_pair_oriented_polytope` (`collide.h`). The Minkowski configuration-space
+  obstacle `N = S_B ⊖ S_A` is built directly in **world space** (mover-relative,
+  so fixed16 support dot products stay in shape-local magnitudes) as a
+  `convex_solid<T>`, then swept via `conservative_advance` with the CSO's
+  plane-exact deepest-face distance (see *Resting-contact robustness* below for why
+  this rather than `trace_convex_solid`'s per-face entry). The
+  plane set is the safe tangent-plane construction noted under *Key decisions*:
+  both shapes' face normals (bounds `N`) plus the `edge_A × edge_B` cross products
+  (tightens OBB×OBB to exact). Implementation realities not in the original
+  sketch: (a) **coincident planes are deduplicated** — a box edge crossed with the
+  other box's axis reproduces a face normal, and an exact duplicate makes the
+  plane trace reject its own entry under fixed-point rounding (the recomputed entry
+  point lands an ulp outside its twin); (b) convex edge directions are the
+  deduplicated pairwise cross products of the shape's face normals (a safe
+  superset), capped. Dispatch is gated on `pair_is_oriented` (any non-identity
+  orientation/local-rotation); identity pairs keep the cheaper axis-aligned paths.
+- Oriented-box-vs-triangle so a **box mover** is honored against a rotated
+  traceable (trimesh + heightfield share `hoptri::trace_solid_rotated`). The box
+  is reduced to an OBB in the target's local frame and run through
+  `obb_local_vs_triangle` — the same winding-agnostic support-plane test the AA
+  box path uses, expressed locally and filling `col.impact` (the projected point
+  on the triangle), mapped back to world by the driver.
+- `col.impact` is now **orientation-aware** for every primitive pair (`collide.h`
+  rotates sh1's support by its world rotation) — this also corrected the latent
+  un-rotated impact on the existing oriented GJK pairs.
+- **Resting-contact robustness.** Honoring rotation in the narrowphase also requires
+  it in the **broad phase** — the real root cause of a dynamic oriented box falling
+  through the floor: the per-step broad-phase query box (`update_solid` and
+  `integrate_and_discover`) was built from the **un-rotated `local_bound_`**, so an
+  oriented box (reaching √2·half past its AABB) queried a box too small to reach the
+  floor and tunnelled until it sank deep enough — then snapped back with injected
+  energy. Masked with a single body (the floor's own recovery keeps a lone box up),
+  visible the moment a second body exists (the floor recovers only the closest per
+  tick). Fixed by querying the cached orientation-aware **`world_bound_`**
+  (`rotate_aabb(local_bound_, orientation_) + position_`, already maintained on every
+  move/reorient). Two supporting changes: the oriented sweep drives
+  `conservative_advance` with the CSO's plane-exact deepest-face distance
+  `max_i(n_i·xA − d_i)` (the same swept-contact machinery the GJK pairs use — clean
+  resting, no GJK simplex / no fixed-point loss; `trace_convex_solid`'s per-face entry
+  misses edge/vertex contacts on approach); and `update_solid`'s penetration recovery
+  no longer relocates an **infinite-mass mover** (the old split checked only the
+  partner's mass — a correct-invariant fix for a latent bug, though the broad-phase
+  fix alone keeps the floor still in practice). Regression: `test_oriented_box_rest`
+  in `tests/test_simulator.cpp` drops a rotated box *with a second body present* and
+  asserts it settles on its edge at z≈0.707 with a tight steady-state band (no
+  fall/snap) and the floor never moves (float + fixed16).
+- Broad phase: the per-solid `world_bound_` was already orientation-rotated, but the
+  per-*step* query box was not (the *Resting-contact robustness* bug above). Now both
+  the cached bound and the per-step query honor orientation.
+
+**Tests:** `test_oriented_polytope` in `tests/test_gjk.cpp` (float/fixed16/fixed32:
+rotated box×box stops earlier than unrotated, box/convex agreement, rotated-mover
+impact); `test_box_mover_vs_rotated_mesh` in hop-godot's
+`tests/test_trimesh_traceable.cpp` (swept + static box vs a rotated mesh).
 
 **Preserves:** hop's per-frame "snapshot" model from Phase 4. Solid API
 unchanged. Identity orientation stays an exact no-op.
 
-**End-of-phase state:** full *static* rotation for every collision pair, swept.
-Many users (and all of GoldSrc's non-moving angled brushes) can stop here.
-
-**Estimated effort:** 1–1.5 weeks.
+**Verification:** the raylib demo `examples/demo_static_rotation.cpp` validates it
+visually — tilted boxes drop and rest on their true rotated faces (and exposed the
+broad-phase bug). **Still owed:** the hop-godot test-project smoke (a rotated
+box/convex prop in Godot) — the runtime wiring feeds orientation
+(`hop_body_data.cpp`, `hop_shape_data.cpp`) but has not been eyeballed in-engine.
 
 ### Phase 6 — kinematic angular carry (GoldSrc `func_rotating` parity) — **SHIPPED**
 
@@ -259,9 +306,9 @@ are capsules, so this is fully usable.
 **End-of-phase state:** stand on a `func_rotating`, get carried around. The
 single biggest gameplay payoff in the roadmap.
 
-**Verification still owed:** in-engine smoke test (a `func_rotating` platform in
-the test-project carrying the player) — the C++ unit test passes, but the
-hop-godot wiring has only been compile-checked, not run in Godot.
+**Verified:** in-engine smoke test (a `func_rotating` platform in the test-project
+carrying the player) confirmed. Box/convex riders are now also carried correctly
+(Phase 5 closed the polytope narrowphase they depended on).
 
 ### Phase 7 — kinematic blocking/crush + rider yaw carry
 
@@ -377,13 +424,12 @@ work. This phase is mostly documenting that rolling now works.
 
 ---
 
-## Open decisions to confirm before starting Phase 5+
+## Open decisions
 
-- [ ] Fixed-point drift: ~0.1–0.2°/rev with exponential integration. OK?
+- [x] Fixed-point drift: ~0.1–0.2°/rev with exponential integration. **Accepted.**
       (`test_rotation_drift` bounds are already padded for this.)
-- [ ] Phase 5 box-mover-vs-traceable: full OBB-vs-triangle, or is the
-      capsule/sphere rider set (Phase 4) enough for the games in practice?
-      (wizardwars riders are capsules; crates would be the box case.)
+- [x] Phase 5 box-mover-vs-traceable: full OBB-vs-triangle, or capsule/sphere
+      only? **Resolved: full OBB-vs-triangle shipped** (both halves of Phase 5).
 - [ ] Phase 7 yaw carry: how much lives in hop vs. the game controller?
 
 ---
@@ -423,6 +469,21 @@ work. This phase is mostly documenting that rolling now works.
   contract in `traceable.h`, the no-clobber in `collide.h`, and tests
   `test_impact_traceable_floor` (hop) / `test_contact_point_on_surface`
   (hop-godot).
+- Phase 5 (oriented polytope narrowphase): `trace_pair_oriented_polytope` +
+  `build_world_polytope` / `build_polytope_cso` / `pair_is_oriented` and the
+  orientation-aware `col.impact` block in `collide.h`; tests
+  `test_oriented_polytope` in `tests/test_gjk.cpp`. Box-mover-vs-traceable:
+  `obb_support` / `obb_local_vs_triangle` in hop-godot's
+  `src/hop_triangle_collision.h` (driven by `trace_solid_rotated`, which gained a
+  `seam_tol` arg); test `test_box_mover_vs_rotated_mesh` in
+  `tests/test_trimesh_traceable.cpp`. Resting-contact fixes: the orientation-aware
+  broad-phase query (cached `world_bound_`) in `update_solid` / `integrate_and_discover`
+  (`simulator.h`, the root cause), the oriented sweep on `conservative_advance` with
+  the CSO deepest-face distance (`collide.h`), and the infinite-mass recovery guard in
+  `update_solid` (`simulator.h`); regression `test_oriented_box_rest` (two-body) in
+  `tests/test_simulator.cpp`. Visual demo: `examples/demo_static_rotation.cpp`
+  (raylib; tilted boxes settle on their rotated faces, built under
+  `-DHOP_BUILD_EXAMPLES=ON`).
 - Phase 6 (kinematic angular carry): `solid.angular_velocity_` +
   `set/get_angular_velocity` and `touch.impact` in `solid.h`; the per-pair
   `v_bias` build and its use in the GS normal/friction sweeps in `simulator.h`

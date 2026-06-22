@@ -29,6 +29,9 @@ if(HOP_BUILD_EXAMPLES)
 
     add_executable(demo_pile examples/demo_pile.cpp)
     target_link_libraries(demo_pile PRIVATE hop raylib)
+
+    add_executable(demo_static_rotation examples/demo_static_rotation.cpp)
+    target_link_libraries(demo_static_rotation PRIVATE hop raylib)
 endif()
 
 # ReactPhysics3D port of demo_bounce — side-by-side performance comparison.
