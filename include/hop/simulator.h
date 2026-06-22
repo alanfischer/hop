@@ -639,9 +639,16 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		sub(temp, new_pos, old_pos);
 		T m = tr::max_val(tr::abs(temp.x), tr::max_val(tr::abs(temp.y), tr::abs(temp.z))) + epsilon_;
 
-		aa_box<T> box;
-		box.set(solid_ptr->local_bound_);
-		add(box, new_pos);
+		// Use the cached world AABB (world_bound_ = rotate_aabb(local_bound_,
+		// orientation_) + position_, refreshed on every move/reorient), shifted by the
+		// frame's motion to centre on new_pos. The un-rotated local_bound_ this once
+		// used does NOT include the solid's orientation, so an oriented solid (e.g. a
+		// box balanced on a rotated edge, reaching √2·half past its AABB) queried a box
+		// too small to reach the geometry its oriented narrowphase would collide
+		// against — and tunnelled until it sank far enough for the un-rotated box to
+		// reach. (`temp` already holds new_pos − old_pos from the motion calc above.)
+		aa_box<T> box(solid_ptr->world_bound_);
+		add(box, temp);
 		box.mins.x -= m;
 		box.mins.y -= m;
 		box.mins.z -= m;
@@ -700,16 +707,24 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// summed into a steady lateral drift (a settling pile sliding into
 				// one corner). Moving both bodies ±depth/2 is center-of-mass
 				// preserving and order-independent, killing the drift at its source.
-				bool split = c.collider && !c.collider->has_infinite_mass() && c.collider->active_;
-				T push = split ? c.depth * tr::half() : c.depth;
+				// Distribute the push-out by which bodies can actually move. An
+				// infinite-mass body must never be relocated by recovery — the old
+				// code only checked the partner's mass and silently moved an
+				// infinite-mass MOVER (a static floor pushing itself out of a resting
+				// oriented box, sinking the whole world). Split half/half only when
+				// both are movable (center-of-mass preserving, order-independent);
+				// otherwise the single movable body takes the full correction.
+				const bool self_movable = !solid_ptr->has_infinite_mass();
+				const bool partner_movable = c.collider && !c.collider->has_infinite_mass() && c.collider->active_;
+				// Each movable body takes its share of the push-out: half each when both
+				// can move (center-of-mass preserving, order-independent), the full depth
+				// when only one can. An immovable side is simply skipped.
+				const T push = (self_movable && partner_movable) ? c.depth * tr::half() : c.depth;
 				vec3<T> correction;
 				mul(correction, pair_normal, push);
-				add(old_pos, correction);
-				if (split) {
-					// Partner moves the opposite way by the same amount. Done via
-					// the swept-snap path's recovery branch invariant: this only
-					// fires when bodies already overlap, so nudging the partner out
-					// reduces penetration rather than creating it.
+				if (self_movable)
+					add(old_pos, correction);
+				if (partner_movable) {
 					vec3<T> partner_pos(c.collider->position_);
 					sub(partner_pos, correction);
 					c.collider->set_position_direct(partner_pos);
@@ -957,11 +972,13 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	vec3<T> delta;
 	mul(delta, v, dt);
 
-	// Broad phase over the swept motion plus the speculative margin.
+	// Broad phase over the swept motion plus the speculative margin. Use the cached
+	// world AABB (already rotate_aabb(local_bound_, orientation_) + position_, and
+	// position_ == old_pos here) — the un-rotated local_bound_ this once used omits
+	// the solid's orientation and underspans an oriented solid's true extent, missing
+	// contacts under its rotated faces.
 	T reach = tr::max_val(tr::abs(delta.x), tr::max_val(tr::abs(delta.y), tr::abs(delta.z))) + spec_margin_ + epsilon_;
-	aa_box<T> box;
-	box.set(solid_ptr->local_bound_);
-	add(box, old_pos);
+	aa_box<T> box(solid_ptr->world_bound_);
 	box.mins.x -= reach;
 	box.mins.y -= reach;
 	box.mins.z -= reach;

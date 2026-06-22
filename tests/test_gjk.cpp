@@ -530,6 +530,87 @@ template <typename T> static void test_gjk_solid_orientation(const char * label)
 	printf("OK\n");
 }
 
+// Oriented polytope×polytope (the Phase 5 CSO path). A unit-cube target rotated
+// 45° about Z turns its +x face into a corner that reaches √2≈1.414 along x
+// (vs 1.0 unrotated), so an axis-aligned box mover swept in -x must stop EARLIER
+// against the rotated target than the unrotated one — proving orientation is
+// honored rather than collapsed to the world AABB. Also checks box vs convex
+// agreement and the rotated-mover impact (the oriented col.impact branch).
+template <typename T> static void test_oriented_polytope(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  oriented_polytope[%s]: ", label);
+	const T one = tr::one();
+	const T z {};
+	const T neg = -one;
+	// Rz(45°): [[c,-s,0],[s,c,0],[0,0,1]] (row-major ctor args).
+	const T c45 = tr::from_milli(707), s45 = tr::from_milli(707);
+	mat3<T> Rz45(c45, -s45, z, s45, c45, z, z, z, one);
+	(void)neg;
+	const T eps = tr::from_milli(1);
+
+	auto unit_box_shape = [&]() { return std::make_shared<shape<T>>(aa_box<T>(v3<T>(-1, -1, -1), v3<T>(1, 1, 1))); };
+	auto unit_convex_shape = [&]() { return std::make_shared<shape<T>>(box_convex<T>(one)); };
+	auto half_box_shape = [&]() { return std::make_shared<shape<T>>(aa_box<T>(v3<T>(-0.5f, -0.5f, -0.5f), v3<T>(0.5f, 0.5f, 0.5f))); };
+
+	segment<T> seg;
+	seg.origin = v3<T>(5, 0, 0);
+	seg.direction = v3<T>(-6, 0, 0);
+
+	// Mover = half-cube (axis-aligned) at x=5; target = unit cube at origin.
+	auto run = [&](std::shared_ptr<shape<T>> mover_sh, std::shared_ptr<shape<T>> target_sh, bool rotate_target) -> collision<T> {
+		auto mv = std::make_shared<solid<T>>();
+		mv->add_shape(mover_sh);
+		mv->set_position(v3<T>(5, 0, 0));
+		auto tg = std::make_shared<solid<T>>();
+		tg->add_shape(target_sh);
+		tg->set_position(v3<T>(0, 0, 0));
+		if (rotate_target)
+			tg->set_orientation(Rz45);
+		collision<T> r;
+		r.time = one;
+		hop::test_solid(r, mv.get(), seg, tg.get(), eps, T {}, true);
+		return r;
+	};
+
+	// box×box: rotated target stops earlier than unrotated.
+	collision<T> bb_unrot = run(half_box_shape(), unit_box_shape(), false);
+	collision<T> bb_rot = run(half_box_shape(), unit_box_shape(), true);
+	float t_un = tr::to_float(bb_unrot.time), t_rot = tr::to_float(bb_rot.time);
+	printf("bb_un=%.3f bb_rot=%.3f n.x=%.2f ", t_un, t_rot, tr::to_float(bb_rot.normal.x));
+	assert(std::fabs(t_un - 0.5833f) < 0.04f);  // face at x=1 → center 1.5
+	assert(std::fabs(t_rot - 0.5143f) < 0.04f); // corner at x=√2 → center 1.914
+	assert(t_rot < t_un - 0.04f);               // rotation genuinely changes the result
+	assert(tr::to_float(bb_rot.normal.x) > 0.9f);
+
+	// convex×convex and box×convex agree with box×box on the rotated target.
+	collision<T> cc_rot = run(unit_convex_shape(), unit_convex_shape(), true); // mover is unit convex now
+	collision<T> bc_rot = run(half_box_shape(), unit_convex_shape(), true);
+	// cc uses a unit-cube mover (half 1), so its contact center is 1.414+1 = 2.414 → t=0.431.
+	assert(std::fabs(tr::to_float(cc_rot.time) - 0.4310f) < 0.05f);
+	assert(std::fabs(tr::to_float(bc_rot.time) - t_rot) < 0.04f); // box mover vs convex target == box×box
+
+	// Rotated MOVER impact: unit cube rotated 45° about Z swept -x into an
+	// axis-aligned unit box. The leading corner reaches -√2; contact at center
+	// x=2.414, and col.impact must sit on that corner at x≈1.0 (= target +x face),
+	// exercising the orientation-aware impact branch.
+	{
+		auto mv = std::make_shared<solid<T>>();
+		mv->add_shape(unit_box_shape());
+		mv->set_position(v3<T>(5, 0, 0));
+		mv->set_orientation(Rz45);
+		auto tg = std::make_shared<solid<T>>();
+		tg->add_shape(unit_box_shape());
+		collision<T> r;
+		r.time = one;
+		hop::test_solid(r, mv.get(), seg, tg.get(), eps, T {}, true);
+		printf("rotmover t=%.3f impact.x=%.3f ", tr::to_float(r.time), tr::to_float(r.impact.x));
+		assert(std::fabs(tr::to_float(r.time) - 0.4310f) < 0.05f);
+		assert(std::fabs(tr::to_float(r.impact.x) - 1.0f) < 0.08f);
+		assert(std::fabs(tr::to_float(r.impact.y)) < 0.08f);
+	}
+	printf("OK\n");
+}
+
 template <typename T> static void run_gjk_tests(const char * label) {
 	printf(" [%s]\n", label);
 	test_gjk_sphere_drop<T>(label);
@@ -550,6 +631,7 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_ca_custom_closest<T>(label);
 	test_triangle_primitives<T>(label);
 	test_gjk_solid_orientation<T>(label);
+	test_oriented_polytope<T>(label);
 }
 
 int main() {

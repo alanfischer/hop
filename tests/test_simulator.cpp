@@ -429,6 +429,80 @@ template <typename T> static void test_angular_carry_box_capsule(const char * la
 	printf("  angular_carry_box_capsule[%s]: OK\n", label);
 }
 
+// Statically-rotated boxes dropped on a flat floor must settle on their true
+// rotated geometry (Phase 5 oriented polytope×polytope), not their world AABB, and
+// the infinite-mass floor must not move. TWO boxes are used deliberately: with a
+// single oriented box the broad-phase bug below is masked, because the floor's own
+// per-tick recovery keeps the lone box up; with two boxes the floor can only
+// recover the closest one each tick, exposing the real defects. Regression for the
+// coupled bugs the oriented narrowphase exposed:
+//   (a) the per-step broad-phase query box was built from the *un-rotated*
+//       local_bound_, so an oriented box (reaching √2·half past its AABB) queried a
+//       box too small to reach the floor and tunnelled until it sank deep enough —
+//       then snapped back with injected energy. Fixed by querying the cached
+//       orientation-aware world_bound_.
+//   (b) the oriented sweep used trace_convex_solid's per-face entry, which misses
+//       an edge/vertex contact; rewritten onto conservative_advance with the CSO
+//       deepest-face distance.
+//   (c) update_solid's penetration recovery moved an infinite-mass MOVER (the floor
+//       pushing itself out of a resting box); it now never relocates infinite mass.
+// A box rotated 45° about Y rests balanced on its lower edge with its center at
+// √2/2 ≈ 0.707 (vs 0.5 if it collided as an AABB).
+template <typename T> static void test_oriented_box_rest(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  oriented_box_rest[%s]: ", label);
+	simulator<T> sim;
+
+	auto floor = std::make_shared<solid<T>>();
+	floor->set_infinite_mass();
+	floor->set_coefficient_of_gravity(T {});
+	floor->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::from_int(6), -tr::from_int(6), -tr::one()),
+	              vec3<T>(tr::from_int(6), tr::from_int(6), T {}))));
+	sim.add_solid(floor);
+
+	mat3<T> r;
+	set_mat3_from_axis_angle(r, vec3<T>(T {}, tr::one(), T {}), tr::from_milli(785)); // ~45° about Y
+	auto make_box = [&](T x, bool rotated) {
+		auto b = std::make_shared<solid<T>>();
+		b->set_mass(tr::one());
+		b->set_coefficient_of_restitution(T {});
+		b->set_coefficient_of_static_friction(tr::from_int(2));
+		b->set_coefficient_of_dynamic_friction(tr::from_int(2));
+		b->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()), vec3<T>(tr::half(), tr::half(), tr::half()))));
+		if (rotated)
+			b->set_orientation(r);
+		b->set_position(vec3<T>(x, T {}, tr::from_int(2)));
+		sim.add_solid(b);
+		return b;
+	};
+	// A second body 4 m away (never touching) removes the single-box floor-recovery
+	// crutch; the rotated box must self-support.
+	make_box(-tr::from_int(2), false);
+	auto box = make_box(tr::from_int(2), true);
+
+	// Run long enough to exercise deactivation; track steady-state amplitude. The
+	// jitter bug rested near the right height but the box periodically lost the (edge)
+	// contact, free-fell several frames, and snapped back (>10 cm swings) — invisible
+	// to a final-position check, so assert a tight steady-state band.
+	float zmin = 1e9f, zmax = -1e9f, fmin = 1e9f, fmax = -1e9f;
+	for (int i = 0; i < 800; ++i) {
+		sim.update(tr::from_milli(16));
+		if (i >= 300) {
+			float z = tr::to_float(box->get_position().z);
+			float f = tr::to_float(floor->get_position().z);
+			zmin = std::fmin(zmin, z); zmax = std::fmax(zmax, z);
+			fmin = std::fmin(fmin, f); fmax = std::fmax(fmax, f);
+		}
+	}
+	printf("box.z=[%.3f,%.3f] floor.z=[%.3f,%.3f] ", zmin, zmax, fmin, fmax);
+	assert(std::fabs(zmax - 0.7071f) < 0.03f); // rests on the rotated edge, not the AABB 0.5
+	assert((zmax - zmin) < 0.01f);             // no fall/snap jitter (was >0.16)
+	assert(std::fabs(fmin) < 0.01f && std::fabs(fmax) < 0.01f); // infinite-mass floor never moves
+	printf("OK\n");
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -449,6 +523,7 @@ int main() {
 	test_angular_carry<float>("float");
 	test_angular_carry_box<float>("float");
 	test_angular_carry_box_capsule<float>("float");
+	test_oriented_box_rest<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -480,6 +555,7 @@ int main() {
 	test_angular_carry<fixed16>("fixed16");
 	test_angular_carry_box<fixed16>("fixed16");
 	test_angular_carry_box_capsule<fixed16>("fixed16");
+	test_oriented_box_rest<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;
