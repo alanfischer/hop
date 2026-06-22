@@ -640,6 +640,93 @@ template <typename T> static void test_friction_rolling(const char * label) {
 	printf("OK\n");
 }
 
+// Phase 10: a spring whose anchor sits off the body's center torques the body via
+// its lever arm (τ = r × F). An off-center pull spins the body about +z; a centered
+// pull (lever = 0) produces pure translation and no spin. Exercises rotated anchors
+// + accumulate_constraint_torque, and the bit-identical center-anchor fast path.
+template <typename T> static void test_constraint_anchor_torque(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  constraint_anchor_torque[%s]: ", label);
+	const T z {};
+	auto run = [&](T anchor_x) {
+		auto sim = std::make_shared<simulator<T>>();
+		sim->set_gravity(vec3<T>(z, z, z));
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one()));
+		s->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::one(), -tr::one(), -tr::half()), vec3<T>(tr::one(), tr::one(), tr::half()))));
+		s->set_position(vec3<T>(z, z, z));
+		sim->add_solid(s);
+		// Spring pulls the anchor toward a point 1 unit in +y; rest length 0.5 keeps
+		// it stretched (force ≈ +y at the anchor). end_point shares anchor_x so the
+		// pull is purely +y in both cases — only the lever arm differs.
+		auto c = std::make_shared<constraint<T>>(s, vec3<T>(anchor_x, tr::one(), z));
+		c->set_type(constraint<T>::type::spring);
+		c->set_local_anchor_a(vec3<T>(anchor_x, z, z));
+		c->set_rest_length(tr::half());
+		c->set_spring_constant(tr::from_int(20));
+		c->set_damping_constant(z);
+		sim->add_constraint(c);
+		for (int i = 0; i < 12; ++i) sim->update(tr::from_milli(16));
+		return tr::to_float(s->get_angular_velocity().z);
+	};
+	float centered = run(z);
+	float offcenter = run(tr::from_milli(700)); // anchor at +0.7 x
+	printf("centered(wz=%.3f) offcenter(wz=%.3f) ", centered, offcenter);
+	assert(std::fabs(centered) < 0.05f); // centered pull through COM → no spin
+	assert(offcenter > 0.2f);            // off-center pull → real spin about +z
+	printf("OK\n");
+}
+
+// Phase 9 hardening: a fast/thin spinner must not tunnel through a thin wall between
+// orientation snapshots. A blade (±2 long) spinning at 40 rad/s sweeps a tip 1.28
+// units/step against a 0.2-thick slab — classic angular-tunnel setup. The broad-phase
+// inflation (|ω|·dt·r) + Phase 5 oriented narrowphase + Phase 9 angular response catch
+// it: pinned at center so it can't recoil, the tip is still stopped at the near face
+// and the spin is arrested. Guards against regressing any of those three mechanisms
+// (the deferred end-of-step SAT recovery proved redundant against this case).
+template <typename T> static void test_fast_spinner_no_tunnel(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  fast_spinner_no_tunnel[%s]: ", label);
+	const T z {};
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>(z, z, z));
+	auto wall = std::make_shared<solid<T>>();
+	wall->set_infinite_mass();
+	wall->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(tr::one(), -tr::from_int(3), -tr::from_int(3)),
+	              vec3<T>(tr::from_milli(1200), tr::from_int(3), tr::from_int(3)))));
+	sim.add_solid(wall);
+	auto blade = std::make_shared<solid<T>>();
+	blade->set_mass(tr::one());
+	blade->set_inertia(vec3<T>(tr::one(), tr::one(), tr::from_milli(200)));
+	blade->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::from_int(2), -tr::from_milli(50), -tr::half()),
+	              vec3<T>(tr::from_int(2), tr::from_milli(50), tr::half()))));
+	blade->set_angular_velocity(vec3<T>(z, z, tr::from_int(40)));
+	sim.add_solid(blade);
+	auto pin = std::make_shared<constraint<T>>(blade, vec3<T>(z, z, z)); // center pinned
+	pin->set_type(constraint<T>::type::spring);
+	pin->set_rest_length(z);
+	pin->set_spring_constant(tr::from_int(200));
+	pin->set_damping_constant(tr::from_int(5));
+	sim.add_constraint(pin);
+	float max_tipx = 0.0f;
+	for (int i = 0; i < 200; ++i) {
+		sim.update(tr::from_milli(16));
+		vec3<T> tip;
+		mul(tip, blade->get_orientation(), vec3<T>(tr::from_int(2), z, z));
+		float tipx = tr::to_float(tip.x) + tr::to_float(blade->get_position().x);
+		if (tipx > max_tipx) max_tipx = tipx;
+	}
+	float wz = tr::to_float(blade->get_angular_velocity().z);
+	printf("max_tip_x=%.3f final_wz=%.2f ", max_tipx, wz);
+	assert(max_tipx < 1.1f);        // tip stopped at the wall, never swept past it
+	assert(std::fabs(wz) < 5.0f);   // spin arrested from 40 rad/s
+	printf("OK\n");
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -664,6 +751,8 @@ int main() {
 	test_dynamic_spin<float>("float");
 	test_angular_impulse<float>("float");
 	test_friction_rolling<float>("float");
+	test_constraint_anchor_torque<float>("float");
+	test_fast_spinner_no_tunnel<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -699,6 +788,8 @@ int main() {
 	test_dynamic_spin<fixed16>("fixed16");
 	test_angular_impulse<fixed16>("fixed16");
 	test_friction_rolling<fixed16>("fixed16");
+	test_constraint_anchor_torque<fixed16>("fixed16");
+	test_fast_spinner_no_tunnel<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

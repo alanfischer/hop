@@ -437,6 +437,23 @@ private:
 	                                       int collide_with_bits);
 
 	void constraint_link(vec3<T> & result, solid<T> * s, const vec3<T> & solid_pos, const vec3<T> & solid_vel);
+	// Force one active constraint exerts on `s` at the given trial pos/vel, plus the
+	// world-space lever arm from s's center to its anchor. Returns false if `s` is
+	// not an active endpoint of `c`. Shared by constraint_link (linear) and the
+	// Phase 10 anchor torque (angular).
+	bool constraint_force_on(constraint<T> * c, solid<T> * s, const vec3<T> & solid_pos,
+	                         const vec3<T> & solid_vel, vec3<T> & force, vec3<T> & lever);
+	// Phase 10: sum τ = r × F over s's off-center constraint anchors into s->torque_.
+	void accumulate_constraint_torque(solid<T> * s);
+	// World lever arm from s's center to a local anchor (orientation-rotated).
+	void anchor_lever(vec3<T> & out, const solid<T> * s, const vec3<T> & local_anchor) {
+		mul(out, s->orientation_, local_anchor);
+	}
+	// Rigid-body velocity of the point at world lever `lever` on s: body_vel + ω×lever.
+	void anchor_velocity(vec3<T> & out, const solid<T> * s, const vec3<T> & body_vel, const vec3<T> & lever) {
+		cross(out, s->angular_velocity_, lever);
+		add(out, body_vel);
+	}
 	void update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T dt);
 
 	// Insert or refresh a slot in s's persistent touch cache. Existing slots
@@ -615,6 +632,11 @@ template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr,
 	using tr = scalar_traits<T>;
 	if (!angular_integration_ || !solid_ptr->rotates_dynamically())
 		return;
+
+	// Phase 10: off-center constraint anchors torque the body via their lever arm.
+	// Added to torque_ here (once per step) alongside any game-applied torque, then
+	// consumed below. Center anchors contribute zero, so this is inert without them.
+	accumulate_constraint_torque(solid_ptr);
 
 	// Euler's equation in the body frame, where the principal-axis inertia is
 	// diagonal: ω̇_b = I⁻¹·(τ_b − ω_b × (I·ω_b)). ω is stored world-frame (matching
@@ -1448,55 +1470,96 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 }
 
 template <typename T>
+bool simulator<T>::constraint_force_on(constraint<T> * c,
+                                       solid<T> * s,
+                                       const vec3<T> & solid_pos,
+                                       const vec3<T> & solid_vel,
+                                       vec3<T> & force,
+                                       vec3<T> & lever) {
+	if (!c->is_active())
+		return false;
+
+	// Lever arm = orientation-rotated local anchor (zero anchor → zero lever, so
+	// center-anchored constraints behave exactly as before). The endpoint's world
+	// position and rigid velocity (v + ω×r) follow from it. `other` is the far end.
+	solid<T> * other = nullptr;
+	const vec3<T> * other_local = nullptr;
+	if (s == c->start_solid_.get()) {
+		anchor_lever(lever, s, c->local_anchor_a_);
+		other = c->end_solid_.get();
+		other_local = &c->local_anchor_b_;
+	} else if (s == c->end_solid_.get()) {
+		anchor_lever(lever, s, c->local_anchor_b_);
+		other = c->start_solid_.get();
+		other_local = &c->local_anchor_a_;
+	} else {
+		return false;
+	}
+
+	vec3<T> start_world, self_anchor_vel;
+	add(start_world, solid_pos, lever);
+	anchor_velocity(self_anchor_vel, s, solid_vel, lever);
+
+	// Far end: another solid's rotating anchor, or a fixed world point (zero velocity,
+	// so the relative anchor velocity is just −self).
+	vec3<T> end_world, tv;
+	if (other) {
+		vec3<T> other_lever, other_anchor_vel;
+		anchor_lever(other_lever, other, *other_local);
+		add(end_world, other->position_, other_lever);
+		anchor_velocity(other_anchor_vel, other, other->velocity_, other_lever);
+		sub(tv, other_anchor_vel, self_anchor_vel);
+	} else {
+		end_world = c->end_point_;
+		neg(tv, self_anchor_vel);
+	}
+
+	vec3<T> tx;
+	sub(tx, end_world, start_world);
+
+	T dist = length(tx);
+	// Spring: any nonzero displacement engages force (the dist > 0 guard
+	// just protects the divide). Rope: only stretched past rest engages.
+	T gate = (c->type_ == constraint<T>::type::spring) ? T {} : c->rest_length_;
+	if (dist > gate) {
+		T scale = (dist - c->rest_length_) / dist;
+		mul(tx, scale);
+	} else {
+		tx.reset();
+	}
+
+	mul(tx, c->spring_constant_);
+	mul(tv, c->damping_constant_);
+	add(force, tx, tv);
+	return true;
+}
+
+template <typename T>
 void simulator<T>::constraint_link(vec3<T> & result,
                                    solid<T> * s,
                                    const vec3<T> & solid_pos,
                                    const vec3<T> & solid_vel) {
-	vec3<T> start_world;
-	vec3<T> end_world;
-	vec3<T> tx;
-	vec3<T> tv;
+	vec3<T> force;
+	vec3<T> lever;
 	result.reset();
-
 	for (auto * c : s->constraints_) {
-		if (!c->is_active())
-			continue;
+		if (constraint_force_on(c, s, solid_pos, solid_vel, force, lever))
+			add(result, force);
+	}
+}
 
-		// Resolve world-space anchor positions and relative velocity.
-		// Translation-only: anchor velocity equals solid velocity.
-		if (s == c->start_solid_.get()) {
-			add(start_world, solid_pos, c->local_anchor_a_);
-			if (c->end_solid_) {
-				add(end_world, c->end_solid_->position_, c->local_anchor_b_);
-				sub(tv, c->end_solid_->velocity_, solid_vel);
-			} else {
-				end_world = c->end_point_;
-				neg(tv, solid_vel);
-			}
-		} else if (s == c->end_solid_.get()) {
-			add(start_world, solid_pos, c->local_anchor_b_);
-			add(end_world, c->start_solid_->position_, c->local_anchor_a_);
-			sub(tv, c->start_solid_->velocity_, solid_vel);
-		} else {
-			continue;
+template <typename T>
+void simulator<T>::accumulate_constraint_torque(solid<T> * s) {
+	vec3<T> force;
+	vec3<T> lever;
+	vec3<T> torque;
+	for (auto * c : s->constraints_) {
+		// Force evaluated at the start-of-step geometry; the lever × force torque
+		// is zero for a center anchor, so only off-center anchors spin the body.
+		if (constraint_force_on(c, s, s->position_, s->velocity_, force, lever)) {
+			cross(torque, lever, force);
+			s->add_torque(torque);
 		}
-
-		sub(tx, end_world, start_world);
-		T dist = length(tx);
-		// Spring: any nonzero displacement engages force (the dist > 0 guard
-		// just protects the divide). Rope: only stretched past rest engages.
-		T gate = (c->type_ == constraint<T>::type::spring) ? T {} : c->rest_length_;
-		if (dist > gate) {
-			T scale = (dist - c->rest_length_) / dist;
-			mul(tx, scale);
-		} else {
-			tx.reset();
-		}
-
-		mul(tx, c->spring_constant_);
-		mul(tv, c->damping_constant_);
-		add(result, tx);
-		add(result, tv);
 	}
 }
 

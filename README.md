@@ -13,11 +13,16 @@ Supports `float`, `double`, `fixed16`, and `fixed32` scalar types via template p
 
 ## Design Philosophy
 
-Hop is currently a **translation-only** physics engine — solids have position and linear velocity but no rotation. There is no angular velocity, no torque, no inertia tensor, and no orientation state.
+Hop began as a **translation-only** physics engine — and that fast, predictable core is still its heart: continuous swept-collision detection, deterministic fixed-point support, and zero-allocation simulation. It was designed for the [toadlet](https://github.com/alanfischer/toadlet) game engine, where gameplay objects (characters, projectiles, pickups, triggers, vehicles on terrain) need solid collision response without the cost of a full rigid-body solver on every body.
 
-This is intentional. Hop was designed for the [toadlet](https://github.com/alanfischer/toadlet) game engine where gameplay objects needed fast, predictable collision response without the complexity of a full rigid-body solver. The tradeoff is straightforward: you get continuous swept-collision detection, deterministic fixed-point support, and zero-allocation simulation in exchange for not handling rotational dynamics. For many game scenarios — characters, projectiles, pickups, triggers, vehicles on terrain — translation-only physics is sufficient and far simpler to reason about.
+**Rotation is now supported, and it is opt-in by construction.** A solid carries an orientation, angular velocity, and a principal-axis inertia, but every rotational term is gated behind a runtime *identity fast path*: a solid with identity orientation and zero inertia takes exactly the original translation-only code path, bit-for-bit (including fixed-point replay). There is **no template flag and no global switch** — you pay for rotation only on the bodies that use it:
 
-Rotational support is a work in progress — see `docs/rotation_plan.md` for the roadmap. The `mat3` and `quat` math primitives have landed; the simulator itself has not yet adopted them.
+- Leave a solid alone and it never rotates — orientation stays identity, `inv_inertia` stays zero, and the angular math multiplies out to nothing.
+- Call `set_orientation(...)` for a statically-tilted brush (honored by the narrowphase and traceables) without making it spin.
+- Call `set_inertia(...)` to opt a body into **dynamic rotation**: it then spins under torque, tumbles off off-center collisions, rolls via friction, and is torqued by off-center constraint anchors.
+- Kinematic platforms carry their riders' velocity through `set_angular_velocity(...)` (a spinning `func_rotating`-style mover) with no inertia required.
+
+See `docs/rotation_plan.md` for the full roadmap and the per-phase design notes.
 
 ## Features
 
@@ -25,6 +30,7 @@ Rotational support is a work in progress — see `docs/rotation_plan.md` for the
 - **GJK closest-point narrowphase** for rounded-vs-polytope pairs — correct edge/vertex contact normals (a capsule rides up a thin ledge instead of catching on a fabricated wall) and vertex-bounded; switchable to a cheaper plane-inflation path via `set_accurate_narrowphase`
 - **Multiple numerical integrators**: Euler, Improved Euler, Heun (default), Runge-Kutta
 - **Collision response** with coefficient of restitution, conservation of momentum, and friction
+- **Opt-in rigid-body rotation** — static orientation honored by the narrowphase and traceables, dynamic spin under torque (drift-free exponential quaternion integration), lever-arm angular impulse response (off-center hits tumble, friction rolls), kinematic angular carry for spinning platforms, and torque from off-center constraint anchors. Gated behind an identity fast path so non-rotating bodies stay bit-identical, fixed-point included
 - **Stacking contact solver** — a post-integration Gauss–Seidel pass over the touched-pair graph (warm-started, with restitution targets and Coulomb-cone friction at the velocity level) lets resting piles transmit load and settle; iteration count is tunable via `set_solver_iterations`
 - **Constraint system** with spring constants, damping, and distance thresholds
 - **Deactivation/sleeping** for inactive solids
@@ -68,6 +74,28 @@ Traceable implementations **must** add an explicit zero-direction branch.  The c
 4. On a hit, set `result.time = T{}` and return.
 
 See `HopTrimeshTraceable::trace_solid` in `hop-godot` for a reference implementation.
+
+### Migrating a custom `traceable` for rotation
+
+Adding rotation kept the public `solid`/`simulator` API source-compatible — an
+existing program that never touches orientation behaves identically (the identity
+fast path). The one interface that changed is `traceable::trace_solid`, so **custom
+traceable implementors** (anyone with their own trimesh / heightfield / voxel target)
+need two updates:
+
+1. **Honor the solid's orientation.** `trace_solid` receives the mover's orientation;
+   trace it the way GoldSrc traces a rotating brush — transform the mover into the
+   target's local frame by `Rᵀ`, run the existing unrotated sweep, and map the
+   resulting normal/point back out by `R`. Identity orientation reduces to the old
+   path exactly, so a target that ignores the argument still works for non-rotated
+   movers.
+2. **Fill the real contact point (`col.impact`).** Implementations must set
+   `col.impact` to the world-space witness point on the target surface (not the mover
+   origin). This is the lever-arm input the angular response needs (`r = impact −
+   solid.position`). It is inert until a consumer reads it and never feeds back into
+   `time`/`normal`/`depth`, so fixed-point replay is unaffected — but a custom target
+   that leaves it unset will produce no angular response at its contacts. The built-in
+   trimesh / heightfield / plane traceables already fill it.
 
 ## Collision Pairs
 

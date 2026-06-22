@@ -139,9 +139,14 @@ public:
 			return false;
 		vec3<T> a_world;
 		vec3<T> b_world;
-		add(a_world, start_solid_->position_, local_anchor_a_);
+		vec3<T> a_lever;
+		// Anchors rotate with their solid (Phase 10); zero anchor → position_.
+		mul(a_lever, start_solid_->orientation_, local_anchor_a_);
+		add(a_world, start_solid_->position_, a_lever);
 		if (end_solid_) {
-			add(b_world, end_solid_->position_, local_anchor_b_);
+			vec3<T> b_lever;
+			mul(b_lever, end_solid_->orientation_, local_anchor_b_);
+			add(b_world, end_solid_->position_, b_lever);
 		} else {
 			b_world = end_point_;
 		}

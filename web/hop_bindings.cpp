@@ -73,6 +73,24 @@ public:
 	emscripten::val getPosition() { return vec3_to_val(s_->get_position()); }
 	emscripten::val getVelocity() { return vec3_to_val(s_->get_velocity()); }
 
+	// Rotation (opt-in). Orientation is exchanged as a quaternion {x,y,z,w}.
+	// A solid stays non-rotating until given a finite inertia via setInertia.
+	void setOrientation(float x, float y, float z, float w) {
+		s_->set_orientation_from_quat(hop::quat<float>(x, y, z, w));
+	}
+	emscripten::val getOrientation() {
+		const auto& q = s_->get_orientation_quat();
+		auto obj = emscripten::val::object();
+		obj.set("x", q.x); obj.set("y", q.y); obj.set("z", q.z); obj.set("w", q.w);
+		return obj;
+	}
+	void setAngularVelocity(float x, float y, float z) { s_->set_angular_velocity(hop::vec3<float>(x, y, z)); }
+	emscripten::val getAngularVelocity() { return vec3_to_val(s_->get_angular_velocity()); }
+	// Principal-axis diagonal inertia (Ix, Iy, Iz). Non-zero opts the body into
+	// dynamic rotation; leave it unset (zero) and the body never spins.
+	void setInertia(float x, float y, float z) { s_->set_inertia(hop::vec3<float>(x, y, z)); }
+	void addTorque(float x, float y, float z) { s_->add_torque(hop::vec3<float>(x, y, z)); }
+
 	void setCoefficientOfRestitution(float cor) { s_->set_coefficient_of_restitution(cor); }
 	// Combine mode follows hop::restitution_combine: 0=average, 1=minimum, 2=multiply, 3=maximum.
 	void setRestitutionCombine(int mode) { s_->set_restitution_combine(static_cast<hop::restitution_combine>(mode)); }
@@ -151,6 +169,12 @@ EMSCRIPTEN_BINDINGS(hop) {
 	    .function("setVelocity", &HopSolid::setVelocity)
 	    .function("getPosition", &HopSolid::getPosition)
 	    .function("getVelocity", &HopSolid::getVelocity)
+	    .function("setOrientation", &HopSolid::setOrientation)
+	    .function("getOrientation", &HopSolid::getOrientation)
+	    .function("setAngularVelocity", &HopSolid::setAngularVelocity)
+	    .function("getAngularVelocity", &HopSolid::getAngularVelocity)
+	    .function("setInertia", &HopSolid::setInertia)
+	    .function("addTorque", &HopSolid::addTorque)
 	    .function("setCoefficientOfRestitution", &HopSolid::setCoefficientOfRestitution)
 	    .function("setRestitutionCombine", &HopSolid::setRestitutionCombine)
 	    .function("setCoefficientOfGravity", &HopSolid::setCoefficientOfGravity)
