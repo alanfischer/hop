@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <hop/collision.h>
+#include <hop/math/quat.h>
 #include <hop/math/support.h>
 #include <hop/shape.h>
 #include <memory>
@@ -92,9 +93,14 @@ public:
 		mass_ = tr::one();
 		inv_mass_ = tr::one();
 		position_.reset();
+		orientation_.reset();
+		orientation_q_.reset();
 		velocity_.reset();
 		angular_velocity_.reset();
 		force_.reset();
+		torque_.reset();
+		inertia_.reset();
+		inv_inertia_.reset(); // zero ⇒ no dynamic spin (rotation opt-in)
 		coefficient_of_gravity_ = tr::one();
 		coefficient_of_restitution_ = tr::half();
 		restitution_combine_ = restitution_combine::average;
@@ -190,9 +196,19 @@ public:
 	// Identity by default, in which case it is an exact no-op everywhere.
 	void set_orientation(const mat3<T> & r) {
 		orientation_ = r;
+		set_quat_from_mat3(orientation_q_, r); // keep the integrated quat in sync with external writes
+		recompute_world_bound();
+	}
+	// Commit an integrated quat (Phase 8 dynamic spin): single writer of the
+	// "both representations + world AABB are now consistent" transition, so the
+	// mat3/quat invariant can't silently desync. set_orientation is its mat3-in twin.
+	void set_orientation_from_quat(const quat<T> & q) {
+		orientation_q_ = q;
+		set_mat3_from_quat(orientation_, q);
 		recompute_world_bound();
 	}
 	const mat3<T> & get_orientation() const { return orientation_; }
+	const quat<T> & get_orientation_quat() const { return orientation_q_; }
 	void set_velocity(const vec3<T> & vel) {
 		velocity_.set(vel);
 		activate();
@@ -215,6 +231,32 @@ public:
 	}
 	const vec3<T> & get_force() const { return force_; }
 	void clear_force() { force_.reset(); }
+
+	// Dynamic rotation (Phase 8). Inertia is the principal-axis diagonal in the body
+	// frame; inv_inertia_ (the per-component reciprocal, 0 where a component is 0) is
+	// the canonical marker — inv_inertia_==0 means "this body never spins
+	// dynamically" (static/kinematic brushes, pinned props). Defaults to zero, so a
+	// body acquires spin only once a game gives it finite inertia (rotation opt-in).
+	void set_inertia(const vec3<T> & I) {
+		inertia_.set(I);
+		inv_inertia_.x = I.x > T {} ? tr::one() / I.x : T {};
+		inv_inertia_.y = I.y > T {} ? tr::one() / I.y : T {};
+		inv_inertia_.z = I.z > T {} ? tr::one() / I.z : T {};
+	}
+	const vec3<T> & get_inertia() const { return inertia_; }
+	const vec3<T> & get_inv_inertia() const { return inv_inertia_; }
+	// True iff the body integrates orientation under torque (any inv_inertia axis
+	// non-zero). The integrator early-outs on false, so the cost is a single compare
+	// for the default (non-rotating) body.
+	bool rotates_dynamically() const {
+		return inv_inertia_.x != T {} || inv_inertia_.y != T {} || inv_inertia_.z != T {};
+	}
+	void add_torque(const vec3<T> & t) {
+		add(torque_, t);
+		activate();
+	}
+	const vec3<T> & get_torque() const { return torque_; }
+	void clear_torque() { torque_.reset(); }
 
 	// Coefficients
 	void set_coefficient_of_gravity(T c) { coefficient_of_gravity_ = c; }
@@ -351,10 +393,14 @@ private:
 	bool active_ = true;
 	int scope_ = -1;
 	vec3<T> position_;
-	mat3<T> orientation_;         // static body rotation (no angular dynamics); identity by default
+	mat3<T> orientation_;         // body→world rotation; the queried form. For a dynamic body it is derived from orientation_q_ each step; identity by default
+	quat<T> orientation_q_;       // integrated orientation (dynamic spin); kept in sync with orientation_ (set_orientation / integrate_angular)
 	vec3<T> velocity_;
-	vec3<T> angular_velocity_;    // kinematic scripted spin (axis·rate about position_); zero by default = no-op
+	vec3<T> angular_velocity_;    // world-frame ω (axis·rate about position_); zero by default = no-op. Kinematic scripted spin OR dynamically integrated
 	vec3<T> force_;
+	vec3<T> torque_;              // accumulated world-frame torque (Phase 8); cleared each integrate_angular
+	vec3<T> inertia_;             // principal-axis diagonal (Ix,Iy,Iz) in the body frame; for the I·ω gyroscopic term
+	vec3<T> inv_inertia_;         // per-component reciprocal of inertia_ (0 where a component is 0). PRIMARY marker: inv_inertia_==0 ⇒ never spins dynamically. Zero by default ⇒ rotation is opt-in
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
 	contact_mode contact_mode_ = contact_mode::sweep_slide;  // positioning strategy (see contact_mode)

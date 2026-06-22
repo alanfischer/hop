@@ -26,6 +26,31 @@ template <typename T> Vector3 to_raylib(const hop::vec3<T> & v) {
 	return { tr::to_float(v.x), tr::to_float(v.z), tr::to_float(v.y) };
 }
 
+// Draw a cube by its 8 orientation-transformed world corners (Phase 8/9: the free
+// box now spins, so DrawCube — which ignores rotation — would hide the tumble).
+template <typename T>
+static void draw_oriented_cube(const hop::vec3<T> & pos, const hop::mat3<T> & R, T half, Color face, Color wire) {
+	Vector3 c[8];
+	for (int i = 0; i < 8; ++i) {
+		hop::vec3<T> local((i & 1) ? half : -half, (i & 2) ? half : -half, (i & 4) ? half : -half);
+		hop::vec3<T> w;
+		hop::mul(w, R, local);
+		hop::add(w, pos);
+		c[i] = to_raylib(w);
+	}
+	static const int faces[6][4] = { { 0, 1, 3, 2 }, { 4, 6, 7, 5 }, { 0, 4, 5, 1 }, { 2, 3, 7, 6 }, { 0, 2, 6, 4 }, { 1, 5, 7, 3 } };
+	for (auto & f : faces) {
+		DrawTriangle3D(c[f[0]], c[f[1]], c[f[2]], face);
+		DrawTriangle3D(c[f[0]], c[f[2]], c[f[3]], face);
+		DrawTriangle3D(c[f[0]], c[f[2]], c[f[1]], face);
+		DrawTriangle3D(c[f[0]], c[f[3]], c[f[2]], face);
+	}
+	for (int i = 0; i < 8; ++i)
+		for (int b = 1; b < 8; b <<= 1)
+			if (i < (i ^ b))
+				DrawLine3D(c[i], c[i ^ b], wire);
+}
+
 // Spark particle
 struct spark {
 	Vector3 pos;
@@ -125,16 +150,25 @@ template <typename T> static hop::convex_solid<T> make_octahedron(T r) {
 	return cs;
 }
 
-// Draw a regular octahedron of radius r at world position p (raylib Y-up frame).
-static void draw_octahedron(Vector3 p, float r, Color fill, Color wire) {
-	// Vertices in raylib Y-up: hop Z-up so the "up" vertex sits at +Y.
+// Draw a regular octahedron of radius r, oriented by R at hop position pos. The 6
+// vertices are built in hop space (pos + R·(±r·axis)) and mapped to raylib, so the
+// body's Phase 8/9 spin is visible.
+template <typename T>
+static void draw_octahedron(const hop::vec3<T> & pos, const hop::mat3<T> & R, T r, Color fill, Color wire) {
+	auto vert = [&](T x, T y, T z) {
+		hop::vec3<T> w;
+		hop::mul(w, R, hop::vec3<T>(x, y, z));
+		hop::add(w, pos);
+		return to_raylib(w);
+	};
+	const T nr = -r;
 	Vector3 v[6] = {
-		{ p.x + r, p.y,     p.z     }, // +x
-		{ p.x - r, p.y,     p.z     }, // -x
-		{ p.x,     p.y + r, p.z     }, // +y (up)
-		{ p.x,     p.y - r, p.z     }, // -y (down)
-		{ p.x,     p.y,     p.z + r }, // +z
-		{ p.x,     p.y,     p.z - r }, // -z
+		vert(r, T {}, T {}),   // +x
+		vert(nr, T {}, T {}),  // -x
+		vert(T {}, r, T {}),   // +y
+		vert(T {}, nr, T {}),  // -y
+		vert(T {}, T {}, r),   // +z
+		vert(T {}, T {}, nr),  // -z
 	};
 	// 8 triangle faces, wound so the outward normal points away from p.
 	rlDisableBackfaceCulling();
@@ -302,6 +336,9 @@ template <typename T> void run() {
 	box_solid->add_shape(std::make_shared<hop::shape<T>>(hop::aa_box<T>(
 	    hop::vec3<T>(-tr::half(), -tr::half(), -tr::half()),
 	    hop::vec3<T>(tr::half(), tr::half(), tr::half()))));
+	// Phase 8/9: finite inertia (unit box, m=1 → I = m/12·(1²+1²) = 1/6 per axis) so
+	// off-center wall/floor hits torque it and it tumbles via angular impulse response.
+	box_solid->set_inertia(hop::vec3<T>(tr::from_milli(167), tr::from_milli(167), tr::from_milli(167)));
 	box_solid->set_position(hop::vec3<T>(tr::from_int(1), zero, tr::from_int(4)));
 	box_solid->set_velocity(hop::vec3<T>(tr::from_int(3), tr::from_int(-2), zero));
 	sim.add_solid(box_solid);
@@ -311,8 +348,12 @@ template <typename T> void run() {
 	// force pulls when stretched, pushes when compressed.
 	auto pendulum_solid = std::make_shared<hop::solid<T>>();
 	set_common(pendulum_solid);
-	hop::capsule<T> pendulum_shape(hop::vec3<T>(), hop::vec3<T>(zero, zero, tr::from_milli(1500)), tr::from_milli(400));
+	// Spine centered on the solid origin (= COM / rotation pivot), so it spins about
+	// its middle rather than one end: from local z=−0.75 to +0.75.
+	hop::capsule<T> pendulum_shape(hop::vec3<T>(zero, zero, -tr::from_milli(750)), hop::vec3<T>(zero, zero, tr::from_milli(1500)), tr::from_milli(400));
 	pendulum_solid->add_shape(std::make_shared<hop::shape<T>>(pendulum_shape));
+	// Phase 9: finite inertia (anisotropic — easy spin about the spine = local z).
+	pendulum_solid->set_inertia(hop::vec3<T>(tr::half(), tr::half(), tr::from_milli(100)));
 	pendulum_solid->set_position(hop::vec3<T>(tr::from_int(2), zero, tr::from_int(3)));
 	pendulum_solid->set_velocity(hop::vec3<T>(-tr::from_int(2), tr::from_int(1), zero));
 	sim.add_solid(pendulum_solid);
@@ -323,8 +364,8 @@ template <typename T> void run() {
 	pendulum_spring->set_rest_length(tr::from_int(2));
 	pendulum_spring->set_spring_constant(tr::from_int(6));
 	pendulum_spring->set_damping_constant(T {});
-	// Anchor the spring at the capsule's centroid.
-	pendulum_spring->set_local_anchor_a(hop::vec3<T>(zero, zero, tr::from_milli(750)));
+	// Anchor the spring at the capsule's centroid (now the solid origin).
+	pendulum_spring->set_local_anchor_a(hop::vec3<T>(zero, zero, zero));
 	sim.add_constraint(pendulum_spring);
 
 	// ── Shape: capsule + Constraint: rope → anchor ───────────────────────────
@@ -332,8 +373,11 @@ template <typename T> void run() {
 	// until the rope hits its max length, then snaps back.
 	auto leash_capsule = std::make_shared<hop::solid<T>>();
 	set_common(leash_capsule);
-	hop::capsule<T> leash_shape(hop::vec3<T>(), hop::vec3<T>(tr::from_milli(1800), zero, zero), tr::from_milli(300));
+	// Spine centered on the solid origin (= COM), so it spins about its middle.
+	hop::capsule<T> leash_shape(hop::vec3<T>(-tr::from_milli(900), zero, zero), hop::vec3<T>(tr::from_milli(1800), zero, zero), tr::from_milli(300));
 	leash_capsule->add_shape(std::make_shared<hop::shape<T>>(leash_shape));
+	// Phase 9: finite inertia (anisotropic — easy spin about the spine = local x).
+	leash_capsule->set_inertia(hop::vec3<T>(tr::from_milli(100), tr::half(), tr::half()));
 	leash_capsule->set_position(hop::vec3<T>(-tr::from_int(2), -tr::from_int(1), tr::from_int(2)));
 	leash_capsule->set_velocity(hop::vec3<T>(tr::one(), tr::from_int(2), tr::from_int(3)));
 	sim.add_solid(leash_capsule);
@@ -344,8 +388,8 @@ template <typename T> void run() {
 	leash_rope->set_rest_length(tr::from_int(3));
 	leash_rope->set_spring_constant(tr::from_int(20));
 	leash_rope->set_damping_constant(T {});
-	// Anchor the rope at the capsule's centroid.
-	leash_rope->set_local_anchor_a(hop::vec3<T>(tr::from_milli(900), zero, zero));
+	// Anchor the rope at the capsule's centroid (now the solid origin).
+	leash_rope->set_local_anchor_a(hop::vec3<T>(zero, zero, zero));
 	sim.add_constraint(leash_rope);
 
 	// ── Shape: convex_solid + sphere + Constraint: spring → solid ────────────
@@ -354,6 +398,7 @@ template <typename T> void run() {
 	auto octa_solid = std::make_shared<hop::solid<T>>();
 	set_common(octa_solid);
 	octa_solid->add_shape(std::make_shared<hop::shape<T>>(make_octahedron<T>(tr::from_milli(500))));
+	octa_solid->set_inertia(hop::vec3<T>(tr::from_milli(100), tr::from_milli(100), tr::from_milli(100))); // Phase 9: tumbles off hits
 	octa_solid->set_position(hop::vec3<T>(-tr::from_int(1), tr::from_int(1), tr::from_int(5)));
 	octa_solid->set_velocity(hop::vec3<T>(tr::from_int(2), -tr::one(), zero));
 	sim.add_solid(octa_solid);
@@ -361,6 +406,7 @@ template <typename T> void run() {
 	auto partner_sphere = std::make_shared<hop::solid<T>>();
 	set_common(partner_sphere);
 	partner_sphere->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(400))));
+	partner_sphere->set_inertia(hop::vec3<T>(tr::from_milli(64), tr::from_milli(64), tr::from_milli(64))); // 2/5 m r², r=0.4: rolls under friction
 	partner_sphere->set_position(hop::vec3<T>(tr::from_milli(500), tr::from_int(1), tr::from_int(5)));
 	partner_sphere->set_velocity(hop::vec3<T>(-tr::one(), tr::from_int(2), tr::from_int(1)));
 	sim.add_solid(partner_sphere);
@@ -377,6 +423,7 @@ template <typename T> void run() {
 	auto bola_a = std::make_shared<hop::solid<T>>();
 	set_common(bola_a);
 	bola_a->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350))));
+	bola_a->set_inertia(hop::vec3<T>(tr::from_milli(49), tr::from_milli(49), tr::from_milli(49)));
 	bola_a->set_position(hop::vec3<T>(tr::from_int(1), tr::from_int(2), tr::from_int(2)));
 	bola_a->set_velocity(hop::vec3<T>(tr::from_int(3), -tr::from_int(2), tr::from_int(2)));
 	sim.add_solid(bola_a);
@@ -384,6 +431,7 @@ template <typename T> void run() {
 	auto bola_b = std::make_shared<hop::solid<T>>();
 	set_common(bola_b);
 	bola_b->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(tr::from_milli(350))));
+	bola_b->set_inertia(hop::vec3<T>(tr::from_milli(49), tr::from_milli(49), tr::from_milli(49)));
 	bola_b->set_position(hop::vec3<T>(tr::from_int(2), tr::from_milli(1500), tr::from_int(2)));
 	bola_b->set_velocity(hop::vec3<T>(-tr::from_int(2), tr::from_int(3), tr::one()));
 	sim.add_solid(bola_b);
@@ -473,37 +521,34 @@ template <typename T> void run() {
 
 		Color tint_in = YELLOW;
 
-		// Box
-		Vector3 bp = to_raylib(box_solid->get_position());
-		DrawCube(bp, 1.0f, 1.0f, 1.0f, box_in_zone ? tint_in : RED);
-		DrawCubeWires(bp, 1.0f, 1.0f, 1.0f, MAROON);
+		// Box — oriented draw so its Phase 8/9 tumble is visible.
+		{
+			Color box_face = box_in_zone ? tint_in : (Color){ 230, 41, 55, 160 };
+			draw_oriented_cube(box_solid->get_position(), box_solid->get_orientation(), tr::half(), box_face, MAROON);
+		}
 
-		// Spring pendulum capsule
+		// Spring pendulum capsule — spine endpoints rotated by the solid orientation.
 		{
 			auto & p = pendulum_solid->get_position();
-			hop::vec3<T> top = p;
-			top.z = top.z + tr::from_milli(1500);
-			hop::vec3<T> mid = p;
-			mid.z = mid.z + tr::from_milli(750);
-			Vector3 bot_rl = to_raylib(p);
-			Vector3 top_rl = to_raylib(top);
-			Vector3 mid_rl = to_raylib(mid);
+			const hop::mat3<T> & R = pendulum_solid->get_orientation();
+			auto along = [&](T s) { hop::vec3<T> o, w; hop::mul(o, R, hop::vec3<T>(zero, zero, s)); hop::add(w, p, o); return w; };
+			Vector3 bot_rl = to_raylib(along(-tr::from_milli(750))); // spine ends, centered on the COM
+			Vector3 top_rl = to_raylib(along(tr::from_milli(750)));
+			Vector3 mid_rl = to_raylib(p);                           // centroid = origin
 			DrawCapsule(bot_rl, top_rl, 0.4f, 8, 8, pendulum_in_zone ? tint_in : GREEN);
 			DrawCapsuleWires(bot_rl, top_rl, 0.4f, 8, 8, DARKGREEN);
 			// Spring line: ceiling anchor to capsule centroid.
 			draw_constraint_line(to_raylib(pendulum_anchor), mid_rl, 2.0f, /*spring*/ true);
 		}
 
-		// Rope-leashed horizontal capsule
+		// Rope-leashed horizontal capsule — spine endpoints rotated by the orientation.
 		{
 			auto & p = leash_capsule->get_position();
-			hop::vec3<T> end = p;
-			end.x = end.x + tr::from_milli(1800);
-			hop::vec3<T> mid = p;
-			mid.x = mid.x + tr::from_milli(900);
-			Vector3 a = to_raylib(p);
-			Vector3 b = to_raylib(end);
-			Vector3 m = to_raylib(mid);
+			const hop::mat3<T> & R = leash_capsule->get_orientation();
+			auto along = [&](T s) { hop::vec3<T> o, w; hop::mul(o, R, hop::vec3<T>(s, zero, zero)); hop::add(w, p, o); return w; };
+			Vector3 a = to_raylib(along(-tr::from_milli(900))); // spine ends, centered on the COM
+			Vector3 b = to_raylib(along(tr::from_milli(900)));
+			Vector3 m = to_raylib(p);                           // centroid = origin
 			DrawCapsule(a, b, 0.3f, 8, 8, leash_in_zone ? tint_in : ORANGE);
 			DrawCapsuleWires(a, b, 0.3f, 8, 8, { 200, 100, 0, 255 });
 			// Rope from anchor to capsule centroid
@@ -515,7 +560,7 @@ template <typename T> void run() {
 		Vector3 sphere_pos = to_raylib(partner_sphere->get_position());
 		{
 			Color octa_color = octa_in_zone ? tint_in : SKYBLUE;
-			draw_octahedron(octa_pos, 0.5f, octa_color, DARKBLUE);
+			draw_octahedron(octa_solid->get_position(), octa_solid->get_orientation(), tr::from_milli(500), octa_color, DARKBLUE);
 			DrawSphere(sphere_pos, 0.4f, partner_in_zone ? tint_in : VIOLET);
 			DrawSphereWires(sphere_pos, 0.4f, 8, 8, DARKPURPLE);
 			draw_constraint_line(octa_pos, sphere_pos, 1.5f, /*spring*/ true);

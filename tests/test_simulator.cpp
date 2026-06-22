@@ -503,6 +503,143 @@ template <typename T> static void test_oriented_box_rest(const char * label) {
 	printf("OK\n");
 }
 
+// Phase 8: a finite-inertia body integrates orientation under torque and free spin,
+// while a body with no inertia (inv_inertia == 0, the default) never rotates
+// dynamically. No collision response yet — these bodies don't collide
+// (collide_with_scope 0), they just spin.
+template <typename T> static void test_dynamic_spin(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  dynamic_spin[%s]: ", label);
+	const T z {};
+	auto make = [&](const vec3<T> & inertia, const vec3<T> & w0) {
+		auto sim = std::make_shared<simulator<T>>();
+		sim->set_gravity(vec3<T>(z, z, z));
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		if (inertia.x > z) s->set_inertia(inertia);
+		s->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()), vec3<T>(tr::half(), tr::half(), tr::half()))));
+		s->set_collide_with_scope(0);
+		s->set_angular_velocity(w0);
+		sim->add_solid(s);
+		return std::make_pair(sim, s);
+	};
+	auto spin_z = [](const std::shared_ptr<solid<T>> & s) {
+		const auto & R = s->get_orientation();
+		return std::atan2(tr::to_float(R.at(1, 0)), tr::to_float(R.at(0, 0)));
+	};
+
+	// (1) Free spin: 2 rad/s about Z, no torque → ω constant, angle advances ω·t.
+	{
+		auto [sim, s] = make(vec3<T>(tr::one(), tr::one(), tr::one()), vec3<T>(z, z, tr::two()));
+		for (int i = 0; i < 100; ++i) sim->update(tr::from_milli(16)); // 1.6 s → 3.2 rad ≡ -3.083
+		float wz = tr::to_float(s->get_angular_velocity().z);
+		printf("free wz=%.2f ang=%.2f ", wz, spin_z(s));
+		assert(std::fabs(wz - 2.0f) < 0.1f);                 // ω unchanged (no torque)
+		assert(std::fabs(spin_z(s) - (-3.083f)) < 0.2f);     // 3.2 rad wrapped
+	}
+	// (2) Spin-up: τ=4 about Z, I=2 → dω=2 rad/s² → ω≈3.2 after 1.6 s.
+	{
+		auto [sim, s] = make(vec3<T>(tr::two(), tr::two(), tr::two()), vec3<T>(z, z, z));
+		for (int i = 0; i < 100; ++i) { s->add_torque(vec3<T>(z, z, tr::from_int(4))); sim->update(tr::from_milli(16)); }
+		float wz = tr::to_float(s->get_angular_velocity().z);
+		printf("spinup wz=%.2f ", wz);
+		assert(std::fabs(wz - 3.2f) < 0.2f);
+	}
+	// (3) Opt-out: no inertia (inv_inertia 0) → never spins despite torque + set ω.
+	{
+		auto [sim, s] = make(vec3<T>(z, z, z), vec3<T>(z, z, tr::from_int(5)));
+		for (int i = 0; i < 50; ++i) { s->add_torque(vec3<T>(z, z, tr::from_int(10))); s->set_angular_velocity(vec3<T>(z, z, tr::from_int(5))); sim->update(tr::from_milli(16)); }
+		printf("optout ang=%.4f ", spin_z(s));
+		assert(std::fabs(spin_z(s)) < 0.01f); // orientation never changed
+	}
+	// (4) Cap: runaway torque → |ω| clamped to default_max_angular_velocity_component.
+	{
+		auto [sim, s] = make(vec3<T>(tr::one(), tr::one(), tr::one()), vec3<T>(z, z, z));
+		for (int i = 0; i < 100; ++i) { s->add_torque(vec3<T>(z, z, tr::from_int(1000))); sim->update(tr::from_milli(16)); }
+		float wz = tr::to_float(s->get_angular_velocity().z);
+		float cap = tr::to_float(tr::default_max_angular_velocity_component());
+		printf("cap wz=%.1f ", wz);
+		assert(std::fabs(wz - cap) < 1.0f);
+	}
+	printf("OK\n");
+}
+
+// Phase 9: an off-center impact transfers linear momentum into spin (lever arm),
+// while a centered impact produces ~none. A projectile (no inertia, so it can't
+// spin) strikes a free finite-inertia box; the +y-offset hit pushing +x torques the
+// box clockwise about Z (ω.z < 0), and the box's linear speed is lower than the
+// centered case because energy went into rotation.
+template <typename T> static void test_angular_impulse(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  angular_impulse[%s]: ", label);
+	const T z {};
+	auto run = [&](T yoff) {
+		auto sim = std::make_shared<simulator<T>>();
+		sim->set_gravity(vec3<T>(z, z, z));
+		auto A = std::make_shared<solid<T>>();
+		A->set_mass(tr::one());
+		A->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one()));
+		A->set_coefficient_of_restitution(tr::half());
+		A->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()), vec3<T>(tr::half(), tr::half(), tr::half()))));
+		sim->add_solid(A);
+		auto B = std::make_shared<solid<T>>(); // no inertia → B never spins
+		B->set_mass(tr::one());
+		B->set_coefficient_of_restitution(tr::half());
+		B->add_shape(std::make_shared<shape<T>>(sphere<T>(vec3<T>(z, z, z), tr::from_milli(300))));
+		B->set_position(vec3<T>(-tr::two(), yoff, z));
+		B->set_velocity(vec3<T>(tr::from_int(8), z, z));
+		sim->add_solid(B);
+		for (int i = 0; i < 60; ++i) sim->update(tr::from_milli(16));
+		return std::make_pair(tr::to_float(A->get_velocity().x), tr::to_float(A->get_angular_velocity().z));
+	};
+	auto c = run(z);                 // centered
+	auto o = run(tr::from_milli(400)); // +0.4 in y
+	printf("centered(vx=%.2f wz=%.3f) offcenter(vx=%.2f wz=%.3f) ", c.first, c.second, o.first, o.second);
+	assert(c.first > 1.0f);              // box was pushed
+	assert(std::fabs(c.second) < 0.15f); // centered → ~no spin
+	assert(o.second < -0.5f);            // off-center → real clockwise spin about z
+	assert(o.first < c.first);           // energy went into rotation → less linear speed
+	printf("OK\n");
+}
+
+// Phase 9: friction at a contact below the center of mass torques the body — a box
+// sliding along the floor decelerates AND tips forward (acquires ω about the axis
+// perpendicular to motion), the start of rolling. Exercises the angular friction
+// (tangent effective-mass) path.
+template <typename T> static void test_friction_rolling(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  friction_rolling[%s]: ", label);
+	simulator<T> sim; // default gravity −Z
+	auto floor = std::make_shared<solid<T>>();
+	floor->set_infinite_mass();
+	floor->set_coefficient_of_gravity(T {});
+	floor->set_coefficient_of_static_friction(tr::one());
+	floor->set_coefficient_of_dynamic_friction(tr::one());
+	floor->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::from_int(6), -tr::from_int(6), -tr::one()), vec3<T>(tr::from_int(6), tr::from_int(6), T {}))));
+	sim.add_solid(floor);
+	auto s = std::make_shared<solid<T>>();
+	s->set_mass(tr::one());
+	s->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one()));
+	s->set_coefficient_of_restitution(T {});
+	s->set_coefficient_of_static_friction(tr::one());
+	s->set_coefficient_of_dynamic_friction(tr::one());
+	s->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()), vec3<T>(tr::half(), tr::half(), tr::half()))));
+	s->set_position(vec3<T>(T {}, T {}, tr::half()));
+	s->set_velocity(vec3<T>(tr::from_int(5), T {}, T {})); // slide +x
+	sim.add_solid(s);
+	for (int i = 0; i < 30; ++i) sim.update(tr::from_milli(16));
+	float vx = tr::to_float(s->get_velocity().x);
+	float wy = tr::to_float(s->get_angular_velocity().y);
+	printf("vx=%.2f wy=%.3f ", vx, wy);
+	assert(vx < 4.0f);  // friction decelerated it
+	assert(wy > 0.25f); // and torqued it into a forward roll about +y
+	printf("OK\n");
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -524,6 +661,9 @@ int main() {
 	test_angular_carry_box<float>("float");
 	test_angular_carry_box_capsule<float>("float");
 	test_oriented_box_rest<float>("float");
+	test_dynamic_spin<float>("float");
+	test_angular_impulse<float>("float");
+	test_friction_rolling<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -556,6 +696,9 @@ int main() {
 	test_angular_carry_box<fixed16>("fixed16");
 	test_angular_carry_box_capsule<fixed16>("fixed16");
 	test_oriented_box_rest<fixed16>("fixed16");
+	test_dynamic_spin<fixed16>("fixed16");
+	test_angular_impulse<fixed16>("fixed16");
+	test_friction_rolling<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

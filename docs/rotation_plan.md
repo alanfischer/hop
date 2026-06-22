@@ -3,22 +3,26 @@
 Roadmap for adding rotation to hop. Current as of June 2026: **static
 orientation** (Phase 4), the **real traceable contact point** (the Phase 6/9
 prerequisite), **kinematic angular carry** (Phase 6 — spinning platforms carry
-their riders, verified), and the **complete static narrowphase** (Phase 5 — every
-collision pair now honors a static orientation) have shipped.
+their riders, verified), the **complete static narrowphase** (Phase 5 — every
+collision pair honors a static orientation), **dynamic free spin under torque**
+(Phase 8 — solids integrate their own orientation), and **angular impulse response**
+(Phase 9 — bodies bounce/tumble off what they hit) have shipped.
 
 The roadmap builds up to full dynamic rotation in graded milestones, each
 shippable on its own:
 
   static orientation (done) → **kinematic angular carry** (done) → finish the
-  static narrowphase (done) → kinematic blocking → dynamic spin under torque →
-  angular impulse response → constraints/friction.
+  static narrowphase (done) → dynamic spin under torque (done) → angular impulse
+  response (done) → constraints/friction use angular (Phase 10, next).  (Phase 7,
+  kinematic door blocking/yaw carry, is deferred — its data is already exposed, so
+  it's a game-side feature, not hop work.)
 
-The kinematic-carry milestones (6–7) are deliberately ahead of the dynamic ones:
-they deliver the GoldSrc rotating-platform feel with no inertia/torque math, and
-the dynamic phases reuse the same `angular_velocity` state and contact-point
-plumbing. Phase 6 shipped before Phase 5, exactly as anticipated below — the
-capsule-rider carry needed nothing from the polytope narrowphase. With Phase 5
-now in, the next milestone is **Phase 7** (kinematic blocking + rider yaw carry).
+Phases were not done strictly in order: 6 before 5 (capsule carry needed nothing
+from the polytope narrowphase), and 8/9 before 7 (the dynamic arc is the real library
+work; Phase 7 is game-side). The full dynamic-rotation feel is now in — off-center
+hits induce spin, spinning bodies tumble and roll. The next milestone is **Phase 10**
+(constraints use angular attach points); Phase 9's deferred end-of-step SAT recovery
+(for fast/thin spinners) is the remaining hardening item.
 
 ## Status at a glance
 
@@ -30,9 +34,9 @@ now in, the next milestone is **Phase 7** (kinematic blocking + rider yaw carry)
 | 4. **Static orientation** — `solid.orientation` + `shape.local_rotation`, honored by GJK + traceables | done | |
 | 5. Close the static narrowphase gap (rotated polytope×polytope + box-mover-vs-traceable, OBB) | done | oriented polytope×polytope via the world-space Minkowski-CSO sweep (`trace_pair_oriented_polytope` in `collide.h`); box-mover-vs-rotated-traceable via OBB-vs-triangle (`obb_local_vs_triangle` in hop-godot). Both halves shipped |
 | 6. Kinematic angular carry (`ω×r` surface velocity; spinning platforms carry riders) | done | `solid.angular_velocity`; solver biases relative velocity by `ω×r`; hop-godot derives ω from the per-frame orientation delta. **Verified in-engine.** Box/convex riders now carried too (Phase 5) |
-| 7. Kinematic blocking/crush + rider yaw carry (rotating-door parity) | **next** | not started |
-| 8. Dynamic orientation state (angular integration under torque) | pending | |
-| 9. Angular impulse response | pending | contact point ready |
+| 7. Kinematic blocking/crush + rider yaw carry (rotating-door parity) | deferred | data already exposed (`get_touch` partner/ω + contact depth); it's a game-side feature, not hop-library work — skipped to do the dynamic arc first |
+| 8. Dynamic orientation state (angular integration under torque) | done | `solid.inertia_/inv_inertia_/torque_/orientation_q_`; `integrate_angular` (body-frame Euler eq + gyroscopic + exponential quat step) in `simulator.h`; `inv_inertia==0` opt-out (default); angular cap + deactivation. hop-godot: inertia auto-compute, torque, ω state, orientation writeback |
+| 9. Angular impulse response | done | lever-arm impulse in the GS velocity solver (`solve_contacts`): off-center hits transfer linear↔angular, friction induces rolling, Phase 6 carry is the infinite-inertia limit. Gated on `rotates_dynamically()` so non-rotating pairs stay bit-identical. + broad-phase inflation for spinners. (End-of-step SAT recovery deferred) |
 | 10. Constraints and friction use angular | pending | |
 | 11. Docs, examples, bindings | pending | |
 
@@ -330,23 +334,36 @@ crushed/reverse it when pinned.
 
 **Estimated effort:** 2–4 days.
 
-### Phase 8 — dynamic orientation state (free spin under torque)
+### Phase 8 — dynamic orientation state (free spin under torque) — **SHIPPED**
 
-Now make orientation *evolve* from physics rather than script. Reuses the
+Orientation now *evolves* from physics rather than script. Reuses the
 `angular_velocity` state from Phase 6.
 
-**Add (always-present runtime state, per the no-template decision):**
-`quat<T> orientation` (integrated; `mat3` derived per step), reuse
-`angular_velocity`, plus `torque`, `inertia`, `inv_inertia`.
+**Shipped (always-present runtime state):** `quat<T> orientation_q_` (integrated;
+the queried `mat3 orientation_` is derived from it each step and stays in sync with
+`set_orientation`), plus `torque_`, `inertia_`, `inv_inertia_` on `solid` (`solid.h`),
+with `set_inertia` / `add_torque` / `rotates_dynamically` accessors.
 
-**Dynamic rotation integration** (in each `integrator_type`):
-- Exponential quat step: `set_quat_from_axis_angle(dq, ω_hat, |ω|*dt)`,
-  `q ← dq * q`.
-- Angular velocity step: `ω ← ω + I⁻¹·(τ - ω × (I·ω)) · dt` (gyroscopic
-  term kept because it's cheap and stabilizing).
-- Angular velocity cap (new `default_max_angular_velocity_component` on
-  `scalar_traits`).
-- Angular component of deactivation threshold.
+**Dynamic rotation integration** — `simulator::integrate_angular` (`simulator.h`),
+called in Pass A by both contact modes after the linear step:
+- Euler's equation in the **body frame** (inertia diagonal there): rotate ω/τ in by
+  `Rᵀ`, `ω̇_b = I⁻¹·(τ_b − ω_b × (I·ω_b))` with the gyroscopic term kept, rotate ω
+  back to world. (ω is stored world-frame, matching the Phase 6 `ω×r` carry.)
+- Exponential quat step `q ← dq·q` (drift-free for constant ω), renormalized;
+  `solid::set_orientation_from_quat` refreshes the queried mat3 (`set_mat3_from_quat`)
+  and recomputes the world bound as one unit, keeping the Phase 5 oriented broad
+  phase tracking the spin.
+- Angular velocity cap (`default_max_angular_velocity_component` on `scalar_traits`,
+  all four scalar types).
+- Angular deactivation term (a dynamically-spinning body won't sleep mid-rotation).
+- Global `set_angular_integration(bool)` toggle (A/B + replay-bisection lever).
+
+**hop-godot wiring** (so a Godot `RigidBody3D` spins): `BODY_PARAM_INERTIA` set/get
++ auto-compute from the collision AABB×mass when the game leaves it zero;
+`apply_torque` / `apply_torque_impulse` / `constant_torque` → `add_torque` / Δω; a
+dynamic `BODY_STATE_ANGULAR_VELOCITY` seeds the integrated spin; `sync_from_hop`
+writes the integrated orientation (+ω) back to the body transform (scale preserved),
+gated on `rotates_dynamically()` so non-spinning bodies stay Godot-authoritative.
 
 **Disabling dynamic rotation (the documented toggle).** Through Phase 7,
 "ignore rotation" needs *no* switch: orientation and `angular_velocity` are
@@ -373,28 +390,56 @@ off-switch. The contract:
   phases.
 
 **End-of-phase state:** solids spin freely under torque; no collision response
-yet — they rotate through each other if hit.
+yet — they rotate through each other if hit (Phase 9).
 
-**Estimated effort:** 1–2 days.
+**Tests:** `test_dynamic_spin` in `tests/test_simulator.cpp` (float + fixed16: free
+spin keeps ω, torque spins up at `I⁻¹τt`, `inv_inertia==0` never rotates, runaway
+torque hits the cap); existing `test_rotation_drift` (`test_quat.cpp`) covers the
+exponential-integration drift bound. Demo: a freely-spinning (asymmetric-inertia)
+gold box added to `examples/demo_static_rotation.cpp`. hop core suite +
+hop-godot addon build green; UBSan-clean on the integration paths.
 
-### Phase 9 — angular impulse response
+**Verification still owed:** in-engine Godot smoke — a `RigidBody3D` with an applied
+torque actually tumbles (the C++ integration is tested and the addon compiles +
+links, but the Godot wiring has not been run in-engine).
 
-**Rework collision response** to use contact point + lever arm:
-- `r_a = col.impact - solid_a.position` (and for b). `col.impact` is now the
-  real surface point on every pair (Phase 1 follow-up) — no remaining prereq.
-- Effective mass includes angular terms via principal-axis inertia.
-- Linear impulse → Δv for both solids.
-- Angular impulse → Δω for both solids.
-- Friction at contact produces tangential impulse through the same machinery
-  (this subsumes existing friction paths *and* the Phase 6 kinematic carry,
-  which becomes the infinite-mass limit of this formula).
+### Phase 9 — angular impulse response — **SHIPPED**
 
-**Mitigate approach (a) artifacts:**
-- Inflate broad-phase AABB for spinning solids by `|ω|·dt·max_radius`.
-- End-of-step SAT penetration check for rotating pairs; push out along
-  least-penetrating axis; dampen angular velocity along that axis.
+The GS velocity solver (`solve_contacts` in `simulator.h`) now resolves contacts at
+the real contact point with a lever arm, so a body bounces/tumbles off what it hits.
 
-**Estimated effort:** 3–5 days.
+**Shipped:**
+- Lever arms `r_a/r_b = slot.impact − position` and an angular-aware **effective
+  normal mass** `k_n = inv_m_sum + n·((Iₐ⁻¹(rₐ×n))×rₐ) + n·((I_b⁻¹(r_b×n))×r_b)`,
+  precomputed per pair (orientation fixed during the solve). `apply_inv_inertia_world`
+  does the body-frame `R·(invI ∘ Rᵀ·v)` round-trip; the effective mass along any
+  direction (normal `k_n` and the per-sweep friction slip direction) shares one
+  `angular_eff_mass(pair, dir)` helper.
+- `apply_pair_impulse` now also torques each finite-inertia body:
+  `ω_a −= Iₐ⁻¹(rₐ×J)`, `ω_b += I_b⁻¹(r_b×J)`. The relative velocity is the **live
+  surface velocity** `v + ω×r` at the contact (recomputed each sweep), and `vn0` /
+  restitution derive from it.
+- **Friction** uses the tangent effective mass along the live slip direction, so a
+  tangential contact torques the body (rolling).
+- The **Phase 6 kinematic carry is subsumed**: for an `inv_inertia==0` body ω is
+  fixed, so `ω×r` *is* the old `v_bias` and the impulse changes no ω (infinite-inertia
+  limit).
+- **Gating:** the whole angular path activates only when a pair has a body with
+  `rotates_dynamically()` (`inv_inertia != 0`). Every other pair takes the original
+  linear + `v_bias` solve **bit-identical** — Phase 6 and all prior tests unchanged.
+- **Broad-phase inflation** for spinners (`spin_broadphase_reach = |ω|·dt·r_max`)
+  added to both per-step query boxes (0 for non-spinners).
+
+**Tests** (`tests/test_simulator.cpp`, float + fixed16): `test_angular_impulse`
+(off-center hit induces spin of the right sign + steals linear speed; centered hit
+gives ~none), `test_friction_rolling` (a sliding box tips forward via friction
+torque). Phase 6 `test_angular_carry*` unchanged. Full suite green; UBSan-clean;
+hop-godot addon recompiles. Demo: `examples/demo_bounce.cpp`'s free box has finite
+inertia + oriented rendering — it now tumbles off the walls/floor (the headline
+payoff to "why doesn't the bounce demo tumble").
+
+**Deferred / owed:** end-of-step SAT penetration recovery for fast/thin spinners
+(per scope); in-engine Godot smoke (a `RigidBody3D` tumbling off a wall).
 
 ### Phase 10 — constraints and friction use angular
 
@@ -491,6 +536,21 @@ work. This phase is mostly documenting that rolling now works.
   the ω-from-orientation-delta derivation in `HopPhysicsServer::_step`
   (kinematic pre-step loop). Test: `test_angular_carry` in
   `tests/test_simulator.cpp`.
+- Phase 8 (dynamic free spin): `solid.inertia_/inv_inertia_/torque_/orientation_q_`
+  + `set_inertia`/`add_torque`/`rotates_dynamically` in `solid.h`;
+  `simulator::integrate_angular` + the `angular_integration_` toggle + angular
+  deactivation in `simulator.h`; `default_max_angular_velocity_component` in
+  `scalar_traits.h`. hop-godot: `update_body_inertia`/`aabb_box_inertia`,
+  `BODY_PARAM_INERTIA`, torque methods, dynamic `BODY_STATE_ANGULAR_VELOCITY` in
+  `hop_physics_server.cpp`; orientation writeback in `HopBodyData::sync_from_hop`;
+  `to_godot_basis` in `hop_conversions.h`. Test: `test_dynamic_spin` in
+  `tests/test_simulator.cpp`; demo `examples/demo_static_rotation.cpp` (gold box).
+- Phase 9 (angular impulse response): `apply_inv_inertia_world`,
+  `spin_broadphase_reach`, and the `contact_pair` `r_a/r_b/has_angular/eff_n` +
+  angular `apply_pair_impulse` / `contact_point_vrel` / friction tangent-mass in
+  `solve_contacts` (`simulator.h`). Tests `test_angular_impulse` /
+  `test_friction_rolling` in `tests/test_simulator.cpp`; demo `examples/demo_bounce.cpp`
+  (the free box tumbles).
 - Toadlet port reference:
   `/Users/afischer/personal/toadlet/source/cpp/toadlet/egg/mathfixed/` —
   original quaternion/matrix3x3 ops and fixed-point polynomial asin/acos.
