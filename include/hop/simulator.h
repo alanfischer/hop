@@ -372,9 +372,13 @@ public:
 	// snapshot, so a fast spinner would miss contacts its swept surface should find.
 	// r is world_bound_'s max half-extent. Zero for a non-spinning body.
 	T spin_broadphase_reach(const solid<T> * s, T dt) const {
-		T sp = length(s->angular_velocity_);
-		if (sp <= T {})
+		// Hot path: runs for every solid every step. The common case is a non-spinning
+		// body (ω == 0), so test that with a cheap dot product and skip the sqrt — only
+		// an actual spinner pays for length().
+		const vec3<T> & w = s->angular_velocity_;
+		if (dot(w, w) <= T {})
 			return T {};
+		T sp = length(w);
 		const aa_box<T> & b = s->world_bound_;
 		T hx = (b.maxs.x - b.mins.x) * tr::half();
 		T hy = (b.maxs.y - b.mins.y) * tr::half();
