@@ -55,6 +55,12 @@ public:
 	// Integrator
 	void set_integrator(integrator_type i) { integrator_ = i; }
 	integrator_type get_integrator() const { return integrator_; }
+	// Global dynamic-rotation toggle (Phase 8). All angular integration lives in
+	// integrate_angular, so disabling it is the clean A/B + deterministic-replay-
+	// bisection lever. Per-solid `inv_inertia == 0` already makes it free for
+	// non-rotating bodies, so this is only for turning spin off scene-wide.
+	void set_angular_integration(bool b) { angular_integration_ = b; }
+	bool get_angular_integration() const { return angular_integration_; }
 
 	void set_average_normals(bool a) { average_normals_ = a; }
 	bool get_average_normals() const { return average_normals_; }
@@ -297,6 +303,11 @@ public:
 	// the solved velocity and handles deactivation.
 	void integrate_and_discover(solid<T> * solid_ptr, T dt);
 	void commit_solid(solid<T> * solid_ptr, T dt);
+	// Dynamic rotation step (Phase 8): integrate angular_velocity from torque/inertia
+	// and orientation from angular_velocity. Exact no-op for the default body
+	// (inv_inertia == 0). Called in Pass A by both contact modes, after the linear
+	// integration. No collision response to spin yet (Phase 9).
+	void integrate_angular(solid<T> * solid_ptr, T dt);
 	// Iterative non-linear Gauss–Seidel position solver (speculative pipeline):
 	// removes residual penetration as a pseudo-position correction, re-deriving
 	// each contact's separation from the running correction so multi-contact
@@ -354,6 +365,22 @@ public:
 		v.x = tr::cap(v.x, value);
 		v.y = tr::cap(v.y, value);
 		v.z = tr::cap(v.z, value);
+	}
+
+	// Phase 9: extra broad-phase reach for a spinning body. A surface point can sweep
+	// |ω|·dt·r past the body's resting bound within one per-frame orientation
+	// snapshot, so a fast spinner would miss contacts its swept surface should find.
+	// r is world_bound_'s max half-extent. Zero for a non-spinning body.
+	T spin_broadphase_reach(const solid<T> * s, T dt) const {
+		T sp = length(s->angular_velocity_);
+		if (sp <= T {})
+			return T {};
+		const aa_box<T> & b = s->world_bound_;
+		T hx = (b.maxs.x - b.mins.x) * tr::half();
+		T hy = (b.maxs.y - b.mins.y) * tr::half();
+		T hz = (b.maxs.z - b.mins.z) * tr::half();
+		T r = tr::max_val(hx, tr::max_val(hy, hz));
+		return sp * dt * r;
 	}
 
 	void calculate_epsilon_offset(vec3<T> & result, const vec3<T> & direction, const vec3<T> & normal) const {
@@ -442,6 +469,7 @@ private:
 	                      vec3<T> & result_v);
 
 	integrator_type integrator_ = integrator_type::heun;
+	bool angular_integration_ = true; // global dynamic-rotation toggle (Phase 8)
 	vec3<T> fluid_velocity_;
 	vec3<T> gravity_;
 	T epsilon_ {};
@@ -496,6 +524,13 @@ private:
 		T inv_m_sum {};              // inv_ma + inv_mb, precomputed once at build
 		T target {};                 // restitution target normal velocity, precomputed once
 		T friction_scale {};         // -1 / inv_m_sum (friction λ scale), precomputed once
+		// Phase 9 angular response (only used when has_angular). Lever arms from each
+		// body's center to the contact point, and the effective normal mass including
+		// the angular term. has_angular gates the whole angular path: when false the
+		// pair takes the existing linear + v_bias solve, bit-identical to pre-Phase-9.
+		bool has_angular = false;    // a or b spins dynamically (inv_inertia != 0)
+		vec3<T> r_a, r_b;            // contact point − body position (impact lever arm)
+		T eff_n {};                  // effective normal mass: inv_m_sum (+ angular terms when has_angular)
 		typename solid<T>::touch * slot_a = nullptr;   // writeback target (may be null if a never observed b)
 		typename solid<T>::touch * slot_b = nullptr;
 	};
@@ -540,6 +575,85 @@ private:
 // ============================================================================
 // Implementation
 // ============================================================================
+
+// World-space I⁻¹·v for a principal-axis (body-frame diagonal) inertia: rotate v
+// into the body frame by Rᵀ, divide component-wise by the diagonal inertia, rotate
+// back by R. Zero for an inv_inertia == 0 body (infinite inertia → no Δω). The
+// lever-arm primitive for the Phase 9 angular impulse response.
+template <typename T>
+inline void apply_inv_inertia_world(const solid<T> * s, const vec3<T> & v, vec3<T> & out) {
+	const mat3<T> & R = s->get_orientation();
+	mat3<T> Rt;
+	transpose(Rt, R);
+	vec3<T> vb, wb;
+	mul(vb, Rt, v);
+	mul(wb, s->get_inv_inertia(), vb); // component-wise divide by the diagonal inertia (body frame)
+	mul(out, R, wb);
+}
+
+// Angular effective mass of a contact pair along a unit direction `dir` at the lever
+// arms r_a/r_b: 1/m_a + 1/m_b + dir·((Iₐ⁻¹(rₐ×dir))×rₐ) + dir·((I_b⁻¹(r_b×dir))×r_b).
+// The shared primitive for the normal solve (dir = contact normal) and friction
+// (dir = slip tangent); reduces to inv_m_sum when neither body has inertia.
+template <typename T, typename Pair>
+inline T angular_eff_mass(const Pair & p, const vec3<T> & dir) {
+	auto term = [&](const solid<T> * s, const vec3<T> & r) {
+		vec3<T> rxd, i, t;
+		cross(rxd, r, dir);
+		apply_inv_inertia_world(s, rxd, i);
+		cross(t, i, r);
+		return dot(t, dir);
+	};
+	return p.inv_m_sum + term(p.a, p.r_a) + term(p.b, p.r_b);
+}
+
+// Phase 8: integrate angular velocity (Euler's equation, body frame) and
+// orientation (exponential step, world frame). Exact no-op when inv_inertia == 0
+// (the default) or when global angular integration is off. No collision response to
+// spin yet (Phase 9) — a spun body rotates through what it hits.
+template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr, T dt) {
+	using tr = scalar_traits<T>;
+	if (!angular_integration_ || !solid_ptr->rotates_dynamically())
+		return;
+
+	// Euler's equation in the body frame, where the principal-axis inertia is
+	// diagonal: ω̇_b = I⁻¹·(τ_b − ω_b × (I·ω_b)). ω is stored world-frame (matching
+	// the Phase 6 ω×r carry), so rotate it in by Rᵀ and the result back by R. The
+	// gyroscopic term ω×(I·ω) is kept — cheap and stabilizing.
+	const mat3<T> & R = solid_ptr->orientation_;
+	mat3<T> Rt;
+	transpose(Rt, R);
+	vec3<T> wb, tb;
+	mul(wb, Rt, solid_ptr->angular_velocity_);
+	mul(tb, Rt, solid_ptr->torque_);
+	vec3<T> Iw, gyro, net, dwb;
+	mul(Iw, solid_ptr->inertia_, wb); // I·ω (component-wise, body frame)
+	cross(gyro, wb, Iw);
+	sub(net, tb, gyro);
+	mul(dwb, solid_ptr->inv_inertia_, net); // I⁻¹·(τ − ω×Iω)
+	mul(dwb, dt);
+	add(wb, dwb);
+	vec3<T> w;
+	mul(w, R, wb);
+	cap_vec3(w, tr::default_max_angular_velocity_component());
+	solid_ptr->angular_velocity_.set(w);
+
+	// Exponential orientation step (drift-free for constant ω): q ← dq · q, with dq
+	// built from the world-frame axis/angle. set_orientation_from_quat renormalizes,
+	// syncs the queried mat3, and refreshes the Phase 5 oriented world AABB as one unit.
+	T speed = length(w);
+	if (speed > epsilon_) {
+		vec3<T> axis;
+		mul(axis, w, tr::one() / speed);
+		quat<T> dq;
+		set_quat_from_axis_angle(dq, axis, speed * dt);
+		quat<T> q;
+		mul(q, dq, solid_ptr->orientation_q_);
+		normalize(q);
+		solid_ptr->set_orientation_from_quat(q);
+	}
+	solid_ptr->clear_torque();
+}
 
 template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt) {
 	vec3<T> old_pos;
@@ -625,6 +739,11 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	solid_ptr->velocity_.set(vel);
 	solid_ptr->clear_force();
 
+	// Dynamic spin (Phase 8): integrate ω + orientation, refreshing world_bound_ so
+	// the broad-phase query below sees the new orientation. No-op for the default
+	// (inv_inertia == 0) body.
+	integrate_angular(solid_ptr, dt);
+
 	bool first = true;
 
 	if (manager_) {
@@ -638,6 +757,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	if (solid_ptr->collide_with_scope_ != 0) {
 		sub(temp, new_pos, old_pos);
 		T m = tr::max_val(tr::abs(temp.x), tr::max_val(tr::abs(temp.y), tr::abs(temp.z))) + epsilon_;
+		m += spin_broadphase_reach(solid_ptr, dt); // Phase 9: cover a spinner's swept surface (0 if not spinning)
 
 		// Use the cached world AABB (world_bound_ = rotate_aabb(local_bound_,
 		// orientation_) + position_, refreshed on every move/reorient), shifted by the
@@ -855,7 +975,14 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 		// in mid-air the instant it brushed a neighbour (the classic "ball hanging
 		// in the air"). Gating on true speed lets only genuinely slow bodies sleep.
 		T deactivate_disp = deactivate_speed_ * dt;
-		if (tr::abs(new_pos.x - solid_ptr->position_.x) < deactivate_disp &&
+		// A dynamically-spinning body (Phase 8) must not sleep while it is still
+		// turning, even if its center isn't translating — otherwise a freely spinning
+		// solid would freeze mid-rotation. Kinematic-carry bodies (inv_inertia == 0,
+		// game-driven) are unaffected: their ω never keeps them awake here.
+		bool angular_still = !solid_ptr->rotates_dynamically() ||
+		                     length(solid_ptr->angular_velocity_) < deactivate_speed_;
+		if (angular_still &&
+		    tr::abs(new_pos.x - solid_ptr->position_.x) < deactivate_disp &&
 		    tr::abs(new_pos.y - solid_ptr->position_.y) < deactivate_disp &&
 		    tr::abs(new_pos.z - solid_ptr->position_.z) < deactivate_disp) {
 
@@ -959,6 +1086,11 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	solid_ptr->velocity_.set(v);
 	solid_ptr->clear_force();
 
+	// Dynamic spin (Phase 8): integrate ω + orientation, refreshing world_bound_ so
+	// the discovery broad phase below sees the new orientation. No-op for the default
+	// (inv_inertia == 0) body.
+	integrate_angular(solid_ptr, dt);
+
 	if (manager_)
 		manager_->intra_update(solid_ptr, dt);
 
@@ -978,6 +1110,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// the solid's orientation and underspans an oriented solid's true extent, missing
 	// contacts under its rotated faces.
 	T reach = tr::max_val(tr::abs(delta.x), tr::max_val(tr::abs(delta.y), tr::abs(delta.z))) + spec_margin_ + epsilon_;
+	reach += spin_broadphase_reach(solid_ptr, dt); // Phase 9: cover a spinner's swept surface (0 if not spinning)
 	aa_box<T> box(solid_ptr->world_bound_);
 	box.mins.x -= reach;
 	box.mins.y -= reach;
@@ -1568,25 +1701,36 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			p.slot_a = slot_is_a ? &slot : other_slot;
 			p.slot_b = slot_is_a ? other_slot : &slot;
 
-			// Angular surface-velocity bias for kinematic carry (Phase 6). The
-			// solver drives the relative *surface* velocity (v + ω×r) to its
-			// targets, so a spinning kinematic platform drags the riders touching
-			// it through the existing non-penetration / friction constraints — no
-			// dedicated resolution code. ω is zero on every non-spinning body, so
-			// the bias is an exact no-op (and skipped) in translation-only scenes.
-			// The contact point comes from the iterating slot (authoritative for
-			// normal/impact); for Phase 6 only an infinite-mass platform carries an
-			// ω, and that point lies on its surface, so its lever arm is exact.
+			// Phase 9: angular impulse response. Active only when a body in the pair
+			// spins dynamically (inv_inertia != 0). The non-angular case keeps eff_n ==
+			// inv_m_sum and takes the v_bias path below, bit-identical to pre-Phase-9. On
+			// the angular path the lever arms drive Δω and the effective normal mass
+			// picks up the angular term k_n = inv_m_sum + n·((Iₐ⁻¹(rₐ×n))×rₐ) +
+			// n·((I_b⁻¹(r_b×n))×r_b) (precomputed: orientation is fixed during the solve).
+			p.has_angular = a->rotates_dynamically() || b->rotates_dynamically();
+			p.eff_n = p.inv_m_sum;
+			if (p.has_angular) {
+				sub(p.r_a, slot.impact, a->position_);
+				sub(p.r_b, slot.impact, b->position_);
+				p.eff_n = angular_eff_mass<T>(p, p.normal);
+			}
+
+			// Angular surface-velocity bias for kinematic carry (Phase 6). The solver
+			// drives the relative *surface* velocity (v + ω×r) to its targets, so a
+			// spinning kinematic platform drags the riders touching it through the
+			// existing non-penetration / friction constraints — no dedicated resolution
+			// code. ω is zero on every non-spinning body, so the bias is an exact no-op
+			// in translation-only scenes. Only the non-angular path reads it — the
+			// angular path recomputes ω×r live at the lever arm (it must, since ω evolves
+			// during the solve), so v_bias is not built for those pairs.
 			p.v_bias.reset();
-			const vec3<T> & wa = a->angular_velocity_;
-			const vec3<T> & wb = b->angular_velocity_;
 			const vec3<T> no_spin {};
-			if (!(wa == no_spin && wb == no_spin)) {
+			if (!p.has_angular && !(a->angular_velocity_ == no_spin && b->angular_velocity_ == no_spin)) {
 				vec3<T> ra, rb, term_a, term_b;
 				sub(ra, slot.impact, a->position_);
 				sub(rb, slot.impact, b->position_);
-				cross(term_a, wa, ra);
-				cross(term_b, wb, rb);
+				cross(term_a, a->angular_velocity_, ra);
+				cross(term_b, b->angular_velocity_, rb);
 				sub(p.v_bias, term_b, term_a);  // ω_b×r_b − ω_a×r_a
 			}
 
@@ -1600,6 +1744,25 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	if (contact_pairs_.empty())
 		return;
 
+	// Relative velocity of the pair at the contact, used by the vn0 snapshot and both
+	// GS sweeps. On the angular path it is the live surface velocity (v + ω×r) at the
+	// lever arm — recomputed each visit because ω evolves; for an inv_inertia==0
+	// kinematic body ω is fixed, so this *is* the Phase 6 v_bias carry (subsumed, not
+	// duplicated). The non-angular path is the original v_b − v_a + v_bias, bit-identical.
+	auto contact_point_vrel = [](const contact_pair & p, vec3<T> & vrel) {
+		if (p.has_angular) {
+			vec3<T> wxa, wxb, va, vb;
+			cross(wxa, p.a->angular_velocity_, p.r_a);
+			cross(wxb, p.b->angular_velocity_, p.r_b);
+			add(va, p.a->velocity_, wxa);
+			add(vb, p.b->velocity_, wxb);
+			sub(vrel, vb, va);
+		} else {
+			sub(vrel, p.b->velocity_, p.a->velocity_);
+			add(vrel, p.v_bias);
+		}
+	};
+
 	// --- 2. Snapshot pre-solver velocities ---
 	// Snapshot vn0 (relative normal velocity before any impulses run this tick)
 	// to guard restitution. The restitution target is only activated for pairs
@@ -1608,8 +1771,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// impulse based on stale data.
 	for (auto & p : contact_pairs_) {
 		vec3<T> vrel0;
-		sub(vrel0, p.b->velocity_, p.a->velocity_);
-		add(vrel0, p.v_bias);  // include kinematic surface velocity (ω×r) for the carry
+		contact_point_vrel(p, vrel0);
 		p.vn0 = dot(vrel0, p.normal);
 		// Restitution target and the λ mass-scale are constant across all GS
 		// sweeps for this pair, so derive them once here rather than per
@@ -1691,6 +1853,24 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			mul(db, delta, inv_b);
 			add(p.b->velocity_, db);
 		}
+		// Phase 9: the same impulse torques each finite-inertia body about the contact
+		// point. Δω_a -= Iₐ⁻¹(rₐ × J); Δω_b += I_b⁻¹(r_b × J) (delta is a's-convention
+		// J; b receives +J). No-op for inv_inertia==0 bodies (the gate keeps the
+		// non-spinning fast path untouched).
+		if (p.has_angular) {
+			if (p.a->rotates_dynamically()) {
+				vec3<T> rxj, dw;
+				cross(rxj, p.r_a, delta);
+				apply_inv_inertia_world(p.a, rxj, dw);
+				sub(p.a->angular_velocity_, dw);
+			}
+			if (p.b->rotates_dynamically()) {
+				vec3<T> rxj, dw;
+				cross(rxj, p.r_b, delta);
+				apply_inv_inertia_world(p.b, rxj, dw);
+				add(p.b->angular_velocity_, dw);
+			}
+		}
 	};
 
 	// One clamped normal-constraint solve for a pair: drive the relative normal
@@ -1699,10 +1879,9 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// normal sweep (cached masses) and the shock-propagation walk (effective masses
 	// with frozen anchors zeroed). inv_sum is passed in since the caller already
 	// has it / needs to guard against the immovable-pair (inv_sum == 0) case.
-	auto solve_normal = [&apply_pair_impulse, zero_val](contact_pair & p, T inv_a, T inv_b, T inv_sum) {
+	auto solve_normal = [&apply_pair_impulse, &contact_point_vrel, zero_val](contact_pair & p, T inv_a, T inv_b, T inv_sum) {
 		vec3<T> vrel;
-		sub(vrel, p.b->velocity_, p.a->velocity_);
-		add(vrel, p.v_bias);  // surface velocity (ω×r): the kinematic carry term
+		contact_point_vrel(p, vrel);  // (v + ω×r) at the contact, or v_b−v_a+v_bias on the linear path
 		T vn = dot(vrel, p.normal);
 		T lambda_n = (p.target - vn) / inv_sum;
 		T new_acc = p.accum_n + lambda_n;
@@ -1729,30 +1908,46 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// drive the restitution target.
 	const int npairs = static_cast<int>(contact_pairs_.size());
 	for (int iter = 0; iter < solver_iterations_; ++iter) {
-		// Normal sweep (flip direction each tick — see the build-loop comment)
+		// Normal sweep (flip direction each tick — see the build-loop comment).
+		// eff_n == inv_m_sum on the non-angular path, so the guard/solve are
+		// bit-identical there; the angular path folds in the lever-arm mass.
 		for (int k = 0; k < npairs; ++k) {
 			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
-			if (p.inv_m_sum <= zero_val)
+			if (p.eff_n <= zero_val)
 				continue;
-			solve_normal(p, p.inv_ma, p.inv_mb, p.inv_m_sum);
+			solve_normal(p, p.inv_ma, p.inv_mb, p.eff_n);
 		}
 		// Friction sweep (same per-tick flip)
 		for (int k = 0; k < npairs; ++k) {
 			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
-			if (p.inv_m_sum <= zero_val)
+			if (p.eff_n <= zero_val)
 				continue;
 			if (p.accum_n <= zero_val || (p.mu_s <= zero_val && p.mu_d <= zero_val))
 				continue;
 			vec3<T> vrel;
-			sub(vrel, p.b->velocity_, p.a->velocity_);
-			add(vrel, p.v_bias);  // surface velocity (ω×r): friction drags the rider to match the spin
+			contact_point_vrel(p, vrel);  // (v + ω×r) at the contact, or v_b−v_a+v_bias on the linear path
 			T vn = dot(vrel, p.normal);
 			vec3<T> vn_vec;
 			mul(vn_vec, p.normal, vn);
 			vec3<T> vt;
 			sub(vt, vrel, vn_vec);  // tangential relative velocity
+			// λ_t = −v_t / m_t. Non-angular: m_t = inv_m_sum (cached friction_scale).
+			// Angular (Phase 9): the tangent effective mass along the slip direction,
+			// so a tangential contact also torques the body (rolling).
 			vec3<T> lambda_t;
-			mul(lambda_t, vt, p.friction_scale);
+			if (p.has_angular) {
+				T vtlen = length(vt);
+				if (vtlen > epsilon_) {
+					vec3<T> that;
+					mul(that, vt, tr::one() / vtlen);
+					T eff_t = angular_eff_mass<T>(p, that); // tangent mass at the lever arm
+					mul(lambda_t, vt, eff_t > zero_val ? -(tr::one() / eff_t) : zero_val);
+				} else {
+					lambda_t.reset();
+				}
+			} else {
+				mul(lambda_t, vt, p.friction_scale);
+			}
 			vec3<T> new_accum_t;
 			add(new_accum_t, p.accum_t, lambda_t);
 			// Coulomb stick/slip: the contact holds (static) as long as the

@@ -66,6 +66,7 @@ template <> struct scalar_traits<float> {
 	static float default_epsilon() { return 0.001f; }
 	static float default_max_position_component() { return 100000.0f; }
 	static float default_max_velocity_component() { return 1000.0f; }
+	static float default_max_angular_velocity_component() { return 50.0f; } // rad/s (~8 rev/s)
 	static float default_max_force_component() { return 1000.0f; }
 	static float default_deactivate_speed(float epsilon) { return epsilon * 2.0f; }
 
@@ -125,6 +126,7 @@ template <> struct scalar_traits<double> {
 	static double default_epsilon() { return 0.001; }
 	static double default_max_position_component() { return 100000.0; }
 	static double default_max_velocity_component() { return 1000.0; }
+	static double default_max_angular_velocity_component() { return 50.0; } // rad/s (~8 rev/s)
 	static double default_max_force_component() { return 1000.0; }
 	static double default_deactivate_speed(double epsilon) { return epsilon * 2.0; }
 
@@ -329,6 +331,7 @@ template <> struct scalar_traits<fixed16> {
 	static fixed16 default_epsilon() { return make_epsilon(default_epsilon_bits()); }
 	static fixed16 default_max_position_component() { return fixed16::from_raw(0x7FFF0000); } // ~32767
 	static fixed16 default_max_velocity_component() { return fixed16::from_int(104); }
+	static fixed16 default_max_angular_velocity_component() { return fixed16::from_int(50); } // rad/s (~8 rev/s)
 	static fixed16 default_max_force_component() { return fixed16::from_int(104); }
 	static fixed16 default_deactivate_speed(fixed16) { return fixed16::from_raw(1 << 8); }
 
@@ -525,6 +528,7 @@ template <> struct scalar_traits<fixed32> {
 	static fixed32 default_epsilon() { return make_epsilon(default_epsilon_bits()); }
 	static fixed32 default_max_position_component() { return fixed32::from_int(100000); }
 	static fixed32 default_max_velocity_component() { return fixed32::from_int(1000); }
+	static fixed32 default_max_angular_velocity_component() { return fixed32::from_int(50); } // rad/s (~8 rev/s)
 	static fixed32 default_max_force_component() { return fixed32::from_int(1000); }
 	// 2^-8 ≈ 0.0039, matching fixed16's default_deactivate_speed of from_raw(1 << 8) / 2^16
 	static fixed32 default_deactivate_speed(fixed32) { return fixed32::from_raw(1LL << 24); }
