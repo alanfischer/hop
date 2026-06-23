@@ -727,6 +727,65 @@ template <typename T> static void test_fast_spinner_no_tunnel(const char * label
 	printf("OK\n");
 }
 
+// Angular substepping (opt-in CCD): a thin obstacle the single per-frame snapshot
+// steps angularly *over* (clear before and after, swept through between) is the one
+// case the snapshot model misses. A blade spinning at 80 rad/s (~73°/step) sweeps its
+// tip past a small peg most frames without a snapshot landing on it, so the peg barely
+// moves. set_angular_substeps_max subdivides the frame at the spinner's tip speed, so
+// every pass is now traced and the peg is reliably struck and knocked far away.
+template <typename T> static void test_angular_substep_ccd(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  angular_substep_ccd[%s]: ", label);
+	const T z {};
+	auto run = [&](int substeps) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, z, z));
+		sim.set_angular_substeps_max(substeps);
+		auto blade = std::make_shared<solid<T>>(); // thin ±2 blade, pinned, spun fast about z
+		blade->set_mass(tr::one());
+		blade->set_inertia(vec3<T>(tr::one(), tr::one(), tr::from_milli(200)));
+		blade->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_int(2), -tr::from_milli(40), -tr::from_milli(40)),
+		              vec3<T>(tr::from_int(2), tr::from_milli(40), tr::from_milli(40)))));
+		blade->set_angular_velocity(vec3<T>(z, z, tr::from_int(80)));
+		sim.add_solid(blade);
+		auto pin = std::make_shared<constraint<T>>(blade, vec3<T>(z, z, z));
+		pin->set_type(constraint<T>::type::spring);
+		pin->set_rest_length(z);
+		pin->set_spring_constant(tr::from_int(400));
+		pin->set_damping_constant(tr::from_int(8));
+		sim.add_constraint(pin);
+		auto peg = std::make_shared<solid<T>>(); // small free sphere at the blade-tip radius
+		peg->set_mass(tr::from_milli(200));
+		peg->add_shape(std::make_shared<shape<T>>(sphere<T>(vec3<T>(z, z, z), tr::from_milli(120))));
+		peg->set_position(vec3<T>(tr::from_milli(1700), z, z));
+		sim.add_solid(peg);
+		const T dt = tr::from_milli(16);
+		T ang = z;
+		const vec3<T> p0 = peg->get_position();
+		float maxd = 0.0f;
+		for (int i = 0; i < 200; ++i) {
+			ang = ang + tr::from_int(80) * dt;
+			mat3<T> R;
+			set_mat3_from_axis_angle(R, vec3<T>(z, z, tr::one()), ang);
+			blade->set_orientation(R);
+			blade->set_angular_velocity(vec3<T>(z, z, tr::from_int(80)));
+			sim.update(dt);
+			vec3<T> d;
+			sub(d, peg->get_position(), p0);
+			float dist = std::sqrt(tr::to_float(d.x) * tr::to_float(d.x) + tr::to_float(d.y) * tr::to_float(d.y));
+			if (dist > maxd) maxd = dist;
+		}
+		return maxd;
+	};
+	float off = run(1); // single snapshot/frame — the spinner steps angularly over the peg
+	float on = run(8);  // subdivided — every pass is traced
+	printf("peg displacement off=%.2f on=%.2f ", off, on);
+	assert(on > 50.0f); // with substepping every pass connects → peg knocked well away
+	assert(on > off);   // and strictly better than the single-snapshot baseline
+	printf("OK\n");
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -753,6 +812,7 @@ int main() {
 	test_friction_rolling<float>("float");
 	test_constraint_anchor_torque<float>("float");
 	test_fast_spinner_no_tunnel<float>("float");
+	test_angular_substep_ccd<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -790,6 +850,7 @@ int main() {
 	test_friction_rolling<fixed16>("fixed16");
 	test_constraint_anchor_torque<fixed16>("fixed16");
 	test_fast_spinner_no_tunnel<fixed16>("fixed16");
+	test_angular_substep_ccd<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

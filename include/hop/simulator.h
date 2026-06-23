@@ -62,6 +62,21 @@ public:
 	void set_angular_integration(bool b) { angular_integration_ = b; }
 	bool get_angular_integration() const { return angular_integration_; }
 
+	// Angular substepping (opt-in CCD for fast spinners). Default max = 1: one
+	// orientation snapshot per frame (the original behavior, bit-identical). Raise it
+	// and a fast-spinning sweep_slide body's frame is subdivided into up to N
+	// fixed-orientation sub-traces, so a thin obstacle the single snapshot would step
+	// *over* angularly (clear before and after, swept through between) is still caught.
+	// N grows with spin speed up to this cap; a slow or non-spinning body still does
+	// one trace, so non-fast-spinners pay nothing. (Speculative-mode bodies are not
+	// substepped — they use a different discover/commit model.)
+	void set_angular_substeps_max(int n) { angular_substeps_max_ = n > 1 ? n : 1; }
+	int get_angular_substeps_max() const { return angular_substeps_max_; }
+	// Tip travel per substep that triggers another subdivision (smaller → more, finer
+	// substeps). N ≈ ceil(|ω|·dt·r_max / clearance), capped by set_angular_substeps_max.
+	void set_angular_substep_clearance(T c) { angular_substep_clearance_ = c; }
+	T get_angular_substep_clearance() const { return angular_substep_clearance_; }
+
 	void set_average_normals(bool a) { average_normals_ = a; }
 	bool get_average_normals() const { return average_normals_; }
 
@@ -262,7 +277,27 @@ public:
 				any_speculative = true;
 				integrate_and_discover(s, dt);
 			} else {
-				update_solid(s, dt);
+				int nsub = angular_substeps(s, dt);
+				if (nsub == 1) {
+					update_solid(s, dt); // the common, bit-identical path
+				} else {
+					// Angular CCD: re-run the integrate+trace at dt/N, so the body is
+					// traced at N interpolated orientations. update_solid clears force_
+					// and torque_ each call (and integrate_angular clears torque_), so
+					// re-apply the frame's external force/torque before each sub-step —
+					// each then acts over dt/N and they sum to the full-frame impulse.
+					// Gravity, drag, and constraints recompute per sub-step already.
+					const vec3<T> ext_force = s->force_;
+					const vec3<T> ext_torque = s->torque_;
+					const T sub = dt / tr::from_int(nsub);
+					for (int k = 0; k < nsub && s->active_; ++k) {
+						if (k > 0) {
+							s->force_ = ext_force;
+							s->torque_ = ext_torque;
+						}
+						update_solid(s, sub);
+					}
+				}
 				if (manager_) manager_->post_update(s, dt);
 			}
 		}
@@ -387,6 +422,22 @@ public:
 		return sp * dt * r;
 	}
 
+	// How many fixed-orientation sub-traces to split a frame into so a fast spinner
+	// doesn't step angularly over a thin obstacle. 1 (no subdivision) unless the
+	// feature is enabled (set_angular_substeps_max > 1) and the body actually spins
+	// far enough this frame. spin_broadphase_reach is the tip's swept distance |ω|·dt·r;
+	// one substep per clearance-length of that, capped. Deterministic (fixed-point
+	// compare + reciprocal + to_int), so fixed16 replays identically.
+	int angular_substeps(const solid<T> * s, T dt) const {
+		if (angular_substeps_max_ <= 1 || !s->rotates_dynamically())
+			return 1;
+		T reach = spin_broadphase_reach(s, dt);
+		if (reach <= angular_substep_clearance_)
+			return 1;
+		int n = 1 + tr::to_int(reach / angular_substep_clearance_);
+		return n < angular_substeps_max_ ? n : angular_substeps_max_;
+	}
+
 	void calculate_epsilon_offset(vec3<T> & result, const vec3<T> & direction, const vec3<T> & normal) const {
 		T len = length(direction);
 		if (len > epsilon_) {
@@ -424,6 +475,7 @@ private:
 		deactivate_speed_ = tr::one() * tr::from_milli(200); // 0.2
 		deactivate_count_ = 32;
 		micro_collision_threshold_ = tr::one() * tr::from_milli(1000); // 1.0
+		angular_substep_clearance_ = tr::from_milli(250); // 0.25 world units of tip travel per substep
 		// Speculative-contacts tuning (consulted only for contact_mode::speculative bodies).
 		spec_margin_ = epsilon_ * tr::from_int(8);  // discover contacts this far past the predicted motion
 		spec_slop_ = epsilon_;                       // penetration tolerated without correction (anti-jitter)
@@ -491,6 +543,8 @@ private:
 
 	integrator_type integrator_ = integrator_type::heun;
 	bool angular_integration_ = true; // global dynamic-rotation toggle (Phase 8)
+	int angular_substeps_max_ = 1;    // 1 = off (single snapshot/frame, bit-identical)
+	T angular_substep_clearance_ {};  // tip travel per substep (set in init_epsilon_defaults)
 	vec3<T> fluid_velocity_;
 	vec3<T> gravity_;
 	T epsilon_ {};
