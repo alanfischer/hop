@@ -112,18 +112,30 @@ spinning past a small obstacle — clear at both frame endpoints, sweeping throu
 it at 90° between) is missed. The improvement spectrum, cheapest first — all
 deterministic for fixed-point replay:
 
-1. **Snapshot (today).** One orientation per frame. Fine when per-frame rotation
-   is small relative to clearance — which covers GoldSrc doors/platforms and most
-   gameplay. Rare overshoot is caught by the end-of-step SAT recovery above.
+1. **Snapshot (default).** One orientation per frame. Fine when per-frame rotation
+   is small relative to clearance — which covers rotating-door/platform gameplay and
+   most cases. The only thing it misses is a contact present *only* between two frame
+   orientations (clear at both endpoints); for that, escalate to (2).
 
-2. **Angular substepping.** Subdivide the frame into N fixed-orientation
-   snapshots, interpolating `R(t)` between `R_old` and `R_new` (slerp / the
-   exponential-quat step from the integration decision) and sweeping translation
-   in each: `N ≈ ceil(|ω|·dt·r_max / clearance)`. Reuses the existing snapshot
-   trace entirely — just a loop — and is the **same lever** as the angular-velocity
-   cap: cap `|ω|` to force N=1, or substep to keep the speed. N=1 is today; N=2 is
-   the "trace the old and new frame, reconcile the contact" idea; N=k for fast
-   spinners. Recommended upgrade; lives in the same Phase 9 slot as the cap.
+2. **Angular substepping — SHIPPED (opt-in).** Subdivide a fast spinner's frame into
+   N fixed-orientation sub-traces, interpolating `R(t)` (the exponential-quat step
+   gives it for free) and sweeping translation in each: `N ≈ ceil(|ω|·dt·r_max /
+   clearance)`. Implemented exactly as the plan predicted — "reuses the existing
+   snapshot trace entirely, just a loop": Pass A calls the *unchanged* `update_solid`
+   N times at `dt/N` for a sweep_slide body whose `angular_substeps(...)` returns
+   N > 1, so each call rotates a fraction and traces at that interpolated orientation.
+   It is the **same lever** as the angular-velocity cap (cap `|ω|` to force N=1, or
+   substep to keep the speed). **Opt-in:** `set_angular_substeps_max(n)` (default 1 =
+   single snapshot, bit-identical; the whole common path is one `int` compare and the
+   `nsub == 1` branch calls `update_solid(s, dt)` exactly as before). `N` grows with
+   spin speed up to the cap, gated on `rotates_dynamically()`, so non-fast-spinners
+   pay nothing. Deterministic for fixed16 (the count uses a fixed-point reciprocal +
+   `to_int`; `dt/N` is a fixed-point divide). The frame's external force/torque are
+   re-applied per sub-step so they still sum to one frame's impulse. Scope:
+   **sweep_slide bodies only** — speculative-mode bodies use a different
+   discover/commit model and are not substepped. Test: `test_angular_substep_ccd`
+   (an 80 rad/s blade that tunnels a peg at N=1 strikes it reliably at N=8; float +
+   fixed16).
 
 3. **Rotational conservative advancement.** Extend hop's existing translation
    `conservative_advance` with the rotational term — bound the max approach speed
@@ -465,10 +477,13 @@ damps the spin-driven closing velocity at the lever arm. A blade spinning at 40 
 cannot recoil**, is still stopped at the wall's near face with its spin arrested
 (`test_fast_spinner_no_tunnel`, float + fixed16). A standalone SAT pass would only
 re-derive that same oriented overlap and angular damping, so it was not built. The one
-genuinely-uncovered case remains true mid-rotation tunnelling — a contact present only
-*between* two snapshots, clear at both endpoints — which the *Key decisions* section
-already classifies as an angular-CCD escape hatch (substepping / rotational
-conservative advancement), not a planned phase.
+case the snapshot model genuinely missed — true mid-rotation tunnelling, a contact
+present only *between* two snapshots (clear at both endpoints) — is now closed by the
+**opt-in angular substepping** shipped under *Sub-frame rotation* above
+(`set_angular_substeps_max`, `test_angular_substep_ccd`). Default is the single
+snapshot (bit-identical); a game with fast/thin spinners raises the cap. Only the
+heaviest level (rotational conservative advancement) remains unshipped, reserved as an
+escape hatch.
 
 **Owed:** in-engine Godot smoke (a `RigidBody3D` tumbling off a wall).
 
@@ -620,6 +635,11 @@ a `RigidBody3D`) — the hop-godot binding does not yet plumb per-joint local an
   `test_fast_spinner_no_tunnel` in `tests/test_simulator.cpp` (a pinned blade spinning
   at 40 rad/s is stopped at a thin wall, spin arrested) guards the broad-phase
   inflation + oriented narrowphase + angular response that subsume it.
+- Angular substepping (opt-in CCD): `set_angular_substeps_max` / `angular_substeps()` /
+  `angular_substep_clearance_` and the Pass-A substep loop (`update_solid` called N×
+  at `dt/N`) in `simulator.h`. Test: `test_angular_substep_ccd` in
+  `tests/test_simulator.cpp` (an 80 rad/s blade tunnels a peg at N=1, strikes it at N=8;
+  float + fixed16).
 - Phase 11 (docs/examples/bindings): the *Design Philosophy* + *Features* +
   *Migrating a custom `traceable` for rotation* sections in `README.md`; the
   `setOrientation`/`getOrientation`/`setAngularVelocity`/`getAngularVelocity`/`setInertia`/`addTorque`

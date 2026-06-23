@@ -22,6 +22,8 @@ Hop began as a **translation-only** physics engine — and that fast, predictabl
 - Call `set_inertia(...)` to opt a body into **dynamic rotation**: it then spins under torque, tumbles off off-center collisions, rolls via friction, and is torqued by off-center constraint anchors.
 - Kinematic platforms carry their riders' velocity through `set_angular_velocity(...)` (a spinning `func_rotating`-style mover) with no inertia required.
 
+Orientation is snapshot per frame (one trace at a fixed orientation), which is enough for ordinary spin and rotating platforms. For a fast, thin spinner that could sweep *through* a small obstacle between frames (a blade trap), `set_angular_substeps_max(n)` opts that body into angular continuous-collision — its frame is subdivided into up to `n` fixed-orientation sub-traces. Default is one snapshot, so nothing else pays for it.
+
 See `docs/rotation_plan.md` for the full roadmap and the per-phase design notes.
 
 ## Features
@@ -32,7 +34,7 @@ See `docs/rotation_plan.md` for the full roadmap and the per-phase design notes.
 - **Collision response** with coefficient of restitution, conservation of momentum, and friction
 - **Opt-in rigid-body rotation** — static orientation honored by the narrowphase and traceables, dynamic spin under torque (drift-free exponential quaternion integration), lever-arm angular impulse response (off-center hits tumble, friction rolls), kinematic angular carry for spinning platforms, and torque from off-center constraint anchors. Gated behind an identity fast path so non-rotating bodies stay bit-identical, fixed-point included
 - **Stacking contact solver** — a post-integration Gauss–Seidel pass over the touched-pair graph (warm-started, with restitution targets and Coulomb-cone friction at the velocity level) lets resting piles transmit load and settle; iteration count is tunable via `set_solver_iterations`
-- **Constraint system** with spring constants, damping, and distance thresholds
+- **Constraint system** with spring constants, damping, and distance thresholds; anchors live in each body's local frame and rotate with it, so an off-center anchor torques a dynamic body through its lever arm
 - **Deactivation/sleeping** for inactive solids
 - **BVH spatial acceleration** — bounding volume hierarchy for broad-phase collision queries via `bvh_manager`
 - **Collision scopes** — bitmask filtering for selective collision groups, plus `trigger_scope` for damage-zone / sensor-volume tagging
@@ -113,7 +115,7 @@ For pairs where one shape is **rounded** (sphere/capsule) and the other a **poly
 `gjk_eligible_pair()` in `collide.h` names the eligible set. Two classes of pair are intentionally **not** routed through GJK:
 
 - **rounded × rounded** (sphere/capsule pairs) — these have exact closed-form swept tests (`trace_sphere`, `trace_capsule`, `trace_capsule_capsule`); GJK would only approximate them.
-- **polytope × polytope** (box×box, box/convex × convex) — their combined rounded radius is zero, so GJK would have to resolve contact at distance ≈ 0, where the divisions lose precision in fixed-point. The non-zero radius of a rounded shape is exactly what keeps GJK well-conditioned, so it is the defining property of eligibility. These keep the plane-inflation path, which is exact on faces anyway.
+- **polytope × polytope** (box×box, box/convex × convex) — their combined rounded radius is zero, so GJK would have to resolve contact at distance ≈ 0, where the divisions lose precision in fixed-point. The non-zero radius of a rounded shape is exactly what keeps GJK well-conditioned, so it is the defining property of eligibility. Axis-aligned polytope pairs keep the plane-inflation path, which is exact on faces anyway; an **oriented** polytope pair instead routes through the Minkowski configuration-space-obstacle sweep (`trace_pair_oriented_polytope` in `collide.h`), which honors the rotation while staying on the same zero-radius, fixed-point-safe swept-trace machinery.
 
 Two semantics worth knowing about the swept GJK path:
 
