@@ -8,8 +8,8 @@ collision pair honors a static orientation), **dynamic free spin under torque**
 (Phase 8 — solids integrate their own orientation), **angular impulse response**
 (Phase 9 — bodies bounce/tumble off what they hit), **angular constraints**
 (Phase 10 — off-center anchors torque their bodies), and the **docs/examples/bindings**
-(Phase 11) have shipped. The rotation roadmap is functionally complete; only the
-game-side Phase 7 (deferred) and in-engine Godot smoke tests remain.
+(Phase 11) and the **kinematic door blocking + rider yaw carry** data surface
+(Phase 7) have all shipped. **The rotation roadmap is complete** — every phase is done.
 
 The roadmap builds up to full dynamic rotation in graded milestones, each
 shippable on its own:
@@ -17,17 +17,17 @@ shippable on its own:
   static orientation (done) → **kinematic angular carry** (done) → finish the
   static narrowphase (done) → dynamic spin under torque (done) → angular impulse
   response (done) → constraints/friction use angular (done) → docs/examples/bindings
-  (done).  (Phase 7, kinematic door blocking/yaw carry, is deferred — its data is
-  already exposed, so it's a game-side feature, not hop work.)
+  (done) → kinematic door blocking + rider yaw carry (done, game-side policy).
 
 Phases were not done strictly in order: 6 before 5 (capsule carry needed nothing
 from the polytope narrowphase), and 8/9 before 7 (the dynamic arc is the real library
 work; Phase 7 is game-side). The full dynamic-rotation feel is now in — off-center
 hits induce spin, spinning bodies tumble and roll, and off-center constraint anchors
-torque their bodies (Phase 10), and the docs/examples/bindings are updated (Phase 11).
-**The rotation roadmap is functionally complete.** The only open item is the Phase 7
-game-side decision (kinematic door blocking + rider yaw carry — implement in the game
-or formally drop from hop scope), plus the in-engine Godot smoke tests still owed.
+torque their bodies (Phase 10), the docs/examples/bindings are updated (Phase 11), and
+the rotating-door data (platform ω, blocked depth, rider carry) is complete (Phase 7).
+**The rotation roadmap is complete.** The only remaining items are non-phase polish:
+in-engine Godot smoke for the newer paths, and an optional perf project on the
+long-standing narrowphase/broad-phase hotspots.
 Phase 9's deferred end-of-step SAT recovery was **investigated and found redundant** —
 the broad-phase inflation + Phase 5 oriented narrowphase + Phase 9 angular response
 already stop a fast/thin spinner from tunnelling (measured; see
@@ -44,7 +44,7 @@ discovery and damping.
 | 4. **Static orientation** — `solid.orientation` + `shape.local_rotation`, honored by GJK + traceables | done | |
 | 5. Close the static narrowphase gap (rotated polytope×polytope + box-mover-vs-traceable, OBB) | done | oriented polytope×polytope via the world-space Minkowski-CSO sweep (`trace_pair_oriented_polytope` in `collide.h`); box-mover-vs-rotated-traceable via OBB-vs-triangle (`obb_local_vs_triangle` in hop-godot). Both halves shipped |
 | 6. Kinematic angular carry (`ω×r` surface velocity; spinning platforms carry riders) | done | `solid.angular_velocity`; solver biases relative velocity by `ω×r`; hop-godot derives ω from the per-frame orientation delta. **Verified in-engine.** Box/convex riders now carried too (Phase 5) |
-| 7. Kinematic blocking/crush + rider yaw carry (rotating-door parity) | deferred | data already exposed (`get_touch` partner/ω + contact depth); it's a game-side feature, not hop-library work — skipped to do the dynamic arc first |
+| 7. Kinematic blocking/crush + rider yaw carry (rotating-door parity) | done | data surface complete: platform `ω` via `body_get_state(ANGULAR_VELOCITY)`, blocked partner+depth via `_body_test_motion` (`collision_depth`/`collider`), rider carry `v+ω×r` via `velocity_at_local` (now consistent across the contact + motion paths). Door/crush policy is a small game-side controller (recipe in Phase 7 detail) |
 | 8. Dynamic orientation state (angular integration under torque) | done | `solid.inertia_/inv_inertia_/torque_/orientation_q_`; `integrate_angular` (body-frame Euler eq + gyroscopic + exponential quat step) in `simulator.h`; `inv_inertia==0` opt-out (default); angular cap + deactivation. hop-godot: inertia auto-compute, torque, ω state, orientation writeback |
 | 9. Angular impulse response | done | lever-arm impulse in the GS velocity solver (`solve_contacts`): off-center hits transfer linear↔angular, friction induces rolling, Phase 6 carry is the infinite-inertia limit. Gated on `rotates_dynamically()` so non-rotating pairs stay bit-identical. + broad-phase inflation for spinners. (End-of-step SAT recovery deferred) |
 | 10. Constraints and friction use angular | done | `constraint<T>` anchors rotate with their solid (`R·local_anchor`) and exert torque via lever arm (`accumulate_constraint_torque`, τ = r×F); anchor velocity carries `ω×r` for damping. Center anchors (the default) stay bit-identical. Friction already shipped in Phase 9 |
@@ -340,25 +340,54 @@ single biggest gameplay payoff in the roadmap.
 carrying the player) confirmed. Box/convex riders are now also carried correctly
 (Phase 5 closed the polytope narrowphase they depended on).
 
-### Phase 7 — kinematic blocking/crush + rider yaw carry
+### Phase 7 — kinematic blocking/crush + rider yaw carry — **SHIPPED**
 
-GoldSrc rotating doors (a) yaw the rider's view and (b) fire a `blocked`
-function (damage/reverse) when an entity pins the rotation.
+Rotating-door parity (rotating-door style): (a) yaw the rider's view and (b) let the
+mover detect when an entity pins its rotation (damage/reverse). As the plan predicted,
+hop's surface here is small and the behavior is game-side — and it turned out the data
+surface was **almost entirely already in place** from Phases 6/8/9 and the existing
+hop-godot body-state work. The open "how much lives in hop vs the game controller"
+decision resolves to: **the data lives in hop/hop-godot (now complete); the door/crush
+policy lives in the game.** What was verified/added:
 
-**Add:**
-- **Blocked reporting:** when a kinematic mover can't complete its rotation
-  because a rider can't be pushed clear, surface a "blocked by solid X, depth D"
-  result (the recovery path already computes penetration depth) so the game
-  layer can damage/reverse the mover.
-- **Rider yaw carry (mostly game-side):** expose the supporting body's `ω` and
-  the existing ground-contact report so the player controller can add the yaw
-  delta to facing. hop's surface here is small — just make "what am I standing
-  on" + its `ω` queryable.
+- **Rider yaw carry — data already exposed.** A spinning kinematic platform/door
+  publishes its derived `ω` (from the per-frame orientation delta, Phase 6) into the
+  Godot body state, so the game reads it with
+  `PhysicsServer3D.body_get_state(floor_rid, BODY_STATE_ANGULAR_VELOCITY)` and adds the
+  up-axis component to the player's facing each frame. The *tangential* (positional)
+  carry was already correct via the contact/​motion surface velocity `v + ω×r`.
+- **Blocked / crush — already reported.** A kinematic door driven by `move_and_collide`
+  gets the blocking partner and penetration depth straight from the motion result
+  (`_body_test_motion` fills `collision_depth` and `collider` / `collider_id`), so the
+  game reads `KinematicCollision3D.get_collider()` / `get_depth()` and decides to
+  damage or reverse. No new hop API needed — the recovery path already computed the depth.
+- **The one real gap fixed:** the `_integrate_forces` contact path (`HopBodyData::on_collision`)
+  reported the collider's **linear-only** velocity, while the `_body_test_motion` path
+  correctly returned `v + ω×r` (`velocity_at_local`). A dynamic `RigidBody3D` rider on a
+  rotating platform therefore read an incomplete carry velocity from its contacts. Now
+  both paths use `velocity_at_local`, so the rotational carry term is consistent
+  regardless of how a rider queries it.
+
+**GDScript recipe (game-side):**
+
+```gdscript
+# Rider yaw carry — turn the player with the platform it stands on.
+if is_on_floor():
+    var floor_rid := get_last_slide_collision().get_collider_rid()
+    var w := PhysicsServer3D.body_get_state(floor_rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY) as Vector3
+    rotate_y(w.y * delta)   # carry facing with the platform's yaw
+
+# Blocked / crush — a rotating door damages or reverses when it pins a body.
+var col := move_and_collide(rotation_step_motion)
+if col and col.get_depth() > crush_threshold:
+    var victim := col.get_collider()
+    if victim.has_method("take_damage"): victim.take_damage(crush_dps * delta)
+    reverse_or_pause()       # back the door off the pinned entity
+```
 
 **End-of-phase state:** rotating-door parity — riders turn with the door and get
-crushed/reverse it when pinned.
-
-**Estimated effort:** 2–4 days.
+crushed/reverse it when pinned. Core/binding data surface complete; the door behavior
+is a small game-side controller (the recipe above).
 
 ### Phase 8 — dynamic orientation state (free spin under torque) — **SHIPPED**
 
@@ -550,7 +579,10 @@ a `RigidBody3D`) — the hop-godot binding does not yet plumb per-joint local an
       (`test_rotation_drift` bounds are already padded for this.)
 - [x] Phase 5 box-mover-vs-traceable: full OBB-vs-triangle, or capsule/sphere
       only? **Resolved: full OBB-vs-triangle shipped** (both halves of Phase 5).
-- [ ] Phase 7 yaw carry: how much lives in hop vs. the game controller?
+- [x] Phase 7 yaw carry: how much lives in hop vs. the game controller? **Resolved:
+      the data surface lives in hop/hop-godot (platform `ω` via `body_get_state`, blocked
+      depth via `_body_test_motion`, rider carry `v+ω×r`); the door/crush policy is a
+      small game-side controller. See Phase 7 detail for the GDScript recipe.**
 
 ---
 
