@@ -58,6 +58,7 @@ public:
 		solid<T> * partner = nullptr;
 		vec3<T>    normal;            // points from partner toward this solid (the separating direction for self)
 		vec3<T>    impact;            // world contact point on the surface (lever-arm origin for angular surface velocity)
+		vec3<T>    lever;             // contact point relative to THIS solid's center at discovery (impact − swept center). Sweep-independent body-frame offset; the angular solver anchors it at the current center so a fast oblique impact doesn't fabricate a tangential lever arm (which would spin a frictionless sphere)
 		T          accum_n {};        // accumulated normal impulse magnitude (>= 0)
 		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
 		T          impact_speed {};   // approach speed at TOI; drives restitution target

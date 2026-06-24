@@ -408,8 +408,9 @@ called in Pass A by both contact modes after the linear step:
   `solid::set_orientation_from_quat` refreshes the queried mat3 (`set_mat3_from_quat`)
   and recomputes the world bound as one unit, keeping the Phase 5 oriented broad
   phase tracking the spin.
-- Angular velocity cap (`default_max_angular_velocity_component` on `scalar_traits`,
-  all four scalar types).
+- Angular velocity cap: runtime-configurable via `simulator::set_max_angular_velocity_component`
+  (0 = off), defaulted from `default_max_angular_velocity_component` on `scalar_traits`
+  (all four scalar types). Applied both at integration and post-contact-solve.
 - Angular deactivation term (a dynamically-spinning body won't sleep mid-rotation).
 - Global `set_angular_integration(bool)` toggle (A/B + replay-bisection lever).
 
