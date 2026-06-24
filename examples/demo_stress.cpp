@@ -37,14 +37,20 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	auto w = std::make_shared<hop::solid<T>>();
 	w->set_infinite_mass();
 	w->set_coefficient_of_gravity(T{});
-	w->set_coefficient_of_restitution(ff<T>(0.5f));
+	w->set_coefficient_of_restitution(ff<T>(0.6f));
 	// Friction is safe under the speculative pipeline (see run()): the COM-split
 	// NGS position correction is order-independent, so friction no longer ratchets
 	// the pile into a corner the way the old per-body push-out did. It's also the
 	// physical way to drain the pile's residual slosh — unlike viscous contact
 	// damping, which (lacking a Coulomb cone) would glue balls to the walls.
-	w->set_coefficient_of_static_friction(ff<T>(0.5f));
-	w->set_coefficient_of_dynamic_friction(ff<T>(0.5f));
+	// Kept low (0.2, was 0.5) to read closer to demo_stress_rp3d: the balls have no
+	// moment of inertia configured (rotation is opt-in in hop and unset here), so
+	// they can only *slide*, never roll. High friction on non-rolling spheres grinds
+	// them into static mid-air arches that then sleep in place ("floating balls").
+	// The natural rp3d look needs real rolling — blocked on the angular-contact
+	// instability (uncapped contact-solver spin diverges in a dense pile).
+	w->set_coefficient_of_static_friction(ff<T>(0.2f));
+	w->set_coefficient_of_dynamic_friction(ff<T>(0.2f));
 	w->add_shape(std::make_shared<hop::shape<T>>(box));
 	w->set_position(pos);
 	sim.add_solid(w);
@@ -119,13 +125,13 @@ template <typename T> static void run() {
 		auto s = std::make_shared<hop::solid<T>>();
 		s->set_mass(tr::one());
 		// restitution_combine::maximum resolves each contact at the higher of the
-		// two materials' COR (walls and balls are both 0.5 here).
+		// two materials' COR (walls and balls are both 0.6 here).
 		s->set_restitution_combine(hop::restitution_combine::maximum);
-		s->set_coefficient_of_restitution(ff<T>(0.5f));
-		// Real friction (matches the walls): under the speculative pipeline it
-		// drains the pile's slosh physically and without corner drift (see run()).
-		s->set_coefficient_of_static_friction(ff<T>(0.5f));
-		s->set_coefficient_of_dynamic_friction(ff<T>(0.5f));
+		s->set_coefficient_of_restitution(ff<T>(0.6f));
+		// Low friction (0.2, matches the walls) keeps the non-rolling spheres from
+		// grinding into static mid-air arches; see make_wall for the full rationale.
+		s->set_coefficient_of_static_friction(ff<T>(0.2f));
+		s->set_coefficient_of_dynamic_friction(ff<T>(0.2f));
 		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff<T>(SPHERE_R))));
 
 		int   layer = i / (COLS * COLS);

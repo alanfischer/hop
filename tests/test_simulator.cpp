@@ -636,7 +636,12 @@ template <typename T> static void test_friction_rolling(const char * label) {
 	float wy = tr::to_float(s->get_angular_velocity().y);
 	printf("vx=%.2f wy=%.3f ", vx, wy);
 	assert(vx < 4.0f);  // friction decelerated it
-	assert(wy > 0.25f); // and torqued it into a forward roll about +y
+	assert(wy > 0.12f); // and torqued it into a forward roll about +y
+	// Threshold lowered from 0.25 when the contact lever arm was made sweep-free:
+	// the box slides at 5 m/s, so the previous "impact − current_position" arm
+	// carried a per-tick sweep offset that inflated the roll to wy≈0.55. The
+	// corrected (sweep-free, current-position) arm gives wy≈0.18 here and the exact
+	// textbook v0/1.4 rolling-without-slipping result for a sphere (see lever fix).
 	printf("OK\n");
 }
 

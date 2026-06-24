@@ -92,6 +92,11 @@ public:
 	T get_max_position_component() const { return max_position_component_; }
 	void set_max_velocity_component(T v) { max_velocity_component_ = v; }
 	T get_max_velocity_component() const { return max_velocity_component_; }
+	// Per-component ceiling on a spinning body's angular velocity, the rotational
+	// twin of the linear cap above. Bounds solver overshoot and integrator runaway
+	// for finite-inertia bodies; 0 disables it. No-op for the non-rotating default.
+	void set_max_angular_velocity_component(T v) { max_angular_velocity_component_ = v; }
+	T get_max_angular_velocity_component() const { return max_angular_velocity_component_; }
 	void set_max_force_component(T v) { max_force_component_ = v; }
 	T get_max_force_component() const { return max_force_component_; }
 
@@ -471,6 +476,7 @@ private:
 		}
 		max_position_component_ = tr::default_max_position_component();
 		max_velocity_component_ = tr::default_max_velocity_component();
+		max_angular_velocity_component_ = tr::default_max_angular_velocity_component();
 		max_force_component_ = tr::default_max_force_component();
 		deactivate_speed_ = tr::one() * tr::from_milli(200); // 0.2
 		deactivate_count_ = 32;
@@ -522,6 +528,7 @@ private:
 	                                                solid<T> * partner,
 	                                                const vec3<T> & normal,
 	                                                const vec3<T> & impact,
+	                                                const vec3<T> & swept_center,
 	                                                T impact_speed,
 	                                                T separation,
 	                                                int tick);
@@ -557,6 +564,7 @@ private:
 	vec3<T> solid_trace_pair_normal_;
 	T max_position_component_ {};
 	T max_velocity_component_ {};
+	T max_angular_velocity_component_ {};
 	T max_force_component_ {};
 	std::vector<collision<T>> collisions_;
 	int num_collisions_ = 0;
@@ -715,7 +723,8 @@ template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr,
 	add(wb, dwb);
 	vec3<T> w;
 	mul(w, R, wb);
-	cap_vec3(w, tr::default_max_angular_velocity_component());
+	if (max_angular_velocity_component_ > T {})
+		cap_vec3(w, max_angular_velocity_component_);
 	solid_ptr->angular_velocity_.set(w);
 
 	// Exponential orientation step (drift-free for constant ω): q ← dq · q, with dq
@@ -983,7 +992,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// the legacy restitution response for this contact (the speculative
 				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
-				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, impact_speed, separation, current_tick_);
+				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly.
 				if ((hit_solid->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
@@ -1289,7 +1298,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			}
 		}
 
-		add_or_refresh_touch(solid_ptr, partner, n, col.impact, impact_speed, separation, current_tick_);
+		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, separation, current_tick_);
 
 		// Wake a real sleeping partner so it participates in the solve (the world
 		// anchor never sleeps).
@@ -1655,8 +1664,16 @@ typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * par
 
 template <typename T>
 typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
-    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, T impact_speed, T separation, int tick) {
+    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, const vec3<T> & swept_center, T impact_speed, T separation, int tick) {
 	const T zero_val {};
+
+	// Body-frame contact offset: the contact point relative to s's center at the
+	// swept TOI (swept_center). Since impact == swept_center + support_offset, this
+	// is exactly that offset, free of the sweep translation that contaminates
+	// (impact − current_position). The angular solver re-anchors it at the current
+	// center so a fast tangential approach can't fabricate a torque-inducing arm.
+	vec3<T> lever;
+	sub(lever, impact, swept_center);
 
 	// Refresh-in-place if this partner already has a slot. Sub-step iterations
 	// within the same tick (same partner hit twice) take the larger impact
@@ -1672,6 +1689,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 			}
 			slot.normal.set(normal);
 			slot.impact.set(impact);
+			slot.lever.set(lever);
 			if (slot.last_tick != tick) {
 				slot.impact_speed = impact_speed;
 			} else if (impact_speed > slot.impact_speed) {
@@ -1689,6 +1707,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 		slot.partner = partner;
 		slot.normal.set(normal);
 		slot.impact.set(impact);
+		slot.lever.set(lever);
 		slot.accum_n = zero_val;
 		slot.accum_t.reset();
 		slot.impact_speed = impact_speed;
@@ -1715,6 +1734,8 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 	auto & slot = s->touches_[evict];
 	slot.partner = partner;
 	slot.normal.set(normal);
+	slot.impact.set(impact);
+	slot.lever.set(lever);
 	slot.accum_n = zero_val;
 	slot.accum_t.reset();
 	slot.impact_speed = impact_speed;
@@ -1831,8 +1852,32 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			p.has_angular = a->rotates_dynamically() || b->rotates_dynamically();
 			p.eff_n = p.inv_m_sum;
 			if (p.has_angular) {
-				sub(p.r_a, slot.impact, a->position_);
-				sub(p.r_b, slot.impact, b->position_);
+				// Each body's lever arm is ITS OWN body-frame contact offset (slot.lever:
+				// impact − swept center), radial for a sphere, so a pure normal impulse
+				// produces no torque. Two reasons this matters:
+				//  1) slot.lever is sweep-free — using slot.impact (the swept-TOI world
+				//     point) against the current center would inject the frame's motion
+				//     into the arm and spin even a frictionless sphere on oblique impact.
+				//  2) Taking each arm from its own slot (not one shared world point) keeps
+				//     both radial under pile separation/penetration, where the centers are
+				//     not exactly a diameter apart and a shared anchor would fabricate a
+				//     tangential moment on the partner.
+				// The partner's twin slot is fresh whenever it is a dynamic body (it
+				// discovers the same contact in its own pass); the world-anchor fallback
+				// only runs for a static/asleep partner, whose inv_inertia is zero so the
+				// arm is unused. For a resting contact the sweep is ~0 — unchanged there.
+				// `s` (the iterating side) owns `slot`; bind its arm and the partner's so
+				// the two assignments below don't restate the a/b canonicalization.
+				vec3<T> & self_r    = slot_is_a ? p.r_a : p.r_b;
+				vec3<T> & partner_r = slot_is_a ? p.r_b : p.r_a;
+				self_r.set(slot.lever);
+				if (other_slot && other_slot->last_tick == current_tick_) {
+					partner_r.set(other_slot->lever);
+				} else {
+					vec3<T> world_contact;
+					add(world_contact, s->position_, slot.lever);
+					sub(partner_r, world_contact, partner->position_);
+				}
 				p.eff_n = angular_eff_mass<T>(p, p.normal);
 			}
 
@@ -1847,6 +1892,11 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			p.v_bias.reset();
 			const vec3<T> no_spin {};
 			if (!p.has_angular && !(a->angular_velocity_ == no_spin && b->angular_velocity_ == no_spin)) {
+				// This carry path keeps the legacy (slot.impact − position) arm rather
+				// than the sweep-free slot.lever the angular path uses: here the arm only
+				// feeds a kinematic surface-velocity bias (fixed ω, no impulse), so the
+				// sweep contamination is a negligible velocity error, not a fabricated
+				// torque. Left as-is to avoid shifting the kinematic-carry baselines.
 				vec3<T> ra, rb, term_a, term_b;
 				sub(ra, slot.impact, a->position_);
 				sub(rb, slot.impact, b->position_);
@@ -2192,11 +2242,21 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// velocity. Both run over the same pair list, so do them in one walk; capping
 	// first means the wake threshold reads the final (capped) velocity.
 	const bool do_cap = max_velocity_component_ > zero_val;
-	auto finalize = [this, do_cap](solid<T> * s, T inv_m) {
+	const bool do_cap_w = max_angular_velocity_component_ > zero_val;
+	auto finalize = [this, do_cap, do_cap_w](solid<T> * s, T inv_m) {
 		if (inv_m <= T{})
 			return;
 		if (do_cap)
 			cap_vec3(s->velocity_, max_velocity_component_);
+		// Cap solver-induced spin for the same reason the linear cap exists: a
+		// Gauss–Seidel overshoot in a dense pile (amplified by a small moment of
+		// inertia) can drive ω unbounded — integrate_angular only caps at the NEXT
+		// tick's integration, a full tick too late to stop it shipping into Pass B
+		// and, in the worst case, running away to inf/NaN. Gated by its own configurable
+		// bound (max_angular_velocity_component_, 0 = off), the rotational twin of the
+		// linear knob. No-op for the non-rotating default (inv_inertia == 0).
+		if (do_cap_w && s->rotates_dynamically())
+			cap_vec3(s->angular_velocity_, max_angular_velocity_component_);
 		if (!s->active_ &&
 		    (tr::abs(s->velocity_.x) > deactivate_speed_ ||
 		     tr::abs(s->velocity_.y) > deactivate_speed_ ||
