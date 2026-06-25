@@ -845,7 +845,16 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	// Collect spacials
 	if (solid_ptr->collide_with_scope_ != 0) {
 		sub(temp, new_pos, old_pos);
-		T m = tr::max_val(tr::abs(temp.x), tr::max_val(tr::abs(temp.y), tr::abs(temp.z))) + epsilon_;
+		// Inflate by the motion's full magnitude, not its max axis component. The
+		// substep loop only ever shrinks the remaining motion (each slide projects
+		// left_over onto the contact tangent), so every position the body visits is
+		// within length(temp) of old_pos. A diagonal motion redirected onto a single
+		// axis by a slide can travel up to length(temp) (= up to sqrt(3)x the max
+		// component) along that axis — more than a max-component inflation covers — so
+		// a neighbor only reachable after the redirect would be missed this tick.
+		// length(temp) bounds the whole reachable envelope, making the one gather valid
+		// for every substep that reuses it.
+		T m = length(temp) + epsilon_;
 		m += spin_broadphase_reach(solid_ptr, dt); // Phase 9: cover a spinner's swept surface (0 if not spinning)
 
 		// Use the cached world AABB (world_bound_ = rotate_aabb(local_bound_,
