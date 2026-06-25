@@ -398,6 +398,95 @@ void trace_inverted_convex(collision<T> & col,
 	}
 }
 
+// Build a convex_solid in WORLD orientation for the rounded×convex inflation
+// fallback: each plane's normal is rotated by Rc (= the convex's world rotation),
+// its distance left unchanged (a pure rotation about the shape's local origin
+// preserves dot(n, x)), then inflated by the primitive's rounded radius, the
+// margin, and — for a capsule — the per-plane support of its spine direction
+// max(0, nw·D_world). Handing the resulting world-oriented planes to the
+// translate-only trace_forward/inverted_convex is what lets the fallback respect
+// an oriented convex (the axis-aligned version silently dropped it). Identity Rc
+// reproduces the old local-plane inflation exactly.
+template <typename T>
+inline void inflate_convex_world(convex_solid<T> & out, const convex_solid<T> & in,
+                                 const mat3<T> & Rc, T radius, bool is_capsule,
+                                 const vec3<T> & D_world, T margin) {
+	using tr = scalar_traits<T>;
+	out.vertices.clear();
+	out.planes.resize(in.planes.size());
+	for (size_t i = 0; i < in.planes.size(); ++i) {
+		vec3<T> nw;
+		mul(nw, Rc, in.planes[i].normal);
+		T d = in.planes[i].distance + radius + margin;
+		if (is_capsule)
+			d = d + tr::max_val(T {}, dot(nw, D_world));
+		out.planes[i].normal.set(nw);
+		out.planes[i].distance = d;
+	}
+}
+
+// Orientation-aware plane-inflation fallback for a rounded primitive (sphere or
+// capsule) sweeping against a convex_solid — GJK's deep-penetration /
+// cheap-narrowphase backstop (GJK itself already handles orientation). Forward:
+// the primitive is the mover (s1); inverted: the convex is the mover (s1). Both
+// rotate the convex into world orientation (inflate_convex_world) and place every
+// reference point through the solids' orientations, mirroring trace_pair_gjk's
+// placement (Ri = solid_orientation · shape_local_rotation; base = solid_position
+// + solid_orientation · local_position). Identity orientations are bit-identical
+// to the old translate-only placement.
+template <typename T>
+void trace_rounded_convex_forward(collision<T> & col, const segment<T> & seg,
+                                  solid<T> * s1, solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
+                                  const vec3<T> & lp1, const vec3<T> & lp2, T margin, T epsilon) {
+	const bool is_capsule = sh1->get_type() == shape_type::capsule;
+	const T radius = is_capsule ? sh1->get_capsule().radius : sh1->get_sphere().radius;
+	const vec3<T> & prim_origin = is_capsule ? sh1->get_capsule().origin : sh1->get_sphere().origin;
+	mat3<T> Rc, R1;
+	mul(Rc, s2->get_orientation(), sh2->get_local_rotation());
+	mul(R1, s1->get_orientation(), sh1->get_local_rotation());
+	vec3<T> D_world;
+	if (is_capsule)
+		mul(D_world, R1, sh1->get_capsule().direction);
+	convex_solid<T> cs;
+	inflate_convex_world(cs, sh2->get_convex_solid(), Rc, radius, is_capsule, D_world, margin);
+	// Primitive reference offset from s1's position: s1_orientation·lp1 + R1·prim_origin.
+	vec3<T> sh1_offset, ro;
+	mul(sh1_offset, s1->get_orientation(), lp1);
+	mul(ro, R1, prim_origin);
+	add(sh1_offset, ro);
+	// Convex shape origin offset from s2's position: s2_orientation·lp2.
+	vec3<T> lp2w;
+	mul(lp2w, s2->get_orientation(), lp2);
+	trace_forward_convex(col, seg, s2->get_position(), lp2w, cs, sh1_offset, epsilon);
+}
+
+template <typename T>
+void trace_rounded_convex_inverted(collision<T> & col, const segment<T> & seg,
+                                   solid<T> * s1, solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
+                                   const vec3<T> & lp1, const vec3<T> & lp2, T margin, T epsilon) {
+	const bool is_capsule = sh2->get_type() == shape_type::capsule;
+	const T radius = is_capsule ? sh2->get_capsule().radius : sh2->get_sphere().radius;
+	const vec3<T> & prim_origin = is_capsule ? sh2->get_capsule().origin : sh2->get_sphere().origin;
+	mat3<T> Rc, R2;
+	mul(Rc, s1->get_orientation(), sh1->get_local_rotation());
+	mul(R2, s2->get_orientation(), sh2->get_local_rotation());
+	vec3<T> D_world;
+	if (is_capsule)
+		mul(D_world, R2, sh2->get_capsule().direction);
+	convex_solid<T> cs;
+	inflate_convex_world(cs, sh1->get_convex_solid(), Rc, radius, is_capsule, D_world, margin);
+	// lp_delta in world: s2_orientation·lp2 − s1_orientation·lp1 (trace_inverted_convex
+	// adds it to s2_position − s1_position to reach the convex's local frame).
+	vec3<T> lp_delta_w, t;
+	mul(lp_delta_w, s2->get_orientation(), lp2);
+	mul(t, s1->get_orientation(), lp1);
+	sub(lp_delta_w, t);
+	// Primitive reference within its own shape rotation: R2·prim_origin.
+	vec3<T> sh2_offset;
+	mul(sh2_offset, R2, prim_origin);
+	trace_inverted_convex(col, seg, s1->get_position(), s2->get_position(), lp_delta_w, cs, sh2_offset, epsilon);
+}
+
 // Core (radius-excluded) support point of a primitive shape in its OWN local
 // frame. Sphere/capsule contribute only their skeleton (point/segment); their
 // radius is handled by gjk_sweep as a combined margin. Shape-type dispatch that
@@ -1239,14 +1328,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				cap.set(origin, sh2->get_capsule().direction, sh2->get_capsule().radius + sh1->get_sphere().radius + margin);
 				trace_capsule(col, seg, cap, epsilon);
 			} else if (sh1->get_type() == shape_type::sphere && sh2->get_type() == shape_type::convex_solid) {
-				convex_solid<T> cs;
-				cs.set(sh2->get_convex_solid());
-				for (auto & p : cs.planes)
-					p.distance = p.distance + sh1->get_sphere().radius;
-				vec3<T> sh1_offset;
-				add(sh1_offset, sh1->get_sphere().origin, lp1);
-				inflate_planes(cs);
-				trace_forward_convex(col, seg, s2->get_position(), lp2, cs, sh1_offset, epsilon);
+				trace_rounded_convex_forward(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
 			}
 			// Capsule vs *
 			else if (sh1->get_type() == shape_type::capsule && sh2->get_type() == shape_type::box) {
@@ -1276,17 +1358,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				// Fallback (deep core penetration): capsule support relative to its
 				// A endpoint, r + max(0, n·D). Inflate each plane and sweep A through
 				// the resulting convex. Wrong normal near edges, but recovers depth.
-				convex_solid<T> cs;
-				cs.set(sh2->get_convex_solid());
-				const vec3<T> & D = sh1->get_capsule().direction;
-				for (auto & p : cs.planes) {
-					T nd = dot(p.normal, D);
-					p.distance = p.distance + sh1->get_capsule().radius + tr::max_val(zero_val, nd);
-				}
-				vec3<T> sh1_offset;
-				add(sh1_offset, sh1->get_capsule().origin, lp1);
-				inflate_planes(cs);
-				trace_forward_convex(col, seg, s2->get_position(), lp2, cs, sh1_offset, epsilon);
+				trace_rounded_convex_forward(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
 			} else if (sh1->get_type() == shape_type::capsule && sh2->get_type() == shape_type::capsule) {
 				vec3<T> base;
 				base.set(s2->get_position());
@@ -1315,24 +1387,11 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			}
 			// Convex solid vs sphere
 			else if (sh1->get_type() == shape_type::convex_solid && sh2->get_type() == shape_type::sphere) {
-				convex_solid<T> cs;
-				cs.set(sh1->get_convex_solid());
-				for (auto & p : cs.planes)
-					p.distance = p.distance + sh2->get_sphere().radius;
-				inflate_planes(cs);
-				trace_inverted_convex(col, seg, s1->get_position(), s2->get_position(), lp_delta, cs, sh2->get_sphere().origin, epsilon);
+				trace_rounded_convex_inverted(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
 			}
 			// Convex solid vs capsule (mirror of capsule × convex)
 			else if (sh1->get_type() == shape_type::convex_solid && sh2->get_type() == shape_type::capsule) {
-				convex_solid<T> cs;
-				cs.set(sh1->get_convex_solid());
-				const vec3<T> & D = sh2->get_capsule().direction;
-				for (auto & p : cs.planes) {
-					T nd = dot(p.normal, D);
-					p.distance = p.distance + sh2->get_capsule().radius + tr::max_val(zero_val, nd);
-				}
-				inflate_planes(cs);
-				trace_inverted_convex(col, seg, s1->get_position(), s2->get_position(), lp_delta, cs, sh2->get_capsule().origin, epsilon);
+				trace_rounded_convex_inverted(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
 			}
 			// Minkowski difference sh2 ⊕ (-sh1) — locus of (sh1.pos - sh2.pos) at
 			// which the shapes overlap. Bounded by two plane families:

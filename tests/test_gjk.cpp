@@ -63,6 +63,21 @@ template <typename T> static vec3<T> v3(float x, float y, float z) {
 	               tr::from_milli((int)lroundf(z * 1000)));
 }
 
+// Regular octahedron (dual of a cube): 8 octant face planes, vertices distance `r`
+// from the center. Used to exercise the rounded×convex inflation fallback against an
+// oriented convex.
+template <typename T> static convex_solid<T> octahedron(T r) {
+	using tr = scalar_traits<T>;
+	convex_solid<T> cs;
+	const T n = tr::one() / tr::sqrt(tr::from_int(3));
+	const T d = r * n;
+	for (int sx = -1; sx <= 1; sx += 2)
+		for (int sy = -1; sy <= 1; sy += 2)
+			for (int sz = -1; sz <= 1; sz += 2)
+				cs.planes.push_back(plane<T>(vec3<T>(n * tr::from_int(sx), n * tr::from_int(sy), n * tr::from_int(sz)), d));
+	return cs;
+}
+
 // --- tests -----------------------------------------------------------------
 
 // Sphere dropped straight onto a box-convex top: rests with an upward normal at
@@ -611,6 +626,90 @@ template <typename T> static void test_oriented_polytope(const char * label) {
 	printf("OK\n");
 }
 
+// PHANTOM-PENETRATION REGRESSION (gjk_closest_tetra): when the origin lies OUTSIDE
+// the simplex (shapes separated), the closest face's barycentric weights must be
+// recovered — i.e. they must not all come back zero. gjk_closest_tetra seeded its
+// running minimum with best = default_max_position_component()², which OVERFLOWS
+// fixed16 (max ≈ 32767, squared wraps int32) into garbage; the `dsq < best` test
+// then rejected every face and the weights stayed all-zero. The GJK loop reads
+// all-zero weights as wsum == 0 → dist 0, fabricating a deep contact of depth ==
+// combined_radius for shapes that are actually apart. In demo_bounce the fast leash
+// capsule got such a phantom hit against the floating octahedron, and the per-tick
+// push-out then marched the octahedron straight down through the floor.
+//
+// Drive gjk_closest_tetra directly with a tetra sitting entirely in the +octant, so
+// the origin is well outside it (closest feature is vertex a). Pre-fix fixed16: the
+// returned weights summed to 0; post-fix they recover the real closest point.
+template <typename T> static void test_gjk_tetra_origin_outside(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  gjk_tetra_origin_outside[%s]: ", label);
+	vec3<T> a(tr::one(), tr::one(), tr::one());
+	vec3<T> b(tr::two(), tr::one(), tr::one());
+	vec3<T> c(tr::one(), tr::two(), tr::one());
+	vec3<T> d(tr::one(), tr::one(), tr::two());
+	T bary[4];
+	bool inside = true;
+	gjk_closest_tetra(a, b, c, d, bary, inside);
+	T wsum = bary[0] + bary[1] + bary[2] + bary[3];
+	// Reconstruct the closest point and verify it is the near vertex a = (1,1,1).
+	vec3<T> q;
+	mul(q, a, bary[0]);
+	gjk_acc(q, b, bary[1]);
+	gjk_acc(q, c, bary[2]);
+	gjk_acc(q, d, bary[3]);
+	printf("inside=%d wsum=%.3f q=(%.2f,%.2f,%.2f) ", inside, tr::to_float(wsum),
+	       tr::to_float(q.x), tr::to_float(q.y), tr::to_float(q.z));
+	assert(!inside);                                       // origin is NOT contained
+	assert(tr::to_float(wsum) > 0.5f);                    // pre-fix fixed16: 0 (all-zero weights)
+	assert(tr::to_float(q.x) > 0.9f && tr::to_float(q.x) < 1.1f); // closest point ≈ vertex a
+	printf("OK\n");
+}
+
+// ORIENTED-CONVEX FALLBACK REGRESSION: the rounded×convex inflation fallback
+// (use_gjk=false, also GJK's deep-penetration backstop) must respect the convex
+// solid's orientation. It used to trace the primitive against the convex's LOCAL
+// planes with translate-only placement, silently dropping the rotation — so a sphere
+// resting against a rotated face got a normal pointing at the *unrotated* face. Here a
+// sphere sits deep inside an octahedron toward one local face; rotating the whole
+// configuration by θ about Z must rotate the contact normal by θ too. Pre-fix the
+// rotated normal came back ≈ the unrotated one.
+template <typename T> static void test_fallback_convex_orientation(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  fallback_convex_orientation[%s]: ", label);
+	auto normal_at = [&](float ang) {
+		auto cv = std::make_shared<solid<T>>();
+		cv->set_infinite_mass();
+		cv->add_shape(std::make_shared<shape<T>>(octahedron<T>(tr::from_milli(1500)))); // r = 1.5
+		quat<T> q;
+		set_quat_from_axis_angle(q, v3<T>(0, 0, 1), tr::from_milli((int)lroundf(ang * 1000)));
+		cv->set_orientation_from_quat(q);
+		cv->set_position(v3<T>(0, 0, 0));
+		auto sp = std::make_shared<solid<T>>();
+		sp->set_mass(tr::one());
+		sp->add_shape(std::make_shared<shape<T>>(sphere<T>(v3<T>(0, 0, 0), tr::from_milli(400))));
+		// Deep offset 0.3 along the (rotated) local +X, so the nearest face is unambiguous.
+		vec3<T> off = v3<T>(0.3f * cosf(ang), 0.3f * sinf(ang), 0);
+		sp->set_position(off);
+		segment<T> seg;
+		seg.set_start_dir(off, v3<T>(0, 0, 0));
+		collision<T> c;
+		c.time = tr::one();
+		hop::test_solid(c, sp.get(), seg, cv.get(), tr::from_milli(1), T {}, /*use_gjk=*/false);
+		return c.normal;
+	};
+	const float th = 0.5235988f; // 30° — not an octahedron symmetry, so rotation is observable
+	vec3<T> n0 = normal_at(0.0f);
+	vec3<T> nth = normal_at(th);
+	// Expected: n0 rotated by +θ about Z.
+	float ex = tr::to_float(n0.x) * cosf(th) - tr::to_float(n0.y) * sinf(th);
+	float ey = tr::to_float(n0.x) * sinf(th) + tr::to_float(n0.y) * cosf(th);
+	float dx = tr::to_float(nth.x) - ex, dy = tr::to_float(nth.y) - ey;
+	printf("n0=(%.2f,%.2f) nth=(%.2f,%.2f) expected=(%.2f,%.2f) ", tr::to_float(n0.x), tr::to_float(n0.y),
+	       tr::to_float(nth.x), tr::to_float(nth.y), ex, ey);
+	assert(sqrtf(dx * dx + dy * dy) < 0.1f); // pre-fix: nth ≈ n0 (unrotated) ⇒ far from expected
+	printf("OK\n");
+}
+
 template <typename T> static void run_gjk_tests(const char * label) {
 	printf(" [%s]\n", label);
 	test_gjk_sphere_drop<T>(label);
@@ -632,6 +731,8 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_triangle_primitives<T>(label);
 	test_gjk_solid_orientation<T>(label);
 	test_oriented_polytope<T>(label);
+	test_gjk_tetra_origin_outside<T>(label);
+	test_fallback_convex_orientation<T>(label);
 }
 
 int main() {

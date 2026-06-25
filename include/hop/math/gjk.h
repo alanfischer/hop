@@ -125,8 +125,16 @@ inline void gjk_closest_tetra(const vec3<T> & a_in, const vec3<T> & b_in, const 
 	div(d, d_in, s);
 
 	inside = true;
-	T best = tr::default_max_position_component();
-	best = best * best;
+	// Track the running minimum with a `have` flag rather than a sentinel `best`.
+	// The obvious sentinel — default_max_position_component()² — OVERFLOWS fixed16
+	// (max ≈ 32767, squared wraps int32), corrupting `best` so the dsq < best test
+	// never fires: every face is rejected, bary stays all-zero, and the caller reads
+	// that as wsum == 0 → dist 0, a phantom deep-penetration contact for shapes that
+	// are actually well separated. Seeding from the first considered face sidesteps a
+	// representable-infinity choice entirely. (The epsilon² guards elsewhere here
+	// handle the matching underflow; this is the overflow twin.)
+	bool have = false;
+	T best = zero;
 	bary[0] = bary[1] = bary[2] = bary[3] = zero;
 
 	// Map a triangle's 3 weights back into the tetra's 4-slot weight vector.
@@ -139,7 +147,8 @@ inline void gjk_closest_tetra(const vec3<T> & a_in, const vec3<T> & b_in, const 
 		gjk_acc(q, p1, tb[1]);
 		gjk_acc(q, p2, tb[2]);
 		T dsq = length_squared(q);
-		if (dsq < best) {
+		if (!have || dsq < best) {
+			have = true;
 			best = dsq;
 			bary[0] = bary[1] = bary[2] = bary[3] = zero;
 			bary[i0] = tb[0]; bary[i1] = tb[1]; bary[i2] = tb[2];
