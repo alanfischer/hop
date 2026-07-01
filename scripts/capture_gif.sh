@@ -9,6 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build"
 FRAMES="$ROOT/build/frames"
 OUT="$ROOT/docs/demo_bounce.gif"
+[[ "${1:-}" == "--fixed" ]] && OUT="$ROOT/docs/demo_bounce_fixed16.gif"
 
 # Build
 cmake -S "$ROOT" -B "$BUILD" -DHOP_BUILD_EXAMPLES=ON -DHOP_BUILD_TESTS=OFF >/dev/null 2>&1
@@ -17,7 +18,7 @@ cmake --build "$BUILD" --target demo_bounce >/dev/null 2>&1
 # Capture frames
 rm -rf "$FRAMES"
 mkdir -p "$FRAMES"
-"$BUILD/demo_bounce" --capture "$FRAMES"
+"$BUILD/demo_bounce" ${1:-} --capture "$FRAMES"
 
 # Convert to GIF via ffmpeg (palette-based for quality)
 ffmpeg -y -framerate 60 -i "$FRAMES/frame_%04d.png" \

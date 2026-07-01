@@ -584,7 +584,6 @@ template <typename T> void run() {
 
 		// HUD
 		DrawText(mode_label, 10, 10, 20, LIGHTGRAY);
-		DrawFPS(10, 40);
 
 		EndDrawing();
 
