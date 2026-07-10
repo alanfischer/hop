@@ -102,6 +102,7 @@ public:
 		torque_.reset();
 		inertia_.reset();
 		inv_inertia_.reset(); // zero ⇒ no dynamic spin (rotation opt-in)
+		update_inv_inertia_world(); // orientation is identity + inv_inertia zero here ⇒ M = 0
 		coefficient_of_gravity_ = tr::one();
 		coefficient_of_restitution_ = tr::half();
 		restitution_combine_ = restitution_combine::average;
@@ -198,6 +199,7 @@ public:
 	void set_orientation(const mat3<T> & r) {
 		orientation_ = r;
 		set_quat_from_mat3(orientation_q_, r); // keep the integrated quat in sync with external writes
+		update_inv_inertia_world();            // world I⁻¹ depends on orientation
 		recompute_world_bound();
 	}
 	// Commit an integrated quat (Phase 8 dynamic spin): single writer of the
@@ -206,6 +208,7 @@ public:
 	void set_orientation_from_quat(const quat<T> & q) {
 		orientation_q_ = q;
 		set_mat3_from_quat(orientation_, q);
+		update_inv_inertia_world();            // world I⁻¹ depends on orientation
 		recompute_world_bound();
 	}
 	const mat3<T> & get_orientation() const { return orientation_; }
@@ -243,9 +246,29 @@ public:
 		inv_inertia_.x = I.x > T {} ? tr::one() / I.x : T {};
 		inv_inertia_.y = I.y > T {} ? tr::one() / I.y : T {};
 		inv_inertia_.z = I.z > T {} ? tr::one() / I.z : T {};
+		update_inv_inertia_world();
 	}
 	const vec3<T> & get_inertia() const { return inertia_; }
 	const vec3<T> & get_inv_inertia() const { return inv_inertia_; }
+	// Cached world-space inverse inertia tensor M = R·diag(inv_inertia)·Rᵀ. The
+	// solver applies I⁻¹ (angular effective mass + every angular impulse) many
+	// times per tick, but orientation is fixed for the duration of the contact
+	// solve — so we build M once here (from set_inertia and the orientation
+	// writers) and the hot path reduces to a single mat3×vec3. Zero for a
+	// non-rotating body (inv_inertia == 0 ⇒ M == 0), matching the old per-call math.
+	const mat3<T> & get_inv_inertia_world() const { return inv_inertia_world_; }
+	void update_inv_inertia_world() {
+		mat3<T> d; // diag(inv_inertia_); default-constructed to identity, so clear it
+		d.data[0] = inv_inertia_.x;
+		d.data[4] = inv_inertia_.y;
+		d.data[8] = inv_inertia_.z;
+		d.data[1] = d.data[2] = d.data[3] = T {};
+		d.data[5] = d.data[6] = d.data[7] = T {};
+		mat3<T> rt, rd;
+		transpose(rt, orientation_);
+		mul(rd, orientation_, d);
+		mul(inv_inertia_world_, rd, rt);
+	}
 	// True iff the body integrates orientation under torque (any inv_inertia axis
 	// non-zero). The integrator early-outs on false, so the cost is a single compare
 	// for the default (non-rotating) body.
@@ -402,6 +425,7 @@ private:
 	vec3<T> torque_;              // accumulated world-frame torque (Phase 8); cleared each integrate_angular
 	vec3<T> inertia_;             // principal-axis diagonal (Ix,Iy,Iz) in the body frame; for the I·ω gyroscopic term
 	vec3<T> inv_inertia_;         // per-component reciprocal of inertia_ (0 where a component is 0). PRIMARY marker: inv_inertia_==0 ⇒ never spins dynamically. Zero by default ⇒ rotation is opt-in
+	mat3<T> inv_inertia_world_;   // cached R·diag(inv_inertia_)·Rᵀ; see get_inv_inertia_world/update_inv_inertia_world. Zero for a non-rotating body
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
 	contact_mode contact_mode_ = contact_mode::sweep_slide;  // positioning strategy (see contact_mode)

@@ -665,13 +665,12 @@ private:
 // lever-arm primitive for the Phase 9 angular impulse response.
 template <typename T>
 inline void apply_inv_inertia_world(const solid<T> * s, const vec3<T> & v, vec3<T> & out) {
-	const mat3<T> & R = s->get_orientation();
-	mat3<T> Rt;
-	transpose(Rt, R);
-	vec3<T> vb, wb;
-	mul(vb, Rt, v);
-	mul(wb, s->get_inv_inertia(), vb); // component-wise divide by the diagonal inertia (body frame)
-	mul(out, R, wb);
+	// out = I_world⁻¹·v = R·diag(inv_inertia)·Rᵀ·v. Orientation is fixed for the
+	// duration of the contact solve, so the tensor is cached on the body (rebuilt
+	// once per tick by the orientation writers) and this hot path — called per
+	// angular pair × solver iterations, plus on every angular impulse — is a single
+	// mat3×vec3 instead of the transpose + two matrix multiplies it used to do.
+	mul(out, s->get_inv_inertia_world(), v);
 }
 
 // Angular effective mass of a contact pair along a unit direction `dir` at the lever
