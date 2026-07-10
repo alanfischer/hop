@@ -1,9 +1,17 @@
 // demo_stress.cpp — Stress test: box packed full of bouncing spheres.
 // Demonstrates BVH broad-phase performance under high object count.
 // Space : pause
+//
+// Headless profiling mode (no window, no rendering — runs the identical scene
+// and physics, prints per-tick timing): pass --headless [steps]. This is the
+// single source of truth for both the interactive demo and profiling; drive it
+// with scripts/profile_stress.sh for a self-time function breakdown.
+//   ./demo_stress --headless 400
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <hop/bvh_manager.h>
 #include <hop/hop.h>
 #include <raylib.h>
@@ -43,14 +51,13 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	// the pile into a corner the way the old per-body push-out did. It's also the
 	// physical way to drain the pile's residual slosh — unlike viscous contact
 	// damping, which (lacking a Coulomb cone) would glue balls to the walls.
-	// Kept low (0.2, was 0.5) to read closer to demo_stress_rp3d: the balls have no
-	// moment of inertia configured (rotation is opt-in in hop and unset here), so
-	// they can only *slide*, never roll. High friction on non-rolling spheres grinds
-	// them into static mid-air arches that then sleep in place ("floating balls").
-	// The natural rp3d look needs real rolling — blocked on the angular-contact
-	// instability (uncapped contact-solver spin diverges in a dense pile).
-	w->set_coefficient_of_static_friction(ff<T>(0.2f));
-	w->set_coefficient_of_dynamic_friction(ff<T>(0.2f));
+	// The spheres now carry a real moment of inertia (see run()), so friction at a
+	// contact spins them up: they *roll* against the walls and each other instead of
+	// grinding into the static mid-air arches that non-rolling spheres used to freeze
+	// into. That rolling is what gives the pile its natural demo_stress_rp3d-like
+	// settle, so we run a moderate 0.5 (rather than the old rolling-less 0.2 crutch).
+	w->set_coefficient_of_static_friction(ff<T>(0.5f));
+	w->set_coefficient_of_dynamic_friction(ff<T>(0.5f));
 	w->add_shape(std::make_shared<hop::shape<T>>(box));
 	w->set_position(pos);
 	sim.add_solid(w);
@@ -58,7 +65,7 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	return w;
 }
 
-template <typename T> static void run() {
+template <typename T> static void run(bool headless, int steps) {
 	using tr = hop::scalar_traits<T>;
 
 	constexpr int   ROOM_HALF   = 6;
@@ -128,11 +135,18 @@ template <typename T> static void run() {
 		// two materials' COR (walls and balls are both 0.6 here).
 		s->set_restitution_combine(hop::restitution_combine::maximum);
 		s->set_coefficient_of_restitution(ff<T>(0.6f));
-		// Low friction (0.2, matches the walls) keeps the non-rolling spheres from
-		// grinding into static mid-air arches; see make_wall for the full rationale.
-		s->set_coefficient_of_static_friction(ff<T>(0.2f));
-		s->set_coefficient_of_dynamic_friction(ff<T>(0.2f));
+		// Friction (0.5, matches the walls) gives each contact a tangential force; with
+		// the finite inertia set below that force is what actually rolls the balls. See
+		// make_wall for the full rationale.
+		s->set_coefficient_of_static_friction(ff<T>(0.5f));
+		s->set_coefficient_of_dynamic_friction(ff<T>(0.5f));
 		s->add_shape(std::make_shared<hop::shape<T>>(hop::sphere<T>(ff<T>(SPHERE_R))));
+		// Give the sphere a real moment of inertia so it spins under contact torque
+		// (dynamic rotation is opt-in in hop — a body with zero inv-inertia never
+		// rotates, see solid::rotates_dynamically). Solid sphere: I = 2/5·m·r², with
+		// m=1 and r=SPHERE_R. Without this the balls only slide; with it they roll.
+		constexpr float SPHERE_I = 0.4f * SPHERE_R * SPHERE_R;
+		s->set_inertia(hop::vec3<T>(ff<T>(SPHERE_I), ff<T>(SPHERE_I), ff<T>(SPHERE_I)));
 
 		int   layer = i / (COLS * COLS);
 		int   rem   = i % (COLS * COLS);
@@ -152,6 +166,32 @@ template <typename T> static void run() {
 		sim.add_solid(s);
 		bvh.add_solid(s.get(), false);
 		spheres.push_back(std::move(s));
+	}
+
+	// Headless profiling path: run the identical scene for a fixed number of ticks
+	// and report timing, without opening a window or rendering. Same sim.update
+	// call the interactive loop uses below, so the profile reflects the real demo.
+	if (headless) {
+		std::printf("headless: %d spheres, %d steps\n", COUNT, steps);
+		auto t0     = std::chrono::high_resolution_clock::now();
+		auto bucket = t0;
+		for (int s = 0; s < steps; ++s) {
+			sim.update(tr::from_milli(16));
+			if ((s + 1) % 100 == 0) {
+				auto   now = std::chrono::high_resolution_clock::now();
+				double ms  = std::chrono::duration<double, std::milli>(now - bucket).count();
+				int    sleeping = 0;
+				for (auto & sp : spheres)
+					if (!sp->active()) ++sleeping;
+				std::printf("  ticks %4d-%-4d  per-tick: %6.2f ms   sleep: %d/%d\n",
+				            s + 2 - 100, s + 1, ms / 100.0, sleeping, COUNT);
+				bucket = now;
+			}
+		}
+		auto   t1    = std::chrono::high_resolution_clock::now();
+		double total = std::chrono::duration<double, std::milli>(t1 - t0).count();
+		std::printf("total: %.1f ms   per-tick: %.2f ms\n", total, total / steps);
+		return;
 	}
 
 	InitWindow(1280, 720, "hop — stress test");
@@ -199,6 +239,18 @@ template <typename T> static void run() {
 			float   speed = tr::to_float(hop::length(s->get_velocity()));
 			Color   color = s->active() ? heat_color(speed) : GRAY;
 			DrawSphereEx(p, SPHERE_R, 4, 6, color);
+			// Body-fixed axle so the spin is visible: transform the local ±Z pole by
+			// the solid's orientation and draw a line through the sphere. A bare
+			// solid-colored sphere would hide rotation; this marker tumbles/rolls with
+			// the body once it picks up angular velocity from friction.
+			const hop::mat3<T> & R = s->get_orientation();
+			hop::vec3<T> pole(T{}, T{}, ff<T>(SPHERE_R));
+			hop::vec3<T> axis;
+			hop::mul(axis, R, pole);
+			hop::vec3<T> a = s->get_position(), b = s->get_position();
+			hop::add(a, axis);
+			hop::sub(b, axis);
+			DrawLine3D(to_rl(a), to_rl(b), { 10, 10, 15, 255 });
 		}
 
 		EndMode3D();
@@ -224,7 +276,15 @@ template <typename T> static void run() {
 	CloseWindow();
 }
 
-int main() {
-	run<float>();
+int main(int argc, char ** argv) {
+	bool headless = false;
+	int  steps    = 400;
+	for (int i = 1; i < argc; ++i) {
+		if (std::strcmp(argv[i], "--headless") == 0)
+			headless = true;
+		else
+			steps = std::atoi(argv[i]);
+	}
+	run<float>(headless, steps);
 	return 0;
 }
