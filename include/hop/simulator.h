@@ -592,6 +592,8 @@ private:
 	struct contact_pair {
 		solid<T> * a;                // canonical: indexed earlier in solids_/iteration order
 		solid<T> * b;
+		int index_a {};
+		int index_b {};
 		vec3<T> normal;              // points from a's free side toward b
 		vec3<T> v_bias;              // angular surface-velocity bias added to (v_b - v_a): ω_b×r_b - ω_a×r_a (kinematic carry; zero when neither body spins)
 		T accum_n {};                // accumulated normal impulse magnitude (>= 0)
@@ -607,6 +609,7 @@ private:
 		T inv_m_sum {};              // inv_ma + inv_mb, precomputed once at build
 		T target {};                 // restitution target normal velocity, precomputed once
 		T friction_scale {};         // -1 / inv_m_sum (friction λ scale), precomputed once
+		T friction_scale_t {};       // cached tangent friction λ scale: -1 / eff_t
 		// Phase 9 angular response (only used when has_angular). Lever arms from each
 		// body's center to the contact point, and the effective normal mass including
 		// the angular term. has_angular gates the whole angular path: when false the
@@ -614,10 +617,16 @@ private:
 		bool has_angular = false;    // a or b spins dynamically (inv_inertia != 0)
 		vec3<T> r_a, r_b;            // contact point − body position (impact lever arm)
 		T eff_n {};                  // effective normal mass: inv_m_sum (+ angular terms when has_angular)
+		vec3<T> ang_n_a, ang_n_b;    // precomputed I⁻¹(r×n) per body: the normal-sweep angular response, scaled by λ each visit
 		typename solid<T>::touch * slot_a = nullptr;   // writeback target (may be null if a never observed b)
 		typename solid<T>::touch * slot_b = nullptr;
 	};
 	std::vector<contact_pair> contact_pairs_;
+	struct solver_body {
+		vec3<T> velocity;
+		vec3<T> angular_velocity;
+	};
+	std::vector<solver_body> solver_bodies_;
 	// Shock-propagation scratch, all reused per tick (no steady-state alloc):
 	// shock_order_ is pair indices sorted support-end-first; shock_key_[k] is pair
 	// k's gravity-depth sort key; shock_lo_[k] is its deeper (anchor) body. Depths
@@ -680,11 +689,12 @@ inline void apply_inv_inertia_world(const solid<T> * s, const vec3<T> & v, vec3<
 template <typename T, typename Pair>
 inline T angular_eff_mass(const Pair & p, const vec3<T> & dir) {
 	auto term = [&](const solid<T> * s, const vec3<T> & r) {
-		vec3<T> rxd, i, t;
+		if (!s->rotates_dynamically())
+			return T{};
+		vec3<T> rxd, i;
 		cross(rxd, r, dir);
 		apply_inv_inertia_world(s, rxd, i);
-		cross(t, i, r);
-		return dot(t, dir);
+		return dot(rxd, i);
 	};
 	return p.inv_m_sum + term(p.a, p.r_a) + term(p.b, p.r_b);
 }
@@ -1770,6 +1780,22 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	const T inv_dt = (dt > zero_val) ? one / dt : zero_val;
 
 	contact_pairs_.clear();
+	// The iterative solve revisits a body through many contacts. Snapshot the
+	// mutable velocity state into one dense array and let pairs address it by
+	// index, avoiding scattered solid loads/stores in every GS iteration.
+	const int nsolids = static_cast<int>(solids_.size());
+	solver_bodies_.resize(static_cast<size_t>(nsolids) + 1);
+	for (int i = 0; i < nsolids; ++i) {
+		auto * s = solids_[i].get();
+		s->solver_body_index_ = i;
+		solver_bodies_[i].velocity.set(s->velocity_);
+		solver_bodies_[i].angular_velocity.set(s->angular_velocity_);
+	}
+	// Manager-owned geometry resolves through static_world_, which is not in
+	// solids_ but still needs a valid immutable solver-state slot.
+	static_world_.solver_body_index_ = nsolids;
+	solver_bodies_[nsolids].velocity.set(static_world_.velocity_);
+	solver_bodies_[nsolids].angular_velocity.set(static_world_.angular_velocity_);
 
 	// --- 1. Build the canonical pair list ---
 	// Walk every active solid's cache exactly once. For each refreshed slot,
@@ -1784,7 +1810,6 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// order-induced directional drift; the canonical a<b pair convention is
 	// unaffected — only the build/solve order changes).
 	const bool flip = (current_tick_ & 1) != 0;
-	const int nsolids = static_cast<int>(solids_.size());
 	for (int si = 0; si < nsolids; ++si) {
 		auto * s = solids_[flip ? nsolids - 1 - si : si].get();
 		if (!s->active_)
@@ -1817,6 +1842,8 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			contact_pair p;
 			p.a = a;
 			p.b = b;
+			p.index_a = a->solver_body_index_;
+			p.index_b = b->solver_body_index_;
 			// pair.normal: points from a's free side toward b (i.e., the
 			// direction that pushes b away from a when we apply +λ to b's
 			// velocity along it).
@@ -1895,7 +1922,25 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 					add(world_contact, s->position_, slot.lever);
 					sub(partner_r, world_contact, partner->position_);
 				}
-				p.eff_n = angular_eff_mass<T>(p, p.normal);
+				// Normal effective mass, plus the per-body angular impulse-response
+				// vectors I⁻¹(rₐ×n) / I⁻¹(r_b×n). A normal impulse is always along n, so
+				// I⁻¹(r×(λn)) = λ·I⁻¹(r×n): caching these here — orientation and lever
+				// arms are fixed for the whole solve — turns each GS normal apply from a
+				// cross + mat3×vec3 per body into one scaled add (the hot-loop win). This
+				// inlines angular_eff_mass(p, n): same terms in the same order (a then b),
+				// reusing r×n instead of recomputing it in apply_pair_impulse every visit.
+				if (a->rotates_dynamically()) {
+					vec3<T> rxn;
+					cross(rxn, p.r_a, p.normal);
+					apply_inv_inertia_world(a, rxn, p.ang_n_a);
+					p.eff_n += dot(rxn, p.ang_n_a);
+				}
+				if (b->rotates_dynamically()) {
+					vec3<T> rxn;
+					cross(rxn, p.r_b, p.normal);
+					apply_inv_inertia_world(b, rxn, p.ang_n_b);
+					p.eff_n += dot(rxn, p.ang_n_b);
+				}
 			}
 
 			// Angular surface-velocity bias for kinematic carry (Phase 6). The solver
@@ -1937,16 +1982,25 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// lever arm — recomputed each visit because ω evolves; for an inv_inertia==0
 	// kinematic body ω is fixed, so this *is* the Phase 6 v_bias carry (subsumed, not
 	// duplicated). The non-angular path is the original v_b − v_a + v_bias, bit-identical.
-	auto contact_point_vrel = [](const contact_pair & p, vec3<T> & vrel) {
+	auto contact_point_vrel = [this](const contact_pair & p, vec3<T> & vrel) {
+		const solver_body & sa = solver_bodies_[p.index_a];
+		const solver_body & sb = solver_bodies_[p.index_b];
 		if (p.has_angular) {
-			vec3<T> wxa, wxb, va, vb;
-			cross(wxa, p.a->angular_velocity_, p.r_a);
-			cross(wxb, p.b->angular_velocity_, p.r_b);
-			add(va, p.a->velocity_, wxa);
-			add(vb, p.b->velocity_, wxb);
+			vec3<T> va = sa.velocity;
+			if (p.a->rotates_dynamically()) {
+				vec3<T> wxa;
+				cross(wxa, sa.angular_velocity, p.r_a);
+				add(va, wxa);
+			}
+			vec3<T> vb = sb.velocity;
+			if (p.b->rotates_dynamically()) {
+				vec3<T> wxb;
+				cross(wxb, sb.angular_velocity, p.r_b);
+				add(vb, wxb);
+			}
 			sub(vrel, vb, va);
 		} else {
-			sub(vrel, p.b->velocity_, p.a->velocity_);
+			sub(vrel, sb.velocity, sa.velocity);
 			add(vrel, p.v_bias);
 		}
 	};
@@ -1994,6 +2048,34 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			p.target = zero_val;
 		}
 		p.friction_scale = (p.inv_m_sum > zero_val) ? -one / p.inv_m_sum : zero_val;
+		if (p.has_angular) {
+			vec3<T> vt0;
+			vec3<T> vn_vec;
+			mul(vn_vec, p.normal, p.vn0);
+			sub(vt0, vrel0, vn_vec);
+			T vt0_len = length(vt0);
+			vec3<T> t0;
+			if (vt0_len > epsilon_) {
+				mul(t0, vt0, tr::one() / vt0_len);
+			} else {
+				// Generate arbitrary perpendicular vector:
+				// If |n.x| < 0.7, t0 = (1, 0, 0) x n = (0, n.z, -n.y)
+				// Else, t0 = (0, 1, 0) x n = (-n.z, 0, n.x)
+				if (std::abs(tr::to_float(p.normal.x)) < 0.7f) {
+					t0.set(zero_val, p.normal.z, -p.normal.y);
+				} else {
+					t0.set(-p.normal.z, zero_val, p.normal.x);
+				}
+				T len = length(t0);
+				if (len > zero_val) {
+					mul(t0, tr::one() / len);
+				}
+			}
+			T eff_t = angular_eff_mass<T>(p, t0);
+			p.friction_scale_t = eff_t > zero_val ? -one / eff_t : zero_val;
+		} else {
+			p.friction_scale_t = p.friction_scale;
+		}
 	}
 
 	// --- 3. Warm-start ---
@@ -2030,16 +2112,18 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// inverse masses are passed explicitly (rather than read from the pair) so the
 	// shock-propagation phase can substitute effective masses that zero out frozen
 	// anchors.
-	auto apply_pair_impulse = [zero_val](contact_pair & p, const vec3<T> & delta, T inv_a, T inv_b) {
+	auto apply_pair_impulse = [this, zero_val](contact_pair & p, const vec3<T> & delta, T inv_a, T inv_b) {
+		solver_body & sa = solver_bodies_[p.index_a];
+		solver_body & sb = solver_bodies_[p.index_b];
 		if (inv_a > zero_val) {
 			vec3<T> da;
 			mul(da, delta, -inv_a);
-			add(p.a->velocity_, da);
+			add(sa.velocity, da);
 		}
 		if (inv_b > zero_val) {
 			vec3<T> db;
 			mul(db, delta, inv_b);
-			add(p.b->velocity_, db);
+			add(sb.velocity, db);
 		}
 		// Phase 9: the same impulse torques each finite-inertia body about the contact
 		// point. Δω_a -= Iₐ⁻¹(rₐ × J); Δω_b += I_b⁻¹(r_b × J) (delta is a's-convention
@@ -2050,13 +2134,50 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				vec3<T> rxj, dw;
 				cross(rxj, p.r_a, delta);
 				apply_inv_inertia_world(p.a, rxj, dw);
-				sub(p.a->angular_velocity_, dw);
+				sub(sa.angular_velocity, dw);
 			}
 			if (p.b->rotates_dynamically()) {
 				vec3<T> rxj, dw;
 				cross(rxj, p.r_b, delta);
 				apply_inv_inertia_world(p.b, rxj, dw);
-				add(p.b->angular_velocity_, dw);
+				add(sb.angular_velocity, dw);
+			}
+		}
+	};
+
+	// Specialized apply for a normal-constraint impulse of magnitude `effective`
+	// along p.normal — the case that runs solver_iterations × npairs × (1 + shock
+	// passes) times. Identical to apply_pair_impulse(p, effective·n, ...) on the
+	// linear side, but the angular term reuses the precomputed p.ang_n_{a,b}
+	// (= I⁻¹(r×n)) scaled by `effective` instead of recomputing cross + mat3×vec3
+	// per visit. The rotates_dynamically gate matches apply_pair_impulse's, so the
+	// shock phase (which zeroes a frozen anchor's inv mass but not its spin
+	// response) behaves as before.
+	auto apply_normal_impulse = [this, zero_val](contact_pair & p, T effective, T inv_a, T inv_b) {
+		solver_body & sa = solver_bodies_[p.index_a];
+		solver_body & sb = solver_bodies_[p.index_b];
+		vec3<T> delta;
+		mul(delta, p.normal, effective);
+		if (inv_a > zero_val) {
+			vec3<T> da;
+			mul(da, delta, -inv_a);
+			add(sa.velocity, da);
+		}
+		if (inv_b > zero_val) {
+			vec3<T> db;
+			mul(db, delta, inv_b);
+			add(sb.velocity, db);
+		}
+		if (p.has_angular) {
+			if (p.a->rotates_dynamically()) {
+				vec3<T> dw;
+				mul(dw, p.ang_n_a, effective);
+				sub(sa.angular_velocity, dw);
+			}
+			if (p.b->rotates_dynamically()) {
+				vec3<T> dw;
+				mul(dw, p.ang_n_b, effective);
+				add(sb.angular_velocity, dw);
 			}
 		}
 	};
@@ -2067,7 +2188,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// normal sweep (cached masses) and the shock-propagation walk (effective masses
 	// with frozen anchors zeroed). inv_sum is passed in since the caller already
 	// has it / needs to guard against the immovable-pair (inv_sum == 0) case.
-	auto solve_normal = [&apply_pair_impulse, &contact_point_vrel, zero_val](contact_pair & p, T inv_a, T inv_b, T inv_sum) {
+	auto solve_normal = [&apply_normal_impulse, &contact_point_vrel, zero_val](contact_pair & p, T inv_a, T inv_b, T inv_sum) {
 		vec3<T> vrel;
 		contact_point_vrel(p, vrel);  // (v + ω×r) at the contact, or v_b−v_a+v_bias on the linear path
 		T vn = dot(vrel, p.normal);
@@ -2077,11 +2198,8 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			new_acc = zero_val;
 		T effective = new_acc - p.accum_n;
 		p.accum_n = new_acc;
-		if (effective != zero_val) {
-			vec3<T> delta;
-			mul(delta, p.normal, effective);
-			apply_pair_impulse(p, delta, inv_a, inv_b);
-		}
+		if (effective != zero_val)
+			apply_normal_impulse(p, effective, inv_a, inv_b);
 	};
 
 	// Restitution note: p.target separates the pair at `cor` times the relative
@@ -2123,19 +2241,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			// Angular (Phase 9): the tangent effective mass along the slip direction,
 			// so a tangential contact also torques the body (rolling).
 			vec3<T> lambda_t;
-			if (p.has_angular) {
-				T vtlen = length(vt);
-				if (vtlen > epsilon_) {
-					vec3<T> that;
-					mul(that, vt, tr::one() / vtlen);
-					T eff_t = angular_eff_mass<T>(p, that); // tangent mass at the lever arm
-					mul(lambda_t, vt, eff_t > zero_val ? -(tr::one() / eff_t) : zero_val);
-				} else {
-					lambda_t.reset();
-				}
-			} else {
-				mul(lambda_t, vt, p.friction_scale);
-			}
+			mul(lambda_t, vt, p.friction_scale_t);
 			vec3<T> new_accum_t;
 			add(new_accum_t, p.accum_t, lambda_t);
 			// Coulomb stick/slip: the contact holds (static) as long as the
@@ -2260,11 +2366,12 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// first means the wake threshold reads the final (capped) velocity.
 	const bool do_cap = max_velocity_component_ > zero_val;
 	const bool do_cap_w = max_angular_velocity_component_ > zero_val;
-	auto finalize = [this, do_cap, do_cap_w](solid<T> * s, T inv_m) {
+	auto finalize = [this, do_cap, do_cap_w](solid<T> * s, int index, T inv_m) {
 		if (inv_m <= T{})
 			return;
+		solver_body & state = solver_bodies_[index];
 		if (do_cap)
-			cap_vec3(s->velocity_, max_velocity_component_);
+			cap_vec3(state.velocity, max_velocity_component_);
 		// Cap solver-induced spin for the same reason the linear cap exists: a
 		// Gauss–Seidel overshoot in a dense pile (amplified by a small moment of
 		// inertia) can drive ω unbounded — integrate_angular only caps at the NEXT
@@ -2273,17 +2380,24 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// bound (max_angular_velocity_component_, 0 = off), the rotational twin of the
 		// linear knob. No-op for the non-rotating default (inv_inertia == 0).
 		if (do_cap_w && s->rotates_dynamically())
-			cap_vec3(s->angular_velocity_, max_angular_velocity_component_);
+			cap_vec3(state.angular_velocity, max_angular_velocity_component_);
 		if (!s->active_ &&
-		    (tr::abs(s->velocity_.x) > deactivate_speed_ ||
-		     tr::abs(s->velocity_.y) > deactivate_speed_ ||
-		     tr::abs(s->velocity_.z) > deactivate_speed_)) {
+		    (tr::abs(state.velocity.x) > deactivate_speed_ ||
+		     tr::abs(state.velocity.y) > deactivate_speed_ ||
+		     tr::abs(state.velocity.z) > deactivate_speed_)) {
 			s->activate();
 		}
 	};
 	for (auto & p : contact_pairs_) {
-		finalize(p.a, p.inv_ma);
-		finalize(p.b, p.inv_mb);
+		finalize(p.a, p.index_a, p.inv_ma);
+		finalize(p.b, p.index_b, p.inv_mb);
+	}
+	// Commit the dense scratch state once the iterative solve, cap, and wake
+	// decisions are complete. static_world_ has no entry in solids_ and remains
+	// immutable.
+	for (int i = 0; i < nsolids; ++i) {
+		solids_[i]->velocity_.set(solver_bodies_[i].velocity);
+		solids_[i]->angular_velocity_.set(solver_bodies_[i].angular_velocity);
 	}
 }
 
