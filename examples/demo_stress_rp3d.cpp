@@ -1,8 +1,10 @@
 // demo_stress_rp3d.cpp — ReactPhysics3D port of demo_stress.cpp
 //
-// Same scene: a 12 x 6 x 6 room packed with ~700+ spheres bouncing with no
-// gravity. RP3D handles broad-phase + narrow-phase + integration internally.
-// Press Space to pause.
+// Matched ReactPhysics3D baseline for demo_stress.cpp.  It uses the same room,
+// 6,859 spheres, initial positions/velocities, gravity, material values, mass,
+// inertia, fixed 16 ms step, and sleep thresholds as Hop's stress demo. RP3D
+// handles broad-phase + narrow-phase + integration internally. Press Space to
+// pause, or pass --headless [steps] for a renderer-free timing run.
 //
 // HUD shows the physics-step wall time so you can compare against hop directly.
 // Both demos run a fixed 16 ms world step at 60 Hz by default.
@@ -14,6 +16,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <raylib.h>
 #include <vector>
 
@@ -38,12 +43,12 @@ static rp::RigidBody * make_wall(rp::PhysicsCommon & common, rp::PhysicsWorld * 
 	body->setType(rp::BodyType::STATIC);
 	auto * shape = common.createBoxShape(half_extents);
 	auto * col = body->addCollider(shape, rp::Transform::identity());
-	col->getMaterial().setBounciness(1.0f);
-	col->getMaterial().setFrictionCoefficient(0.0f);
+	col->getMaterial().setBounciness(0.6f);
+	col->getMaterial().setFrictionCoefficient(0.5f);
 	return body;
 }
 
-static void run() {
+static void run(bool headless, int steps) {
 	constexpr int ROOM_HALF = 6;       // half-extent in X and Z (raylib Y-up)
 	constexpr int ROOM_HEIGHT = 12;    // along Y
 	constexpr float SPHERE_R = 0.28f;
@@ -54,7 +59,18 @@ static void run() {
 
 	rp::PhysicsCommon common;
 	rp::PhysicsWorld::WorldSettings settings;
+	settings.gravity = rp::Vector3(0.0f, -9.81f, 0.0f);
 	settings.isSleepingEnabled = true;
+	// Hop's stress scene uses a 0.2 m/s linear and angular threshold and sleeps
+	// after 32 fixed 16 ms steps. RP3D exposes the equivalent values as world
+	// defaults. Solver algorithms remain deliberately native to each engine.
+	settings.defaultSleepLinearVelocity = 0.2f;
+	settings.defaultSleepAngularVelocity = 0.2f;
+	settings.defaultTimeBeforeSleep = 32.0f * 0.016f;
+	// Match Hop's configured Gauss-Seidel and positional iteration budgets.
+	// Its speculative shock-propagation pass has no direct RP3D equivalent.
+	settings.defaultVelocitySolverNbIterations = 16;
+	settings.defaultPositionSolverNbIterations = 8;
 	rp::PhysicsWorld * world = common.createPhysicsWorld(settings);
 
 	// Floor / ceiling along Y (Y-up world). Outer extents larger than the side
@@ -90,8 +106,9 @@ static void run() {
 		int rem = i % (COLS * COLS);
 		int col = rem % COLS;
 		int row = rem / COLS;
-		float x = -(ROOM_HALF - SPACING * 0.5f) + col * SPACING;
-		float z = -(ROOM_HALF - SPACING * 0.5f) + row * SPACING;
+		// Match Hop exactly, mapping Hop's Z-up coordinates to RP3D's Y-up.
+		float x = (col - (COLS - 1) * 0.5f) * SPACING;
+		float z = (row - (COLS - 1) * 0.5f) * SPACING;
 		float y = SPACING * 0.5f + layer * SPACING;
 		float vx = ((i * 7 + 3) % 21 - 10) * 0.5f;
 		float vz = ((i * 13 + 5) % 21 - 10) * 0.5f;
@@ -100,13 +117,42 @@ static void run() {
 		rp::Transform t(rp::Vector3(x, y, z), rp::Quaternion::identity());
 		auto * body = world->createRigidBody(t);
 		body->setMass(1.0f);
+		// Hop explicitly uses a solid sphere inertia I = 2/5 m r^2. Setting it
+		// here avoids relying on RP3D's collider-density mass-property defaults.
+		constexpr float SPHERE_I = 0.4f * SPHERE_R * SPHERE_R;
+		body->setLocalInertiaTensor(rp::Vector3(SPHERE_I, SPHERE_I, SPHERE_I));
 		body->setLinearDamping(0.0f);
 		body->setAngularDamping(0.0f);
 		auto * collider = body->addCollider(sphere_shape, rp::Transform::identity());
-		collider->getMaterial().setBounciness(0.75f);
-		collider->getMaterial().setFrictionCoefficient(0.0f);
+		collider->getMaterial().setBounciness(0.6f);
+		collider->getMaterial().setFrictionCoefficient(0.5f);
 		body->setLinearVelocity(rp::Vector3(vx, vy, vz));
 		spheres.push_back(body);
+	}
+
+	constexpr float fixed_dt = 0.016f;
+	if (headless) {
+		std::printf("headless: %d spheres, %d steps\n", COUNT, steps);
+		auto t0 = std::chrono::high_resolution_clock::now();
+		auto bucket = t0;
+		for (int step = 0; step < steps; ++step) {
+			world->update(fixed_dt);
+			if ((step + 1) % 100 == 0) {
+				auto now = std::chrono::high_resolution_clock::now();
+				double ms = std::chrono::duration<double, std::milli>(now - bucket).count();
+				int sleeping = 0;
+				for (auto * body : spheres)
+					if (body->isSleeping()) ++sleeping;
+				std::printf("  ticks %4d-%-4d  per-tick: %6.2f ms   sleep: %d/%d\n",
+				            step + 2 - 100, step + 1, ms / 100.0, sleeping, COUNT);
+				bucket = now;
+			}
+		}
+		auto t1 = std::chrono::high_resolution_clock::now();
+		double total = std::chrono::duration<double, std::milli>(t1 - t0).count();
+		std::printf("total: %.1f ms   per-tick: %.2f ms\n", total, total / steps);
+		common.destroyPhysicsWorld(world);
+		return;
 	}
 
 	InitWindow(1280, 720, "reactphysics3d — stress test");
@@ -115,8 +161,6 @@ static void run() {
 	bool paused = false;
 	float cam_angle = 0.2f;
 	float phys_ms = 0.0f;
-	const float fixed_dt = 1.0f / 60.0f;
-
 	while (!WindowShouldClose()) {
 		float dt = GetFrameTime();
 		if (dt > 0.1f) dt = 0.1f;
@@ -177,7 +221,9 @@ static void run() {
 	common.destroyPhysicsWorld(world);
 }
 
-int main() {
-	run();
+int main(int argc, char ** argv) {
+	bool headless = argc > 1 && std::strcmp(argv[1], "--headless") == 0;
+	int steps = headless && argc > 2 ? std::max(1, std::atoi(argv[2])) : 400;
+	run(headless, steps);
 	return 0;
 }

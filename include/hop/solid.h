@@ -455,6 +455,9 @@ private:
 	// different trajectories. An insertion id makes the solve order — and thus
 	// the result — reproducible across runs.
 	std::size_t solve_id_ = 0;
+	// Dense solver_bodies_ slot for this body. Valid only during solve_contacts
+	// (rewritten each call); -1 and stale otherwise.
+	int solver_body_index_ = -1;
 
 	// -- Cold: rarely accessed in the hot path --
 	// Persistent per-pair contact cache. Each slot remembers a body this solid
