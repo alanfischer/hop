@@ -1392,6 +1392,10 @@ template <typename T> void simulator<T>::correct_positions() {
 		p.b->pos_correction_.reset();
 	}
 	for (int iter = 0; iter < spec_pos_iters_; ++iter) {
+		// With unchanged pseudo-positions, a later NGS pass would visit the
+		// exact same separations. Once a full pass applies no correction, the
+		// remaining iterations cannot make progress.
+		bool corrected = false;
 		for (auto & p : contact_pairs_) {
 			// Only an awake speculative body absorbs correction here: sleeping/static
 			// bodies and sweep_slide bodies are immovable supports (a sweep_slide body
@@ -1413,6 +1417,9 @@ template <typename T> void simulator<T>::correct_positions() {
 			if (pen <= zero)
 				continue;
 			T corr = pen * spec_pos_baumgarte_;
+			if (corr <= zero)
+				continue;
+			corrected = true;
 			// p.normal points from a toward b: push b along +normal and a along
 			// -normal, each by its share of the inverse mass.
 			if (inv_b > zero) {
@@ -1426,6 +1433,8 @@ template <typename T> void simulator<T>::correct_positions() {
 				sub(p.a->pos_correction_, d);
 			}
 		}
+		if (!corrected)
+			break;
 	}
 }
 
