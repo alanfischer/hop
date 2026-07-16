@@ -429,6 +429,81 @@ template <typename T> static void test_angular_carry_box_capsule(const char * la
 	printf("  angular_carry_box_capsule[%s]: OK\n", label);
 }
 
+// Regression: a kinematic spinner must carry a rider that ALSO spins dynamically.
+// The riders above are inertia-less (inv_inertia==0), so the pair takes the linear
+// v_bias carry path. Give the rider finite inertia and it starts rotating
+// dynamically — flipping the pair onto the angular vrel path, where the platform's
+// ω×r was being dropped because it was gated on rotates_dynamically() (false for an
+// infinite-mass platform) instead of "has angular velocity". The carry then
+// vanished. This is exactly the demo_rotating_platform scenario (its riders have
+// inertia so friction spins them up). The rider must still be carried +y AND, as
+// the Phase 9 secondary effect, spin up about +z from that same friction.
+template <typename T> static void test_angular_carry_finite_inertia_rider(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  angular_carry_finite_inertia_rider[%s]: ", label);
+
+	auto run = [](const vec3<T> & omega) {
+		auto sim = std::make_shared<simulator<T>>();
+		sim->set_gravity({ T {}, T {}, -tr::from_int(10) });
+
+		// Platform: wide, shallow box, top face at z=0, infinite mass, spun about z.
+		// Kept shallow (centre z=-0.5) so the platform's lever arm to the contact has
+		// no large z-component — a deep centre injects fixed16 rounding into ω×r.
+		auto platform = std::make_shared<solid<T>>();
+		platform->set_infinite_mass();
+		platform->set_position({ T {}, T {}, -tr::half() });
+		platform->set_coefficient_of_gravity(T {});
+		platform->set_coefficient_of_restitution(T {});
+		platform->set_coefficient_of_static_friction(tr::one());
+		platform->set_coefficient_of_dynamic_friction(tr::one());
+		platform->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(-tr::from_int(20), -tr::from_int(20), -tr::half(),
+		              tr::from_int(20), tr::from_int(20), tr::half())));
+		platform->set_angular_velocity(omega);
+		sim->add_solid(platform);
+
+		// Rider: finite mass AND finite inertia → rotates_dynamically() is true, so the
+		// pair uses the angular vrel path. High friction so the carry grips.
+		auto rider = std::make_shared<solid<T>>();
+		rider->set_mass(tr::one());
+		rider->set_inertia({ tr::from_milli(167), tr::from_milli(167), tr::from_milli(167) });
+		rider->set_position({ tr::from_int(3), T {}, tr::half() + tr::from_milli(20) });
+		rider->set_coefficient_of_restitution(T {});
+		rider->set_coefficient_of_static_friction(tr::one());
+		rider->set_coefficient_of_dynamic_friction(tr::one());
+		rider->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(-tr::half(), -tr::half(), -tr::half(), tr::half(), tr::half(), tr::half())));
+		sim->add_solid(rider);
+
+		// dt=16ms matches demo_rotating_platform. (fixed16 carry of a box rider WITH
+		// inertia rounds the friction impulse to zero at dt=10ms — a precision edge of
+		// the small step, not of this carry path; the demo's step is well-behaved.)
+		for (int i = 0; i < 100; ++i)
+			sim->update(tr::from_milli(16));
+		return std::make_pair(rider->get_position(), rider->get_angular_velocity());
+	};
+
+	auto spun = run({ T {}, T {}, tr::one() });
+	auto still = run({ T {}, T {}, T {} });
+
+	const vec3<T> & sp = spun.first;
+	float sx = tr::to_float(sp.x), sy = tr::to_float(sp.y), sz = tr::to_float(sp.z);
+	float ty = tr::to_float(still.first.y);
+	float r_spun = std::sqrt(sx * sx + sy * sy);
+	float wz_spun = tr::to_float(spun.second.z);
+	float wz_still = tr::to_float(still.second.z);
+	printf("spun=(%.2f,%.2f,%.2f) r=%.2f wz=%.3f  still_y=%.2f still_wz=%.3f\n",
+	       sx, sy, sz, r_spun, wz_spun, ty, wz_still);
+
+	assert(sy > 0.5f);                       // carried tangentially (+y) despite dynamic spin
+	assert(sz > 0.3f);                       // stayed seated on the top face
+	assert(r_spun > 2.0f && r_spun < 4.0f);  // carried around the axis, still on top
+	assert(wz_spun > 0.05f);                 // Phase 9: friction spun the rider up about +z
+	assert(std::fabs(ty) < 0.2f);            // no drift without platform spin
+	assert(std::fabs(wz_still) < 0.05f);     // and no spin-up without it
+	printf("  angular_carry_finite_inertia_rider[%s]: OK\n", label);
+}
+
 // Statically-rotated boxes dropped on a flat floor must settle on their true
 // rotated geometry (Phase 5 oriented polytope×polytope), not their world AABB, and
 // the infinite-mass floor must not move. TWO boxes are used deliberately: with a
@@ -811,6 +886,7 @@ int main() {
 	test_angular_carry<float>("float");
 	test_angular_carry_box<float>("float");
 	test_angular_carry_box_capsule<float>("float");
+	test_angular_carry_finite_inertia_rider<float>("float");
 	test_oriented_box_rest<float>("float");
 	test_dynamic_spin<float>("float");
 	test_angular_impulse<float>("float");
@@ -849,6 +925,7 @@ int main() {
 	test_angular_carry<fixed16>("fixed16");
 	test_angular_carry_box<fixed16>("fixed16");
 	test_angular_carry_box_capsule<fixed16>("fixed16");
+	test_angular_carry_finite_inertia_rider<fixed16>("fixed16");
 	test_oriented_box_rest<fixed16>("fixed16");
 	test_dynamic_spin<fixed16>("fixed16");
 	test_angular_impulse<fixed16>("fixed16");
