@@ -65,7 +65,7 @@ static std::shared_ptr<hop::solid<T>> make_wall(hop::simulator<T> & sim,
 	return w;
 }
 
-template <typename T> static void run(bool headless, int steps) {
+template <typename T> static void run(bool headless, int steps, bool fixed_label) {
 	using tr = hop::scalar_traits<T>;
 
 	constexpr int   ROOM_HALF   = 6;
@@ -264,6 +264,7 @@ template <typename T> static void run(bool headless, int steps) {
 		DrawText(TextFormat("Objects: %d  (sleep: %d)", COUNT, sleeping), 12, 38, 22, WHITE);
 		Color pc = phys_ms < 8.0f ? GREEN : phys_ms < 16.0f ? YELLOW : RED;
 		DrawText(TextFormat("Physics: %.1f ms", (double)phys_ms),      12, 64, 22, pc);
+		DrawText(TextFormat("Scalar: %s", fixed_label ? "fixed16" : "float"), 12, 92, 22, WHITE);
 
 		if (paused)
 			DrawText("PAUSED", 560, 330, 48, { 255, 220, 60, 220 });
@@ -278,13 +279,19 @@ template <typename T> static void run(bool headless, int steps) {
 
 int main(int argc, char ** argv) {
 	bool headless = false;
+	bool fixed    = false;
 	int  steps    = 400;
 	for (int i = 1; i < argc; ++i) {
 		if (std::strcmp(argv[i], "--headless") == 0)
 			headless = true;
+		if (std::strcmp(argv[i], "--fixed") == 0)
+			fixed = true;
 		else
 			steps = std::atoi(argv[i]);
 	}
-	run<float>(headless, steps);
+	if (fixed)
+		run<hop::fixed16>(headless, steps, true);
+	else
+		run<float>(headless, steps, false);
 	return 0;
 }

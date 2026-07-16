@@ -617,6 +617,11 @@ private:
 		bool has_angular = false;    // a or b spins dynamically (inv_inertia != 0)
 		bool a_rotates = false;      // cached a->rotates_dynamically() (the per-body gate)
 		bool b_rotates = false;      // cached b->rotates_dynamically(); has_angular == a_rotates || b_rotates
+		// Infinite-mass kinematic spinner (ω!=0, inv_inertia==0 — a func_rotating
+		// platform). Takes no angular impulse, but its ω×r must still bias the rider's
+		// surface velocity, or the carry is lost once the rider gains dynamic spin.
+		bool a_kinematic_carry = false;
+		bool b_kinematic_carry = false;
 		vec3<T> r_a, r_b;            // contact point − body position (impact lever arm)
 		T eff_n {};                  // effective normal mass: inv_m_sum (+ angular terms when has_angular)
 		vec3<T> ang_n_a, ang_n_b;    // precomputed I⁻¹(r×n) per body: the normal-sweep angular response, scaled by λ each visit
@@ -1897,6 +1902,9 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			// n·((I_b⁻¹(r_b×n))×r_b) (precomputed: orientation is fixed during the solve).
 			p.a_rotates = a->rotates_dynamically();
 			p.b_rotates = b->rotates_dynamically();
+			const vec3<T> no_spin {};
+			p.a_kinematic_carry = !p.a_rotates && !(a->angular_velocity_ == no_spin);
+			p.b_kinematic_carry = !p.b_rotates && !(b->angular_velocity_ == no_spin);
 			p.has_angular = p.a_rotates || p.b_rotates;
 			p.eff_n = p.inv_m_sum;
 			if (p.has_angular) {
@@ -1956,8 +1964,10 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			// angular path recomputes ω×r live at the lever arm (it must, since ω evolves
 			// during the solve), so v_bias is not built for those pairs.
 			p.v_bias.reset();
-			const vec3<T> no_spin {};
-			if (!p.has_angular && !(a->angular_velocity_ == no_spin && b->angular_velocity_ == no_spin)) {
+			// !has_angular ⇒ neither body rotates dynamically, so a/b_kinematic_carry
+			// here mean exactly "a/b has a nonzero (kinematic) ω" — the pairs that need
+			// the bias. The angular path carries kinematic spin via ω×r instead.
+			if (!p.has_angular && (p.a_kinematic_carry || p.b_kinematic_carry)) {
 				// This carry path keeps the legacy (slot.impact − position) arm rather
 				// than the sweep-free slot.lever the angular path uses: here the arm only
 				// feeds a kinematic surface-velocity bias (fixed ω, no impulse), so the
@@ -1991,13 +2001,13 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		const solver_body & sb = solver_bodies_[p.index_b];
 		if (p.has_angular) {
 			vec3<T> va = sa.velocity;
-			if (p.a_rotates) {
+			if (p.a_rotates || p.a_kinematic_carry) {
 				vec3<T> wxa;
 				cross(wxa, sa.angular_velocity, p.r_a);
 				add(va, wxa);
 			}
 			vec3<T> vb = sb.velocity;
-			if (p.b_rotates) {
+			if (p.b_rotates || p.b_kinematic_carry) {
 				vec3<T> wxb;
 				cross(wxb, sb.angular_velocity, p.r_b);
 				add(vb, wxb);
