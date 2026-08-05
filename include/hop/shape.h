@@ -33,9 +33,18 @@ public:
 	    : type_(shape_type::convex_solid),
 	      box_{},
 	      convex_solid_(std::make_unique<convex_solid<T>>(cs)) {}
+	// Non-owning: the caller guarantees the traceable outlives this shape. Right
+	// for a traceable that is a member of something longer-lived.
 	explicit shape(traceable<T> * t) : type_(shape_type::traceable), traceable_(t) {}
+	// Owning: the shape keeps the traceable alive for exactly as long as it points
+	// at it. Prefer this whenever the traceable is built for one shape — the raw
+	// form makes it easy to free the geometry out from under a live shape, and
+	// traceable_ below is a raw pointer that will not notice.
+	explicit shape(std::unique_ptr<traceable<T>> t)
+	    : type_(shape_type::traceable), traceable_(t.get()), owned_traceable_(std::move(t)) {}
 
-	// shape owns convex_solid_ via unique_ptr — non-copyable, move-only.
+	// shape owns convex_solid_ / owned_traceable_ via unique_ptr — non-copyable,
+	// move-only.
 	shape(const shape &) = delete;
 	shape & operator=(const shape &) = delete;
 	shape(shape &&) = default;
@@ -67,6 +76,7 @@ public:
 		type_ = shape_type::box;
 		box_ = box;
 		convex_solid_.reset();
+		owned_traceable_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
@@ -76,6 +86,7 @@ public:
 		type_ = shape_type::sphere;
 		sphere_ = s;
 		convex_solid_.reset();
+		owned_traceable_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
@@ -85,6 +96,7 @@ public:
 		type_ = shape_type::capsule;
 		capsule_ = c;
 		convex_solid_.reset();
+		owned_traceable_.reset();
 		if (solid_)
 			solid_->update_local_bound();
 	}
@@ -92,6 +104,7 @@ public:
 
 	void set_convex_solid(const convex_solid<T> & cs) {
 		type_ = shape_type::convex_solid;
+		owned_traceable_.reset();
 		if (convex_solid_)
 			*convex_solid_ = cs;
 		else
@@ -103,8 +116,17 @@ public:
 
 	void set_traceable(traceable<T> * t) {
 		type_ = shape_type::traceable;
-		traceable_ = t;
 		convex_solid_.reset();
+		owned_traceable_.reset();
+		traceable_ = t;
+		if (solid_)
+			solid_->update_local_bound();
+	}
+	void set_traceable(std::unique_ptr<traceable<T>> t) {
+		type_ = shape_type::traceable;
+		convex_solid_.reset();
+		traceable_ = t.get();
+		owned_traceable_ = std::move(t);
 		if (solid_)
 			solid_->update_local_bound();
 	}
@@ -149,8 +171,10 @@ private:
 	solid<T> * solid_ = nullptr;
 
 	// Variant payload. The trivially-destructible variants (box / sphere /
-	// capsule) plus the externally-owned traceable* share one anonymous-union
-	// slot — type_ selects which member is live. convex_solid_ has heap-owned
+	// capsule) plus the traceable* share one anonymous-union slot — type_ selects
+	// which member is live. The traceable may be owned elsewhere or by this shape
+	// (see owned_traceable_); either way the union holds only the raw pointer, so
+	// reading it is a plain load. convex_solid_ has heap-owned
 	// vectors and can't safely live in a union, so it sits behind a unique_ptr
 	// allocated lazily when type_ becomes shape_type::convex_solid (and freed
 	// when transitioning back to a trivial variant). Saves ~70 B per shape vs.
@@ -162,6 +186,11 @@ private:
 		traceable<T> * traceable_;
 	};
 	std::unique_ptr<convex_solid<T>> convex_solid_;
+	// Set only when this shape owns its traceable; traceable_ above aliases it.
+	// Sits outside the union for the same reason convex_solid_ does — a unique_ptr
+	// has a non-trivial destructor and cannot be a union member without hand-rolled
+	// lifetime management in every setter, the destructor and both move operations.
+	std::unique_ptr<traceable<T>> owned_traceable_;
 
 	friend class solid<T>;
 	friend class simulator<T>;

@@ -58,3 +58,7 @@ add_test(NAME test_mat3 COMMAND test_mat3)
 add_executable(test_quat test_quat.cpp)
 target_link_libraries(test_quat PRIVATE hop)
 add_test(NAME test_quat COMMAND test_quat)
+
+add_executable(test_shape_traceable_ownership test_shape_traceable_ownership.cpp)
+target_link_libraries(test_shape_traceable_ownership PRIVATE hop)
+add_test(NAME test_shape_traceable_ownership COMMAND test_shape_traceable_ownership)
