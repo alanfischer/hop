@@ -150,14 +150,21 @@ public:
 	// cost is ~1 ms/build at N=10000, well below the savings).
 	static constexpr int dynamic_rebuild_period = 16;
 
-	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) override {
+	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids,
+	                          int collide_with_bits = -1) override {
+		// -1 means "no filter", not "all bits": it must keep reporting scope-0 solids,
+		// which a bitwise test against -1 would drop.
+		const bool filter = collide_with_bits != -1;
 		int count = 0;
+		auto accepts = [&](solid<T> * s) {
+			return !filter || (collide_with_bits & s->get_collision_scope()) != 0;
+		};
 
 		if (static_cast<int>(static_solids_.size()) >= linear_scan_threshold) {
 			if (dirty_)
 				rebuild();
 			bvh_.query_aabb(box, [&](solid<T> * s) {
-				if (count < max_solids) {
+				if (count < max_solids && accepts(s)) {
 					solids[count] = s;
 					count++;
 				}
@@ -167,6 +174,8 @@ public:
 				if (count >= max_solids)
 					break;
 				if (s->get_shapes().empty())
+					continue;
+				if (!accepts(s))
 					continue;
 				if (test_intersection(box, s->get_world_bound())) {
 					solids[count] = s;
@@ -182,7 +191,7 @@ public:
 			if (dynamic_dirty_)
 				rebuild_dynamic();
 			dynamic_bvh_.query_aabb(box, [&](solid<T> * s) {
-				if (count < max_solids) {
+				if (count < max_solids && accepts(s)) {
 					solids[count] = s;
 					count++;
 				}
@@ -191,6 +200,8 @@ public:
 			for (auto * s : dynamic_solids_) {
 				if (count >= max_solids)
 					break;
+				if (!accepts(s))
+					continue;
 				if (test_intersection(box, s->get_world_bound())) {
 					solids[count] = s;
 					count++;

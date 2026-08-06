@@ -358,8 +358,13 @@ public:
 	// default and speculative pipelines.
 	void try_deactivate(solid<T> * solid_ptr, const vec3<T> & new_pos, T dt);
 
-	// Find solids in box
-	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) const {
+	// Find solids in box. collide_with_bits filters the result to solids whose
+	// collision_scope shares a bit with it (the same test trace_segment applies); -1,
+	// the default, reports every overlap. Filtering inside the broad phase rather than
+	// in the caller afterwards keeps solids the caller would discard from consuming
+	// slots in its fixed-capacity result buffer. See manager::find_solids_in_aa_box.
+	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids,
+	                          int collide_with_bits = -1) const {
 		aa_box<T> expanded(box);
 		expanded.mins.x -= epsilon_;
 		expanded.mins.y -= epsilon_;
@@ -370,11 +375,15 @@ public:
 
 		int amount = -1;
 		if (manager_)
-			amount = manager_->find_solids_in_aa_box(expanded, solids, max_solids);
+			amount = manager_->find_solids_in_aa_box(expanded, solids, max_solids, collide_with_bits);
 
 		if (amount == -1) {
 			amount = 0;
 			for (auto & s : solids_) {
+				// -1 means "no filter", not "all bits": a bitwise test against it would
+				// drop scope-0 solids, which the unfiltered scan has always reported.
+				if (collide_with_bits != -1 && (collide_with_bits & s->collision_scope_) == 0)
+					continue;
 				if (test_intersection(expanded, s->world_bound_)) {
 					if (amount < max_solids)
 						solids[amount] = s.get();
