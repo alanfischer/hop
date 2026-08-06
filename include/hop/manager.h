@@ -42,7 +42,14 @@ template <typename T> class manager {
 public:
 	virtual ~manager() = default;
 
-	virtual int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids) = 0;
+	// collide_with_bits filters the result to solids whose collision_scope shares a bit
+	// with it, the same test trace_segment applies; -1 (the default) reports every
+	// overlap, scope-0 solids included. Pass a mask whenever the caller would filter by
+	// one anyway: rejecting solids inside the traversal keeps them from consuming slots
+	// in the caller's fixed-capacity result buffer, where — since the static bucket is
+	// drained first — they can crowd out the moving bodies the caller actually wanted.
+	virtual int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids,
+	                                  int collide_with_bits = -1) = 0;
 	virtual void trace_segment(collision<T> & result, const segment<T> & seg, int collide_with_bits) = 0;
 	virtual void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits, T margin) = 0;
 	virtual void pre_update(T dt) = 0;

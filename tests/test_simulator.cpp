@@ -83,7 +83,7 @@ template <typename T> class manager_floor : public hop::manager<T> {
 	using tr = scalar_traits<T>;
 
 public:
-	int find_solids_in_aa_box(const aa_box<T> &, solid<T> *[], int) override { return -1; }
+	int find_solids_in_aa_box(const aa_box<T> &, solid<T> *[], int, int) override { return -1; }
 	void trace_segment(collision<T> &, const segment<T> &, int) override {}
 	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int, T margin) override {
 		// Floor plane at z=0, inflated upward by the speculative margin so a body
