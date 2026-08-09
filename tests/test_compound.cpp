@@ -400,6 +400,78 @@ template <typename T> static void test_capsule_vs_convex_preserves_collider(cons
 	printf("OK\n");
 }
 
+// A query overlapping two shapes of the SAME solid at once — a body standing on a
+// compound room's floor while its wall also overlaps. test_solid folds the two
+// equal-time (t == 0) contacts into one, and which fold the caller gets matters:
+//
+//   average — the solver's fold, and no surface at all: normalize((0,0,1)+(0,1,0))
+//     is a 45° normal belonging to neither the floor nor the wall, and it does not
+//     change when the wall becomes the deeper overlap. A caller classifying the
+//     contact ("floor I rest on, or wall pushing me?") is answered wrongly, and
+//     point/depth still describe whichever shape was adopted first.
+//   deepest — the query fold: the genuinely deepest single shape, so the reported
+//     (normal, point, depth) is one real surface and it tracks which shape is
+//     actually deeper.
+template <typename T> static void test_intra_merge_deepest_picks_one_surface(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  intra_merge_deepest_picks_one_surface[%s]: ", label);
+	const T eps = tr::from_milli(1);
+
+	// Compound "room": a floor whose top face is z=0 (outward +Z) and a wall whose
+	// face is y=0 (outward +Y). They meet along the line y=0,z=0.
+	auto room = std::make_shared<solid<T>>();
+	room->set_infinite_mass();
+	room->set_coefficient_of_gravity(T {});
+	room->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(tr::from_int(-10), tr::from_int(-10), tr::from_int(-1)),
+	              vec3<T>(tr::from_int(10), tr::from_int(10), T {}))));
+	room->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(tr::from_int(-10), tr::from_int(-1), T {}),
+	              vec3<T>(tr::from_int(10), T {}, tr::from_int(10)))));
+
+	// Unit-sphere prober, repositioned per case.
+	auto probe = std::make_shared<solid<T>>();
+	probe->set_mass(tr::one());
+	probe->add_shape(std::make_shared<shape<T>>(sphere<T>(vec3<T>(), tr::one())));
+
+	// Sphere centre → (floor depth, wall depth): the sphere reaches 1 past its centre,
+	// so depth into each face is 1 minus the centre's distance from it.
+	struct probe_case { T y, z; bool floor_is_deeper; };
+	const probe_case cases[] = {
+		{ tr::from_milli(900), tr::from_milli(800), true },   // floor 0.2, wall 0.1
+		{ tr::from_milli(800), tr::from_milli(900), false },  // floor 0.1, wall 0.2
+	};
+
+	for (const auto & c : cases) {
+		probe->set_position({ T {}, c.y, c.z });
+		segment<T> zseg;
+		zseg.set_start_end(probe->get_position(), probe->get_position());
+
+		collision<T> blended, single;
+		test_solid(blended, probe.get(), zseg, room.get(), eps, T {}, true, intra_merge::average);
+		test_solid(single, probe.get(), zseg, room.get(), eps, T {}, true, intra_merge::deepest);
+
+		// Both find the overlap; only the fold differs.
+		assert(blended.time == T {});
+		assert(single.time == T {});
+
+		// The blend is neither surface — both components are substantial.
+		float by = tr::to_float(blended.normal.y), bz = tr::to_float(blended.normal.z);
+		assert(std::fabs(by) > 0.3f && std::fabs(bz) > 0.3f);
+
+		// The deepest fold is exactly one axis: the floor's +Z or the wall's +Y.
+		float sy = tr::to_float(single.normal.y), sz = tr::to_float(single.normal.z);
+		printf("%s(blend %.2f,%.2f -> single %.2f,%.2f) ",
+		       c.floor_is_deeper ? "floor" : "wall", by, bz, sy, sz);
+		if (c.floor_is_deeper) {
+			assert(approx(sz, 1.0f) && approx(sy, 0.0f));
+		} else {
+			assert(approx(sy, 1.0f) && approx(sz, 0.0f));
+		}
+	}
+	printf("OK\n");
+}
+
 template <typename T> static void run_all_tests(const char * label) {
 	printf(" [%s]\n", label);
 	test_sphere_local_position_equivalence<T>(label);
@@ -409,6 +481,7 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_compound_segment_trace<T>(label);
 	test_impact_with_local_position<T>(label);
 	test_capsule_vs_convex_preserves_collider<T>(label);
+	test_intra_merge_deepest_picks_one_surface<T>(label);
 }
 
 int main() {

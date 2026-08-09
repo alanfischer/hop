@@ -405,8 +405,12 @@ public:
 	void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s) {
 		hop::test_segment(result, seg, s, epsilon_);
 	}
-	void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T margin = T {}) {
-		hop::test_solid(result, s1, seg, s2, epsilon_, margin, accurate_narrowphase_);
+	// `mode` selects how equal-time hits on several of s2's shapes fold into the one
+	// reported contact (see hop::intra_merge). The solver's default is `average`;
+	// overlap/rest queries want `deepest` so their single contact is a real surface.
+	void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T margin = T {},
+	                intra_merge mode = intra_merge::average) {
+		hop::test_solid(result, s1, seg, s2, epsilon_, margin, accurate_narrowphase_, mode);
 	}
 
 	// Utility
