@@ -486,6 +486,41 @@ void trace_rounded_convex_inverted(collision<T> & col, const segment<T> & seg,
 	trace_inverted_convex(col, seg, s1->get_position(), s2->get_position(), lp_delta_w, cs, sh2_offset, epsilon);
 }
 
+// World contact point on a ROUNDED shape's surface, along `n` from its centre.
+// `n` points from this shape's solid toward the partner, so centre + n*radius is the
+// point that touches. A capsule contributes whichever end of its segment lies further
+// along n. Needed because the polytope side cannot answer this — see the caller.
+template <typename T>
+inline void rounded_contact_point(const solid<T> * s, const shape<T> * sh, const vec3<T> & lp,
+                                  const vec3<T> & n, vec3<T> & out) {
+	mat3<T> R;
+	mul(R, s->get_orientation(), sh->get_local_rotation());
+	vec3<T> local_ref;
+	T radius;
+	if (sh->get_type() == shape_type::capsule) {
+		const auto & c = sh->get_capsule();
+		radius = c.radius;
+		vec3<T> end;
+		add(end, c.origin, c.direction);
+		// Rotate both candidates into the solid frame before comparing against n.
+		vec3<T> a_w, b_w;
+		mul(a_w, R, c.origin);
+		mul(b_w, R, end);
+		local_ref = (dot(b_w, n) > dot(a_w, n)) ? b_w : a_w;
+	} else {
+		radius = sh->get_sphere().radius;
+		mul(local_ref, R, sh->get_sphere().origin);
+	}
+	// centre = solid position + orientation*local_position + R*primitive origin
+	vec3<T> centre;
+	mul(centre, s->get_orientation(), lp);
+	add(centre, s->get_position());
+	add(centre, local_ref);
+	vec3<T> off;
+	mul(off, n, radius);
+	add(out, centre, off);
+}
+
 // Core (radius-excluded) support point of a primitive shape in its OWN local
 // frame. Sphere/capsule contribute only their skeleton (point/segment); their
 // radius is handled by gjk_sweep as a combined margin. Shape-type dispatch that
@@ -1485,7 +1520,22 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// solid orientation. The identity case is bit-identical to the plain offset.
 			// (Correct impact feeds the Phase 6/9 lever arm; was previously un-rotated
 			// for oriented GJK pairs too — fixed here in one place.)
-			if (col.time < one && sh1->get_type() != shape_type::traceable && sh2->get_type() != shape_type::traceable) {
+			// A contact point taken from s1's support along -n is degenerate whenever the
+			// contact lies on a FACE: the support direction is perpendicular to that face's
+			// own axes, so the tangential position is unrecoverable and the point collapses
+			// to the face centre. On a blade contacted 1.7 out along its length that put the
+			// contact at the hub, which collapses the lever arm from 1.7 to the blade's
+			// half-thickness — and with it the ω×r that solve_contacts builds its restitution
+			// target from, so a 136 m/s strike resolved as a resting overlap.
+			//
+			// A rounded shape has no such degeneracy: its support along any direction is a
+			// single point. So whenever the polytope is the one being traced and the partner
+			// is rounded, the contact point comes from the partner instead.
+			if (col.time < one && sh1->get_type() != shape_type::traceable
+			    && sh2->get_type() != shape_type::traceable
+			    && !is_rounded_shape(sh1->get_type()) && is_rounded_shape(sh2->get_type())) {
+				rounded_contact_point(s2, sh2, lp2, col.normal, col.impact);
+			} else if (col.time < one && sh1->get_type() != shape_type::traceable && sh2->get_type() != shape_type::traceable) {
 				mat3<T> R1;
 				mul(R1, s1->get_orientation(), sh1->get_local_rotation());
 				const mat3<T> identity;
