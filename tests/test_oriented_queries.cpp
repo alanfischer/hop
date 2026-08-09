@@ -263,6 +263,48 @@ template <typename T> static void trace_solid_broadphase_is_oriented(const char 
 	printf("t=%.3f OK\n", f(col.time));
 }
 
+
+// The contact point on a FACE has to say WHERE on the face. Taking it from the traced
+// shape's support along -n cannot: the direction is perpendicular to the face's own
+// axes, so the tangential position collapses to the face centre. On a long blade that
+// puts every contact at the hub, and the lever arm the solver turns into w x r with it.
+template <typename T> static void face_contact_point_is_where_it_touches(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  face_contact_point_is_where_it_touches[%s]: ", label);
+
+	// A 4 m blade, 0.08 thick, centred at the origin.
+	auto blade = std::make_shared<solid<T>>();
+	blade->set_infinite_mass();
+	blade->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::from_int(2), -tr::from_milli(40), -tr::from_milli(40)),
+	              vec3<T>(tr::from_int(2), tr::from_milli(40), tr::from_milli(40)))));
+
+	// A ball resting just above the blade's top face, well out along its length.
+	const T out_along = tr::from_milli(1700);
+	auto ball = std::make_shared<solid<T>>();
+	ball->set_infinite_mass();
+	ball->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(120))));
+	ball->set_position(vec3<T>(out_along, tr::from_milli(150), T {}));
+
+	// Trace the BLADE upward into the ball, so the polytope is the traced shape — the
+	// case where the support query has nothing tangential to say.
+	segment<T> up;
+	vec3<T> from(T {}, T {}, T {});
+	vec3<T> to(T {}, tr::from_milli(60), T {});
+	up.set_start_end(from, to);
+
+	collision<T> hit;
+	hit.reset();
+	test_solid(hit, blade.get(), up, ball.get(), tr::from_milli(1));
+	assert(f(hit.time) < 1.0f);                        // it touches at all
+	assert(approx(f(hit.normal.y), -1.0f, 0.2f));      // on the blade's top face
+
+	// The contact is 1.7 out along the blade, not at its hub. Without this the point
+	// lands at x ~ 0 and the blade's lever arm collapses to its half-thickness.
+	assert(approx(f(hit.impact.x), f(out_along), 0.2f));
+	printf("impact=(%.3f %.3f) t=%.3f OK\n", f(hit.impact.x), f(hit.impact.y), f(hit.time));
+}
+
 template <typename T> static void run_all(const char * label) {
 	segment_vs_rotated_box<T>(label, where::solid_orientation);
 	segment_vs_rotated_box<T>(label, where::shape_rotation);
@@ -271,6 +313,7 @@ template <typename T> static void run_all(const char * label) {
 	segment_vs_rotated_capsule<T>(label);
 	sphere_grazing_rotated_box<T>(label);
 	trace_solid_broadphase_is_oriented<T>(label);
+	face_contact_point_is_where_it_touches<T>(label);
 }
 
 int main() {
