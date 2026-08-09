@@ -425,7 +425,40 @@ inline void inflate_convex_world(convex_solid<T> & out, const convex_solid<T> & 
 	}
 }
 
-// capsule) sweeping against a convex_solid — GJK's deep-penetration /
+// Six-plane convex view of an aa_box, in the box's own frame. Outward normals with
+// `n·x <= distance` inside, matching what inflate_convex_world expects. Vertices are
+// left empty: that routine consumes planes only.
+template <typename T>
+inline void convex_from_box(convex_solid<T> & out, const aa_box<T> & b) {
+	using tr = scalar_traits<T>;
+	const T p = tr::one();
+	const T n = -tr::one();
+	const T z = T {};
+	out.vertices.clear();
+	out.planes.resize(6);
+	out.planes[0].normal.set(p, z, z);  out.planes[0].distance =  b.maxs.x;
+	out.planes[1].normal.set(n, z, z);  out.planes[1].distance = -b.mins.x;
+	out.planes[2].normal.set(z, p, z);  out.planes[2].distance =  b.maxs.y;
+	out.planes[3].normal.set(z, n, z);  out.planes[3].distance = -b.mins.y;
+	out.planes[4].normal.set(z, z, p);  out.planes[4].distance =  b.maxs.z;
+	out.planes[5].normal.set(z, z, n);  out.planes[5].distance = -b.mins.z;
+}
+
+// The polytope geometry of a box-or-convex shape. A box is materialised into the
+// caller's scratch (six planes); a convex_solid is returned as-is. Lets the rounded
+// backstops below serve both, so a rotated BOX gets the same orientation-aware
+// treatment a rotated convex already had.
+template <typename T>
+inline const convex_solid<T> & polytope_of(const shape<T> * sh, convex_solid<T> & scratch) {
+	if (sh->get_type() == shape_type::box) {
+		convex_from_box(scratch, sh->get_box());
+		return scratch;
+	}
+	return sh->get_convex_solid();
+}
+
+// Orientation-aware plane-inflation fallback for a rounded primitive (sphere or
+// capsule) sweeping against a polytope (convex_solid or box) — GJK's deep-penetration /
 // cheap-narrowphase backstop (GJK itself already handles orientation). Forward:
 // the primitive is the mover (s1); inverted: the convex is the mover (s1). Both
 // rotate the convex into world orientation (inflate_convex_world) and place every
@@ -446,8 +479,8 @@ void trace_rounded_convex_forward(collision<T> & col, const segment<T> & seg,
 	vec3<T> D_world;
 	if (is_capsule)
 		mul(D_world, R1, sh1->get_capsule().direction);
-	convex_solid<T> cs;
-	inflate_convex_world(cs, sh2->get_convex_solid(), Rc, radius, is_capsule, D_world, margin);
+	convex_solid<T> cs, box_scratch;
+	inflate_convex_world(cs, polytope_of(sh2, box_scratch), Rc, radius, is_capsule, D_world, margin);
 	// Primitive reference offset from s1's position: s1_orientation·lp1 + R1·prim_origin.
 	vec3<T> sh1_offset, ro;
 	mul(sh1_offset, s1->get_orientation(), lp1);
@@ -472,8 +505,8 @@ void trace_rounded_convex_inverted(collision<T> & col, const segment<T> & seg,
 	vec3<T> D_world;
 	if (is_capsule)
 		mul(D_world, R2, sh2->get_capsule().direction);
-	convex_solid<T> cs;
-	inflate_convex_world(cs, sh1->get_convex_solid(), Rc, radius, is_capsule, D_world, margin);
+	convex_solid<T> cs, box_scratch;
+	inflate_convex_world(cs, polytope_of(sh1, box_scratch), Rc, radius, is_capsule, D_world, margin);
 	// lp_delta in world: s2_orientation·lp2 − s1_orientation·lp1 (trace_inverted_convex
 	// adds it to s2_position − s1_position to reach the convex's local frame).
 	vec3<T> lp_delta_w, t;
@@ -1325,12 +1358,25 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			         && trace_pair_gjk(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon)) {
 				// handled by GJK
 			}
-			// Oriented polytope×polytope: the axis-aligned branches below ignore
-			// orientation, so a rotated box/convex pair goes through the Minkowski-CSO
-			// sweep instead. Identity pairs fall through to the cheaper exact AA paths.
+			// Oriented pairs. Everything below this point is axis-aligned Minkowski math
+			// that ignores orientation, so a rotated pair is routed to a frame-aware path
+			// by CATEGORY rather than by a guard pasted onto individual branches:
+			//   polytope×polytope → Minkowski-CSO sweep
+			//   rounded×polytope  → the plane-inflation backstop GJK falls through to,
+			//                       with a box materialised as six planes like any other
+			//                       polytope (a sphere deep inside a yawed box used to
+			//                       report nothing while its surface shell reported fine)
+			// Identity pairs skip all of it and take the cheaper exact AA paths. The type
+			// tests come first so an unrotated pair never pays for pair_is_oriented.
 			else if (is_polytope_shape(sh1->get_type()) && is_polytope_shape(sh2->get_type())
 			         && pair_is_oriented(s1, s2, sh1, sh2)) {
 				trace_pair_oriented_polytope(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
+			} else if (gjk_eligible_pair(sh1->get_type(), sh2->get_type())
+			           && pair_is_oriented(s1, s2, sh1, sh2)) {
+				if (is_rounded_shape(sh1->get_type()))
+					trace_rounded_convex_forward(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
+				else
+					trace_rounded_convex_inverted(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
 			}
 			// AABox vs *
 			else if (sh1->get_type() == shape_type::box && sh2->get_type() == shape_type::box) {

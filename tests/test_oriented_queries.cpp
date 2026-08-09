@@ -14,6 +14,11 @@ using namespace hop;
 // traceable branch composed R — so every ray and point query silently answered for
 // the UNROTATED shape.
 //
+// test_solid had a narrower version of the same hole: GJK owns rounded×polytope and
+// declines on deep core penetration, and the axis-aligned Minkowski branch it falls
+// back to for a BOX ignored rotation. A sphere deep inside a yawed box reported
+// nothing while its surface shell reported fine.
+//
 // Every case below is paired with an unrotated control, so a test that passes for
 // the wrong reason (probe misplaced, shape absent) shows up as the control failing.
 
@@ -185,6 +190,39 @@ template <typename T> static void segment_vs_rotated_capsule(const char * label)
 
 // Deep interior overlap of a rounded shape and a rotated box: GJK declines here, so
 // this exercises the fallback specifically.
+template <typename T> static void sphere_deep_inside_rotated_box(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  sphere_deep_inside_rotated_box[%s]: ", label);
+
+	auto box = std::make_shared<solid<T>>();
+	box->set_infinite_mass();
+	box->add_shape(std::make_shared<shape<T>>(long_box<T>()));
+
+	auto sph = std::make_shared<solid<T>>();
+	sph->set_infinite_mass();
+	sph->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(100))));
+	// Deep along what becomes the long axis once the box is yawed.
+	vec3<T> at(T {}, T {}, tr::from_milli(1500));
+	sph->set_position(at);
+
+	segment<T> zseg;
+	zseg.set_start_end(at, at);
+
+	// Control: unrotated, the sphere sits well clear of the 0.3-deep box.
+	collision<T> miss;
+	miss.reset();
+	test_solid(miss, sph.get(), zseg, box.get(), tr::from_milli(1));
+	assert(f(miss.time) >= 1.0f);
+
+	box->set_orientation(yaw90<T>());
+	collision<T> hit;
+	hit.reset();
+	test_solid(hit, sph.get(), zseg, box.get(), tr::from_milli(1));
+	assert(f(hit.time) == 0.0f);   // static overlap
+	assert(f(hit.depth) > 0.0f);
+	printf("t=%.3f depth=%.3f OK\n", f(hit.time), f(hit.depth));
+}
+
 // The shallow case is GJK's, not the fallback's — pin it so a fallback change can't
 // quietly take over the pair.
 template <typename T> static void sphere_grazing_rotated_box(const char * label) {
@@ -311,6 +349,7 @@ template <typename T> static void run_all(const char * label) {
 	segment_vs_offset_rotated_box<T>(label);
 	segment_vs_rotated_convex<T>(label);
 	segment_vs_rotated_capsule<T>(label);
+	sphere_deep_inside_rotated_box<T>(label);
 	sphere_grazing_rotated_box<T>(label);
 	trace_solid_broadphase_is_oriented<T>(label);
 	face_contact_point_is_where_it_touches<T>(label);
