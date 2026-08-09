@@ -322,6 +322,17 @@ public:
 	const aa_box<T> & get_local_bound() const { return local_bound_; }
 	const aa_box<T> & get_world_bound() const { return world_bound_; }
 
+	// The solid's extent about its own position, WITH its orientation folded in — what
+	// a caller wants when it is going to re-anchor the bound somewhere other than the
+	// solid's current position (a swept query box, a mesh-local query box). Note this
+	// is NOT local_bound_, which is the shape extent before the solid's orientation;
+	// adding that raw to a moved anchor is a broad-phase box too small and pointing
+	// the wrong way for any rotated solid, which is a bug this has been three times.
+	void get_bound_about_position(aa_box<T> & out) const {
+		out.set(world_bound_.mins, world_bound_.maxs);
+		sub(out, position_);
+	}
+
 	// Diagnostic: read the persistent contact cache. Slots whose last_tick
 	// matches the simulator's current tick are live contacts this step; older
 	// slots are stale (will be reaped on the next solver pass).

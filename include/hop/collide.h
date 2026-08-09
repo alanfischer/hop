@@ -425,7 +425,6 @@ inline void inflate_convex_world(convex_solid<T> & out, const convex_solid<T> & 
 	}
 }
 
-// Orientation-aware plane-inflation fallback for a rounded primitive (sphere or
 // capsule) sweeping against a convex_solid — GJK's deep-penetration /
 // cheap-narrowphase backstop (GJK itself already handles orientation). Forward:
 // the primitive is the mover (s1); inverted: the convex is the mover (s1). Both
@@ -1081,58 +1080,90 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 	int n = static_cast<int>(shapes.size());
 	bool modify_scope = false;
 
+	const mat3<T> identity_m;
+	// Loop-invariant: whether the solid itself turns. Hoisted so the common all-identity
+	// case costs one compare for the whole solid instead of a matrix multiply per shape.
+	const bool solid_oriented = s->get_orientation() != identity_m;
+
 	for (int i = 0; i < n; ++i) {
 		auto * sh = shapes[i].get();
-		const vec3<T> & lp = sh->get_local_position();
-		switch (sh->get_type()) {
-		case shape_type::box: {
-			aa_box<T> box;
-			box.set(sh->get_box());
-			add(box, s->get_position());
-			add(box, lp);
-			trace_aa_box(col, seg, box);
-			break;
-		}
-		case shape_type::sphere: {
-			sphere<T> sph;
-			sph.set(sh->get_sphere());
-			add(sph, s->get_position());
-			add(sph, lp);
-			trace_sphere(col, seg, sph, epsilon);
-			break;
-		}
-		case shape_type::capsule: {
-			capsule<T> cap;
-			cap.set(sh->get_capsule());
-			add(cap, s->get_position());
-			add(cap, lp);
-			trace_capsule(col, seg, cap, epsilon);
-			break;
-		}
-		case shape_type::convex_solid: {
-			convex_solid<T> cs;
-			cs.set(sh->get_convex_solid());
-			segment<T> tmp;
-			tmp.set(seg);
-			sub(tmp.origin, s->get_position());
-			sub(tmp.origin, lp);
-			trace_convex_solid(col, tmp, cs, epsilon);
-			if (col.time < one) {
-				add(col.point, s->get_position());
-				add(col.point, lp);
-			}
-			break;
-		}
-		case shape_type::traceable: {
-			mat3<T> R;
+
+		// Place the shape: its world rotation is solid_orientation · local_rotation, and
+		// its frame origin is solid_position + solid_orientation · local_position. Every
+		// primitive below traces against geometry in that frame, so the segment is carried
+		// in and the hit carried back out. They used to be handed world-space copies of
+		// the geometry instead, which silently answered for the UNROTATED shape — a yawed
+		// box/capsule/convex was invisible to rays and point queries.
+		mat3<T> R;
+		vec3<T> base;
+		if (solid_oriented) {
 			mul(R, s->get_orientation(), sh->get_local_rotation());
-			vec3<T> traceable_origin, roff;
-			mul(roff, s->get_orientation(), lp);
-			add(traceable_origin, s->get_position(), roff);
-			sh->get_traceable()->trace_segment(col, traceable_origin, R, seg);
+			vec3<T> roff;
+			mul(roff, s->get_orientation(), sh->get_local_position());
+			add(base, s->get_position(), roff);
+		} else {
+			R.set(sh->get_local_rotation());
+			add(base, s->get_position(), sh->get_local_position());
+		}
+		const bool oriented = R != identity_m;
+
+		// Segment in the shape's own frame. Unrotated this is just the translation, which
+		// is why there is one code path here and not two: R == I makes the rotations below
+		// the identity, and the old separate translate-only arm rotated local_position by
+		// nothing at all — wrong for a turning solid whose shape counter-rotates.
+		segment<T> lseg;
+		vec3<T> rel;
+		sub(rel, seg.origin, base);
+		if (oriented) {
+			mat3<T> rt;
+			transpose(rt, R);
+			mul(lseg.origin, rt, rel);
+			mul(lseg.direction, rt, seg.direction);
+		} else {
+			lseg.origin.set(rel);
+			lseg.direction.set(seg.direction);
+		}
+
+		// Traceables take the world segment plus their frame, so they need no carry-back.
+		bool in_shape_frame = true;
+
+		// Each primitive returns a miss as time == one, EXCEPT trace_aa_box's
+		// inside-and-leaving early return, which writes nothing at all. `col` is reused
+		// across shapes, so without this a previous shape's (already world-space) hit
+		// would survive into the carry-back below and be transformed a second time.
+		col.time = one;
+
+		switch (sh->get_type()) {
+		case shape_type::box:
+			trace_aa_box(col, lseg, sh->get_box());
+			break;
+		case shape_type::sphere:
+			trace_sphere(col, lseg, sh->get_sphere(), epsilon);
+			break;
+		case shape_type::capsule:
+			trace_capsule(col, lseg, sh->get_capsule(), epsilon);
+			break;
+		case shape_type::convex_solid:
+			trace_convex_solid(col, lseg, sh->get_convex_solid(), epsilon);
+			break;
+		case shape_type::traceable:
+			sh->get_traceable()->trace_segment(col, base, R, seg);
+			in_shape_frame = false;
 			modify_scope = true;
 			break;
 		}
+
+		// Carry the hit back out of the shape's frame. time and depth are invariant
+		// under a rigid transform; the contact point and normal are not.
+		if (in_shape_frame && col.time < one) {
+			if (oriented) {
+				vec3<T> wp, wn;
+				mul(wp, R, col.point);
+				col.point.set(wp);
+				mul(wn, R, col.normal);
+				col.normal.set(wn);
+			}
+			add(col.point, base);
 		}
 
 		// Segment traces have no Minkowski expansion: impact == point
