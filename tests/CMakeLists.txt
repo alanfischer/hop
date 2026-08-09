@@ -62,3 +62,7 @@ add_test(NAME test_quat COMMAND test_quat)
 add_executable(test_shape_traceable_ownership test_shape_traceable_ownership.cpp)
 target_link_libraries(test_shape_traceable_ownership PRIVATE hop)
 add_test(NAME test_shape_traceable_ownership COMMAND test_shape_traceable_ownership)
+
+add_executable(test_oriented_queries test_oriented_queries.cpp)
+target_link_libraries(test_oriented_queries PRIVATE hop)
+add_test(NAME test_oriented_queries COMMAND test_oriented_queries)

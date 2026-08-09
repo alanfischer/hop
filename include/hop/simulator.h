@@ -1510,8 +1510,14 @@ void simulator<T>::trace_solid(collision<T> & result, solid<T> * s, const segmen
 	aa_box<T> box;
 	box.set(seg.origin, seg.origin);
 	box.merge(end);
-	add(box.mins, s->local_bound_.mins);
-	add(box.maxs, s->local_bound_.maxs);
+	// Grow by the mover's ORIENTED extent. Adding local_bound_ raw (as this did) gives a
+	// rotated solid a box too small and pointing the wrong way, so a shape whose contact
+	// sits away from the trace origin is rejected before the oriented narrowphase ever
+	// sees it — the same mistake the per-tick sweep above already avoids.
+	aa_box<T> lb;
+	s->get_bound_about_position(lb);
+	add(box.mins, lb.mins);
+	add(box.maxs, lb.maxs);
 	num_spacial_collection_ =
 	    find_solids_in_aa_box(box, spacial_collection_.data(), static_cast<int>(spacial_collection_.size()));
 	trace_solid_with_current_spacials(result, s, seg, collide_with_bits);
