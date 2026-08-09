@@ -1116,21 +1116,48 @@ inline bool pair_is_oriented(const solid<T> * s1, const solid<T> * s2,
 	       sh1->get_local_rotation() != identity || sh2->get_local_rotation() != identity;
 }
 
+// How shapes on the SAME solid that report the same hit time are folded together.
+//
+// average — blend their normals. What the contact solver wants: at a corner or a
+//   seam between two co-located shapes, the direction that separates the pair is
+//   genuinely between the two faces, and resolving along either one alone would
+//   drive the body along the other.
+//
+// deepest — keep the single deepest contact, unblended. What an overlap QUERY
+//   wants: the caller is handed one contact and needs it to describe a REAL
+//   surface, because it will resolve a position against that (normal, point,
+//   depth) triple. A blend describes no surface at all — a body resting on a
+//   compound solid's floor while its wall overlaps reports a 45° normal that is
+//   neither, so a caller classifying the contact ("is this a floor I stand on or
+//   a wall pushing me?") gets an answer belonging to neither shape. Blending also
+//   leaves point/depth on whichever shape was adopted first, so the triple is not
+//   even self-consistent. Ordering by depth is what makes it deterministic: the
+//   deepest overlap is the one that has to be resolved first anyway.
+enum class intra_merge { average, deepest };
+
 // Intra-shape merge used by test_segment and test_solid. Unlike merge_collision
-// (inter-solid), this always averages normals at equal times — co-located shapes
-// on the same solid genuinely want the averaged normal. `modify_scope` is held
-// across the per-pair loop and gates whether trigger_scope bits accumulate.
+// (inter-solid), equal-time hits are folded per `mode` above rather than always
+// being averaged. `modify_scope` is held across the per-pair loop and gates
+// whether trigger_scope bits accumulate.
 template <typename T>
-void merge_intra_pair(collision<T> & result, const collision<T> & col, T epsilon, bool & modify_scope) {
+void merge_intra_pair(collision<T> & result, const collision<T> & col, T epsilon, bool & modify_scope,
+                      intra_merge mode = intra_merge::average) {
 	using tr = scalar_traits<T>;
 	int trigger_scope = result.trigger_scope;
 	if (col.time < tr::one()) {
 		if (col.time < result.time) {
 			result.set(col);
 		} else if (result.time == col.time) {
-			add(result.normal, col.normal);
-			if (!normalize_carefully(result.normal, epsilon))
-				result.set(col);
+			if (mode == intra_merge::deepest) {
+				// Strictly greater, so the first shape at a given depth wins and the
+				// walk order (not float noise) decides ties.
+				if (col.depth > result.depth)
+					result.set(col);
+			} else {
+				add(result.normal, col.normal);
+				if (!normalize_carefully(result.normal, epsilon))
+					result.set(col);
+			}
 		}
 		modify_scope |= (col.time == T {});
 	}
@@ -1254,8 +1281,14 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 // discovery to enumerate near-resting contacts the bare swept query misses; the
 // caller recovers the true signed gap as (margin − reported depth). Default 0 =
 // exact shapes, the behaviour every existing caller relies on.
+//
+// `mode` picks how equal-time hits on s2's several shapes fold together — see
+// intra_merge. The default (average) is what the solver has always got; an
+// overlap/rest QUERY should pass `deepest` so its one reported contact is a real
+// surface rather than a blend of two.
 template <typename T>
-void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T epsilon, T margin = T {}, bool use_gjk = true) {
+void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T epsilon, T margin = T {}, bool use_gjk = true,
+                intra_merge mode = intra_merge::average) {
 	using tr = scalar_traits<T>;
 	collision<T> col;
 	col.collider = s2;
@@ -1619,7 +1652,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			if (col.time == zero_val)
 				col.trigger_scope = s2->get_trigger_scope();
 
-			merge_intra_pair(result, col, epsilon, modify_scope);
+			merge_intra_pair(result, col, epsilon, modify_scope, mode);
 		}
 	}
 }
