@@ -810,9 +810,18 @@ template <typename T> static void test_fast_spinner_no_tunnel(const char * label
 // Angular substepping (opt-in CCD): a thin obstacle the single per-frame snapshot
 // steps angularly *over* (clear before and after, swept through between) is the one
 // case the snapshot model misses. A blade spinning at 80 rad/s (~73°/step) sweeps its
-// tip past a small peg most frames without a snapshot landing on it, so the peg barely
-// moves. set_angular_substeps_max subdivides the frame at the spinner's tip speed, so
-// every pass is now traced and the peg is reliably struck and knocked far away.
+// tip past a small peg most frames without a snapshot landing on it.
+// set_angular_substeps_max subdivides the frame at the spinner's tip speed, so every
+// pass is traced.
+//
+// Measured as PASSES TRACED, not as how far the peg ends up. Displacement conflates
+// detection with response, and a snapshot that happens to end a frame overlapping the
+// peg still delivers a full strike — so the two configurations can knock the peg
+// comparably far while differing entirely in how many passes they actually saw, which
+// is the thing substepping exists to change. The peg is pinned immovable for that
+// count so the measurement cannot drift as it gets knocked out of the blade's path.
+// A second, moving run keeps the end-to-end check that a traced pass still transfers
+// the blade's surface speed.
 template <typename T> static void test_angular_substep_ccd(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  angular_substep_ccd[%s]: ", label);
@@ -858,11 +867,57 @@ template <typename T> static void test_angular_substep_ccd(const char * label) {
 		}
 		return maxd;
 	};
-	float off = run(1); // single snapshot/frame — the spinner steps angularly over the peg
-	float on = run(8);  // subdivided — every pass is traced
-	printf("peg displacement off=%.2f on=%.2f ", off, on);
-	assert(on > 50.0f); // with substepping every pass connects → peg knocked well away
-	assert(on > off);   // and strictly better than the single-snapshot baseline
+
+	// Passes traced, with the peg held still so only detection varies. Identical to the
+	// run above except the peg is immovable, so the count cannot drift as it is knocked
+	// out of the blade's path.
+	auto passes = [&](int substeps) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, z, z));
+		sim.set_angular_substeps_max(substeps);
+		auto blade = std::make_shared<solid<T>>();
+		blade->set_mass(tr::one());
+		blade->set_inertia(vec3<T>(tr::one(), tr::one(), tr::from_milli(200)));
+		blade->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_int(2), -tr::from_milli(40), -tr::from_milli(40)),
+		              vec3<T>(tr::from_int(2), tr::from_milli(40), tr::from_milli(40)))));
+		blade->set_angular_velocity(vec3<T>(z, z, tr::from_int(80)));
+		sim.add_solid(blade);
+		auto pin = std::make_shared<constraint<T>>(blade, vec3<T>(z, z, z));
+		pin->set_type(constraint<T>::type::spring);
+		pin->set_rest_length(z);
+		pin->set_spring_constant(tr::from_int(400));
+		pin->set_damping_constant(tr::from_int(8));
+		sim.add_constraint(pin);
+		auto peg = std::make_shared<solid<T>>();
+		peg->set_infinite_mass(); // immovable: the count must not depend on being knocked clear
+		peg->add_shape(std::make_shared<shape<T>>(sphere<T>(vec3<T>(z, z, z), tr::from_milli(120))));
+		peg->set_position(vec3<T>(tr::from_milli(1700), z, z));
+		sim.add_solid(peg);
+		int seen = 0;
+		peg->set_collision_callback([&](const collision<T> &) { ++seen; });
+		const T dt = tr::from_milli(16);
+		T ang = z;
+		for (int i = 0; i < 200; ++i) {
+			ang = ang + tr::from_int(80) * dt;
+			mat3<T> R;
+			set_mat3_from_axis_angle(R, vec3<T>(z, z, tr::one()), ang);
+			blade->set_orientation(R);
+			blade->set_angular_velocity(vec3<T>(z, z, tr::from_int(80)));
+			sim.update(dt);
+		}
+		return seen;
+	};
+
+	int seen_off = passes(1);
+	int seen_on = passes(8);
+	float on = run(8);
+	printf("passes traced off=%d on=%d | peg displacement on=%.2f ", seen_off, seen_on, on);
+	// The blade crosses the peg ~81 times in 200 frames (two ends, ~73°/frame). A single
+	// snapshot only sees the crossings a frame boundary happens to land inside, which is
+	// the narrow angular window the peg subtends; subdividing traces the sweep itself.
+	assert(seen_on > seen_off * 2);
+	assert(on > 50.0f); // and a traced pass still knocks the peg well away
 	printf("OK\n");
 }
 
