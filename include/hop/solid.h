@@ -98,6 +98,7 @@ public:
 		orientation_q_.reset();
 		velocity_.reset();
 		angular_velocity_.reset();
+		ext_dv_.reset();
 		force_.reset();
 		torque_.reset();
 		inertia_.reset();
@@ -378,6 +379,7 @@ public:
 		// "resting" pile carry phantom kinetic energy and (b) inject it back the
 		// instant a neighbour wakes the body. Zero it so sleep means rest.
 		velocity_.reset();
+		ext_dv_.reset();
 	}
 	bool active() const { return active_ && simulator_ != nullptr; }
 
@@ -438,6 +440,7 @@ private:
 	vec3<T> inv_inertia_;         // per-component reciprocal of inertia_ (0 where a component is 0). PRIMARY marker: inv_inertia_==0 ⇒ never spins dynamically. Zero by default ⇒ rotation is opt-in
 	mat3<T> inv_inertia_world_;   // cached R·diag(inv_inertia_)·Rᵀ; see get_inv_inertia_world/update_inv_inertia_world. Zero for a non-rotating body
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
+	vec3<T> ext_dv_;              // velocity this tick's integration added from external acceleration (gravity, drag, force_); solve_contacts subtracts it out of the restitution reference. Zero for a body that didn't integrate
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
 	contact_mode contact_mode_ = contact_mode::sweep_slide;  // positioning strategy (see contact_mode)
 	aa_box<T> world_bound_;       // broad phase reads this

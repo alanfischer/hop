@@ -163,6 +163,112 @@ template <typename T> static void test_speculative_manager_floor(const char * la
 	printf("  speculative_manager_floor[%s]: OK\n", label);
 }
 
+// A bouncy ball must run out of bounces. Gravity is integrated before the contact
+// solve, so the tick's own g*dt rides inside the relative normal velocity the
+// restitution target is built from — restitution then hands back cor*g*dt of velocity
+// the ball never had, every bounce, forever. That converges on a fixed point at
+// v = cor*g*dt/(1-cor): below cor ~0.86 (at 60Hz) it lands under the micro-collision
+// threshold and the ball settles anyway, which is why this only ever showed up on the
+// bounciest bodies. At cor 0.9 the fixed point is above the threshold and the ball
+// hovers there forever, bouncing a couple of centimetres and never sleeping.
+template <typename T> static void test_bouncy_ball_settles(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  bouncy_ball_settles[%s]: ", label);
+
+	manager_floor<T> floor;
+	auto sim = std::make_shared<simulator<T>>();
+	sim->set_gravity({ T {}, T {}, -tr::from_milli(9810) });
+	sim->set_default_contact_mode(hop::contact_mode::speculative);
+	sim->set_manager(&floor);
+
+	auto ball = std::make_shared<solid<T>>();
+	ball->set_mass(tr::one());
+	ball->set_position({ T {}, T {}, tr::from_int(5) });
+	ball->set_coefficient_of_restitution(tr::from_milli(900));
+	// max, not the default average: the manager floor has no owning solid, so the
+	// partner is the world anchor and its stock cor 0.5 would average this down to 0.7
+	// — under the fixed point, where the ball settles either way and proves nothing.
+	ball->set_restitution_combine(hop::restitution_combine::maximum);
+	ball->add_shape(std::make_shared<shape<T>>(hop::sphere<T> { vec3<T> {}, tr::one() }));
+	sim->add_solid(ball);
+
+	// Long enough for a cor 0.9 ball dropped 4m to bounce itself out. Each bounce
+	// keeps 90% of its speed, so the ~21 bounces down to the micro-collision
+	// threshold take ~19s of flight; the tail after that must be flat.
+	// Amplitude, not height: the resting centre sits a slop gap above z=1, and it is
+	// the OSCILLATION that says the ball never ran out of bounces.
+	float hi = -1e9f, lo = 1e9f;
+	for (int i = 0; i < 2400; ++i) {
+		sim->update(tr::from_milli(16));
+		if (i >= 1800) {
+			float z_i = tr::to_float(ball->get_position().z);
+			if (z_i > hi) hi = z_i;
+			if (z_i < lo) lo = z_i;
+		}
+	}
+	float peak_late = hi - lo;
+
+	float z = tr::to_float(ball->get_position().z);
+	bool asleep = !ball->active();
+	printf("z=%.3f late_swing=%.5f asleep=%d\n", z, peak_late, asleep ? 1 : 0);
+	assert(z > 0.9f && z < 1.15f);
+	assert(peak_late < 0.002f);  // no perpetual hop
+	assert(asleep);
+	printf("  bouncy_ball_settles[%s]: OK\n", label);
+}
+
+// A body that comes to rest ON a real static solid must sleep, wherever in the
+// resting band it stopped. Two things used to keep it awake, both traceable to the
+// same g·dt: the wake rule read the closing speed gravity re-manufactures every tick
+// (0.16 m/s here, over deactivate_speed_) as an impact and had the resting body and
+// its floor wake each other in turn; and a body settling at exactly the slop gap
+// reads a rounding-hair above it, so the gap-only support test called a contact
+// bearing its full weight "thin air". Started at rest inside the band so the landing
+// transient can't paper over either — a ball that bounces in lands deeper.
+template <typename T> static void test_resting_body_sleeps(const char * label, float start_gap) {
+	using tr = scalar_traits<T>;
+	printf("  resting_body_sleeps[%s gap=%.4f]: ", label, start_gap);
+
+	auto sim = std::make_shared<simulator<T>>();
+	// 20 m/s2 (a game's gravity, and WizardWars' own) on purpose: g*dt is then 0.33 m/s
+	// at this 16ms step, above deactivate_speed_, which is what turned the resting
+	// body's re-manufactured closing speed into a wake-up. Under ~12.5 m/s2 the tick's
+	// increment stays below the threshold and nothing here has anything to prove.
+	sim->set_gravity({ T {}, T {}, -tr::from_int(20) });
+	sim->set_default_contact_mode(hop::contact_mode::speculative);
+
+	// Static floor, top face at z=0, asleep as a static body is.
+	auto floor_solid = std::make_shared<solid<T>>();
+	floor_solid->set_infinite_mass();
+	floor_solid->set_coefficient_of_gravity(T {});
+	floor_solid->set_position({ T {}, T {}, -tr::half() });
+	floor_solid->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(-tr::from_int(20), -tr::from_int(20), -tr::half(),
+	              tr::from_int(20), tr::from_int(20), tr::half())));
+	sim->add_solid(floor_solid);
+	floor_solid->deactivate();
+
+	auto ball = std::make_shared<solid<T>>();
+	ball->set_mass(tr::one());
+	ball->set_position({ T {}, T {}, tr::one() + tr::from_milli((int)(start_gap * 1000.0f)) });
+	ball->set_coefficient_of_restitution(T {});
+	ball->add_shape(std::make_shared<shape<T>>(hop::sphere<T> { vec3<T> {}, tr::one() }));
+	sim->add_solid(ball);
+
+	int slept_at = -1;
+	for (int i = 0; i < 400; ++i) {
+		sim->update(tr::from_milli(16));
+		if (slept_at < 0 && !ball->active())
+			slept_at = i;
+	}
+
+	float z = tr::to_float(ball->get_position().z);
+	printf("z=%.4f slept_at=%d\n", z, slept_at);
+	assert(z > 0.95f && z < 1.05f);  // still sitting on the floor, not sunk or launched
+	assert(slept_at >= 0);
+	printf("  resting_body_sleeps[%s gap=%.4f]: OK\n", label, start_gap);
+}
+
 // Injects the same z=0 floor but CLAIMS every contact via collision_response.
 // Verifies the speculative pipeline calls the hook and that a claimed contact is
 // excluded from the solver: with no impulse applied, nothing stops the body.
@@ -936,6 +1042,9 @@ int main() {
 	test_gravity_drop<float>();
 	test_trigger_scope<float>();
 	test_speculative_manager_floor<float>("float");
+	test_bouncy_ball_settles<float>("float");
+	test_resting_body_sleeps<float>("float", 0.001f);
+	test_resting_body_sleeps<float>("float", 0.005f);
 	test_speculative_manager_response<float>("float");
 	test_mixed_modes_push<float>("float");
 	test_angular_carry<float>("float");
@@ -975,6 +1084,8 @@ int main() {
 		assert(z > 3.0f && z < 7.0f); // More relaxed bounds for fixed16
 	}
 	test_speculative_manager_floor<fixed16>("fixed16");
+	test_bouncy_ball_settles<fixed16>("fixed16");
+	test_resting_body_sleeps<fixed16>("fixed16", 0.005f);
 	test_speculative_manager_response<fixed16>("fixed16");
 	test_mixed_modes_push<fixed16>("fixed16");
 	test_angular_carry<fixed16>("fixed16");

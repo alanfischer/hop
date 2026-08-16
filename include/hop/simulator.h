@@ -277,6 +277,9 @@ public:
 		for (size_t ii = 0; ii < num; ++ii) {
 			solid<T> * s = select(ii);
 			if (!s) continue;
+			// Each integration path accumulates into this (the angular-CCD loop below
+			// calls update_solid several times), so it starts the tick at zero.
+			s->ext_dv_.reset();
 			if (manager_) manager_->pre_update(s, dt);
 			if (s->uses_speculative_solve()) {
 				any_speculative = true;
@@ -530,6 +533,10 @@ private:
 		add(out, body_vel);
 	}
 	void update_acceleration(vec3<T> & result, solid<T> * s, const vec3<T> & x, const vec3<T> & v, T dt);
+
+	// Record the velocity an integration step added from external acceleration, for the
+	// restitution reference in solve_contacts.
+	void accumulate_ext_dv(solid<T> * s, const vec3<T> & new_v);
 
 	// Insert or refresh a slot in s's persistent touch cache. Existing slots
 	// keep their accum_n / accum_t for warm-starting; impact_speed grows
@@ -854,6 +861,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	}
 
 	cap_vec3(vel, max_velocity_component_);
+	accumulate_ext_dv(solid_ptr, vel); // see integrate_and_discover / solve_contacts
 	solid_ptr->velocity_.set(vel);
 	solid_ptr->clear_force();
 
@@ -1032,10 +1040,14 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
 				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
-				// participating in the solver to redistribute force properly.
+				// participating in the solver to redistribute force properly. On the
+				// approach the pair actually had: this tick's own gravity increment is
+				// not an impact (see the speculative path's copy of this rule).
+				vec3<T> wake_dv(solid_ptr->ext_dv_);
+				sub(wake_dv, hit_solid->ext_dv_);
 				if ((hit_solid->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
 				    hit_solid->should_collide(solid_ptr) &&
-				    impact_speed > deactivate_speed_) {
+				    impact_speed + dot(wake_dv, pair_normal) > deactivate_speed_) {
 					hit_solid->activate();
 				}
 			}
@@ -1126,8 +1138,17 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 					// this gap check a body merely *near* another would be deemed
 					// supported and sleep mid-air. Default-pipeline touches always
 					// have separation <= 0 (post-push-out), so they still qualify.
+					//
+					// accum_n is the second half of the question, and the honest half: a
+					// contact the solver had to push on is bearing load whatever its gap
+					// reads. A speculative body settles at exactly the slop gap, and the
+					// trace math that measures it rounds — 0.001000047 against a slop of
+					// 0.001 is the same contact, but the gap test alone calls it thin air
+					// and the body never sleeps. Proximity touches carry no impulse, so
+					// this admits nothing the gap test was written to exclude.
 					if (solid_ptr->touches_[k].last_tick == current_tick_ &&
-					    solid_ptr->touches_[k].separation <= spec_slop_) {
+					    (solid_ptr->touches_[k].separation <= spec_slop_ ||
+					     solid_ptr->touches_[k].accum_n > T {})) {
 						supported = true;
 						break;
 					}
@@ -1210,6 +1231,10 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	mul(dv, accel, dt);
 	add(v, dv);
 	cap_vec3(v, max_velocity_component_);
+	// What external acceleration added this tick, measured after the cap so it is the
+	// real change. solve_contacts subtracts it back out of the velocity restitution is
+	// computed from — see the restitution target there.
+	accumulate_ext_dv(solid_ptr, v);
 	solid_ptr->velocity_.set(v);
 	solid_ptr->clear_force();
 
@@ -1340,9 +1365,20 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 		// Wake a real sleeping partner so it participates in the solve (the world
 		// anchor never sleeps).
+		//
+		// On the approach the bodies actually had, not the one this tick's gravity
+		// just manufactured. A body resting on a floor re-acquires g·dt of closing
+		// speed every single tick — 0.33 m/s at 60Hz and 20 m/s², well over
+		// deactivate_speed_ — so a settled body and the floor under it woke each
+		// other forever and neither could ever sleep. (n runs partner→solid, so the
+		// external increment's contribution to the approach is -dot(ext_dv, n).)
+		vec3<T> wake_dv(solid_ptr->ext_dv_);
+		if (!partner_is_world)
+			sub(wake_dv, partner->ext_dv_);
+		const T wake_speed = impact_speed + dot(wake_dv, n);
 		if (!partner_is_world &&
 		    (partner->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
-		    partner->should_collide(solid_ptr) && impact_speed > deactivate_speed_) {
+		    partner->should_collide(solid_ptr) && wake_speed > deactivate_speed_) {
 			partner->activate();
 		}
 	};
@@ -1681,6 +1717,17 @@ void simulator<T>::accumulate_constraint_torque(solid<T> * s) {
 			s->add_torque(torque);
 		}
 	}
+}
+
+// Fold this integration step's external velocity change into s->ext_dv_. `new_v` is the
+// body's velocity after the step, before it is committed, so the delta is measured
+// against what the body still holds. Additive because the angular-CCD path integrates
+// several sub-steps per tick and the whole tick's worth is what solve_contacts wants.
+template <typename T>
+void simulator<T>::accumulate_ext_dv(solid<T> * s, const vec3<T> & new_v) {
+	vec3<T> d;
+	sub(d, new_v, s->velocity_);
+	add(s->ext_dv_, d);
 }
 
 template <typename T>
@@ -2048,6 +2095,19 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		vec3<T> vrel0;
 		contact_point_vrel(p, vrel0);
 		p.vn0 = dot(vrel0, p.normal);
+		// Restitution is paid on the speed the bodies were ALREADY closing at, not on
+		// the speed this tick's gravity just handed them. Pass A integrates v += a·dt
+		// before the solve, so vn0 arrives g·dt hotter than the approach really was, and
+		// bouncing back cor·|vn0| returns a slice of that increment as free energy —
+		// every bounce, forever. It converges: the ball settles at exactly
+		// v = cor·g·dt/(1-cor) and hops there for good. Under the micro threshold
+		// (cor < ~0.86 at 60Hz and 1g) restitution switches off before the ball reaches
+		// the fixed point and it sleeps, which is why only the bounciest bodies hung.
+		// Subtracting the tick's own external increment makes the reference the approach
+		// the bodies arrived with, so |target| <= |approach| holds against gravity too.
+		vec3<T> dv_ext;
+		sub(dv_ext, p.b->ext_dv_, p.a->ext_dv_); // same b − a convention as vrel
+		const T vn_rest = p.vn0 - dot(dv_ext, p.normal);
 		// Restitution target and the λ mass-scale are constant across all GS
 		// sweeps for this pair, so derive them once here rather than per
 		// iteration in the hot loop below.
@@ -2066,15 +2126,15 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// Existing penetration is removed positionally by correct_positions (NGS),
 		// not here, so the velocity solve adds no energy.
 		const T gap = p.separation;
-		if (-p.vn0 > micro_collision_threshold_) {
+		if (-vn_rest > micro_collision_threshold_) {
 			// Genuine closing collision: bounce at cor times the inbound speed even
 			// when a speculative gap still remains. Withholding restitution until
 			// gap<=slop (as this once did) let the approach cap below bleed off the
 			// entire inbound velocity first, so the body reached the surface with
-			// ~zero closing speed and never bounced. cor<=1 keeps |target|<=|vn0|, so
-			// restitution stays dissipative; the micro threshold lets a slow,
+			// ~zero closing speed and never bounced. cor<=1 keeps |target|<=|vn_rest|,
+			// so restitution stays dissipative; the micro threshold lets a slow,
 			// settling body fall through to the cap.
-			p.target = -p.cor * p.vn0;
+			p.target = -p.cor * vn_rest;
 		} else if (gap > spec_slop_) {
 			p.target = -(gap - spec_slop_) * inv_dt;
 		} else {
