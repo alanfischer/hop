@@ -72,6 +72,14 @@ public:
 	// shape changes; the next query will rebuild.
 	void mark_dirty() { dirty_ = true; }
 
+	// Mark the dynamic BVH's leaf bounds stale without invalidating topology.
+	// For callers that move dynamic solids outside the simulator tick (an engine
+	// integration moving trigger volumes, say) and still need the next query to
+	// see current bounds. Unlike mark_dirty() this costs an O(n) refit rather
+	// than a sort-and-rebuild; topology is still refreshed periodically so
+	// drift cannot degrade query precision indefinitely.
+	void mark_dynamic_moved() { dynamic_moved_ = true; }
+
 	void rebuild() {
 		std::vector<std::pair<aa_box<T>, solid<T> *>> entries;
 		entries.reserve(static_solids_.size());
@@ -84,6 +92,19 @@ public:
 
 		bvh_.build(entries);
 		dirty_ = false;
+	}
+
+	// Refit the dynamic BVH in place from current world bounds, keeping topology.
+	// Periodically falls back to a full rebuild so accumulated drift (solids
+	// wandering out of their original clusters, inflating internal AABBs) cannot
+	// degrade query precision without bound.
+	void refit_dynamic() {
+		if (++refits_since_dynamic_rebuild_ >= dynamic_rebuild_period) {
+			rebuild_dynamic();
+			return;
+		}
+		dynamic_bvh_.refit([](solid<T> * s) { return s->get_world_bound(); });
+		dynamic_moved_ = false;
 	}
 
 	// Rebuild dynamic BVH topology from current world bounds. Cheap refits
@@ -102,7 +123,9 @@ public:
 
 		dynamic_bvh_.build(entries);
 		dynamic_dirty_ = false;
+		dynamic_moved_ = false;
 		ticks_since_dynamic_rebuild_ = 0;
+		refits_since_dynamic_rebuild_ = 0;
 
 		rebuild_iteration_order();
 	}
@@ -188,8 +211,11 @@ public:
 		// happens in pre_update; rebuild lazily here only if we're stale and
 		// no tick has yet driven the refit (e.g., direct caller queries).
 		if (static_cast<int>(dynamic_solids_.size()) >= linear_scan_threshold) {
-			if (dynamic_dirty_)
+			if (dynamic_dirty_) {
 				rebuild_dynamic();
+			} else if (dynamic_moved_) {
+				refit_dynamic();
+			}
 			dynamic_bvh_.query_aabb(box, [&](solid<T> * s) {
 				if (count < max_solids && accepts(s)) {
 					solids[count] = s;
@@ -232,6 +258,7 @@ public:
 			ticks_since_dynamic_rebuild_ = 0;
 		} else {
 			dynamic_bvh_.refit([](solid<T> * s) { return s->get_world_bound(); });
+			dynamic_moved_ = false;
 			// A refit preserves topology, so the BVH leaves are unchanged — but
 			// a static add/remove (which doesn't dirty the dynamic BVH) can still
 			// have invalidated the order's tail. Refresh it without a full rebuild.
@@ -266,6 +293,8 @@ private:
 	bool dynamic_dirty_ = false;
 	bool order_dirty_ = false;
 	int ticks_since_dynamic_rebuild_ = 0;
+	bool dynamic_moved_ = false;
+	int refits_since_dynamic_rebuild_ = 0;
 };
 
 } // namespace hop
