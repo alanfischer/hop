@@ -183,6 +183,57 @@ template <typename T> static void test_sphere_floor_bounce(const char * label) {
 	printf("OK\n");
 }
 
+// Test: a cor=1 ball bouncing on a floor must not bleed energy tick after tick.
+// The restitution reference subtracts the tick's own external (gravity) increment so
+// a bounce can't return free energy — but a sweep_slide body reaches the contact by
+// falling through that same tick, and subtracting the whole increment threw away the
+// fall's kinetic energy: one tick of height per bounce. Float and fixed32 hid it by
+// staying phase-locked to the tick grid; fixed16's quantized rebound broke the lock
+// and lost ~4% per bounce (demo_bounce --fixed visibly died down). Scaling the
+// subtraction by the untravelled fraction of the tick (1 - toi) fixes both ends, so
+// total energy must now hold across many bounces in every scalar type.
+template <typename T> static void test_bounce_energy_conservation(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  bounce_energy_conservation[%s]: ", label);
+	simulator<T> sim;
+
+	make_floor(sim);
+
+	auto ball = std::make_shared<solid<T>>();
+	ball->set_mass(tr::one());
+	ball->set_coefficient_of_restitution(tr::one());
+	ball->set_restitution_combine(restitution_combine::minimum);
+	ball->set_coefficient_of_static_friction(T {});
+	ball->set_coefficient_of_dynamic_friction(T {});
+	ball->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
+	ball->set_position({ T {}, T {}, tr::from_int(3) });
+	sim.add_solid(ball);
+
+	// E = ½v² + g·h, sampled in float so the check reads the same for every T.
+	const float g = 9.8f;
+	auto energy = [&]() {
+		float z = tr::to_float(ball->get_position().z);
+		float v = tr::to_float(ball->get_velocity().z);
+		return 0.5f * v * v + g * z;
+	};
+
+	sim.update(tr::from_milli(16));
+	const float e0 = energy();
+	float lowest = e0;
+	for (int i = 0; i < 1200; ++i) {  // ~13 bounces at dt = 16 ms
+		sim.update(tr::from_milli(16));
+		float e = energy();
+		if (e < lowest)
+			lowest = e;
+	}
+	float retained = lowest / e0;
+	printf("retained=%.3f ", retained);
+	// Pre-fix: fixed16 fell to 0.56, float to 0.87. The residual few percent is the
+	// tick-quantized bounce itself, not a drift.
+	assert(retained > 0.97f);
+	printf("OK\n");
+}
+
 // Test: box-box collision — two boxes moving toward each other
 template <typename T> static void test_box_box_collision(const char * label) {
 	using tr = scalar_traits<T>;
@@ -1465,6 +1516,7 @@ template <typename T> static void run_all_tests(const char * label) {
 	printf(" [%s]\n", label);
 	test_box_stack<T>(label);
 	test_sphere_floor_bounce<T>(label);
+	test_bounce_energy_conservation<T>(label);
 	test_box_box_collision<T>(label);
 	test_sphere_sphere_collision<T>(label);
 	test_capsule_box_collision<T>(label);

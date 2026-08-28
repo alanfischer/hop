@@ -550,6 +550,7 @@ private:
 	                                                const vec3<T> & impact,
 	                                                const vec3<T> & swept_center,
 	                                                T impact_speed,
+	                                                T toi,
 	                                                T separation,
 	                                                int tick);
 	// Find an existing cache slot for (s, partner) or nullptr.
@@ -619,6 +620,7 @@ private:
 		T accum_n {};                // accumulated normal impulse magnitude (>= 0)
 		vec3<T> accum_t;             // accumulated friction impulse (a-side convention)
 		T impact_speed {};           // approach speed at TOI, for restitution
+		T toi {};                    // fraction of the tick consumed reaching the contact (see touch::toi)
 		T separation {};             // signed gap along normal (0 touching, <0 penetrating); for the speculative target
 		T vn0 {};                    // relative normal velocity entering the GS (after warm-start)
 		T cor {};                    // combined restitution
@@ -1038,7 +1040,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// the legacy restitution response for this contact (the speculative
 				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
-				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, separation, current_tick_);
+				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, c.time, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly. On the
 				// approach the pair actually had: this tick's own gravity increment is
@@ -1361,7 +1363,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			}
 		}
 
-		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, separation, current_tick_);
+		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, T {}, separation, current_tick_);
 
 		// Wake a real sleeping partner so it participates in the solve (the world
 		// anchor never sleeps).
@@ -1764,7 +1766,7 @@ typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * par
 
 template <typename T>
 typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
-    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, const vec3<T> & swept_center, T impact_speed, T separation, int tick) {
+    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, const vec3<T> & swept_center, T impact_speed, T toi, T separation, int tick) {
 	const T zero_val {};
 
 	// Body-frame contact offset: the contact point relative to s's center at the
@@ -1795,6 +1797,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 			} else if (impact_speed > slot.impact_speed) {
 				slot.impact_speed = impact_speed;
 			}
+			slot.toi = toi;
 			slot.separation = separation;
 			slot.last_tick = tick;
 			return &slot;
@@ -1811,6 +1814,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 		slot.accum_n = zero_val;
 		slot.accum_t.reset();
 		slot.impact_speed = impact_speed;
+		slot.toi = toi;
 		slot.separation = separation;
 		slot.last_tick = tick;
 		return &slot;
@@ -1937,6 +1941,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				p.accum_t.set(slot.accum_t);
 			}
 			p.impact_speed = slot.impact_speed;
+			p.toi = slot.toi;
 			p.separation = slot.separation;  // carried from the iterating side's slot (same as normal/impact)
 			// Combine the two bodies' coefficients of restitution. When the
 			// bodies' modes differ the higher-precedence one governs (larger
@@ -2105,9 +2110,17 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// the fixed point and it sleeps, which is why only the bounciest bodies hung.
 		// Subtracting the tick's own external increment makes the reference the approach
 		// the bodies arrived with, so |target| <= |approach| holds against gravity too.
+		// Only the share of that increment the body has NOT yet paid for with travel is
+		// free energy. A sweep_slide body that fell a full tick to reach the contact
+		// genuinely is going g·dt faster at the surface, and subtracting all of it throws
+		// away the fall's kinetic energy — one tick of height, every bounce. Scaling by
+		// (1 - toi) covers both ends: toi 0 (already resting on the contact, no travel
+		// this tick) keeps the whole subtraction; toi -> 1 (fell the entire tick into the
+		// surface) keeps none. The speculative path records toi 0 because Pass A moves
+		// nothing, so it is unaffected.
 		vec3<T> dv_ext;
 		sub(dv_ext, p.b->ext_dv_, p.a->ext_dv_); // same b − a convention as vrel
-		const T vn_rest = p.vn0 - dot(dv_ext, p.normal);
+		const T vn_rest = p.vn0 - dot(dv_ext, p.normal) * (one - p.toi);
 		// Restitution target and the λ mass-scale are constant across all GS
 		// sweeps for this pair, so derive them once here rather than per
 		// iteration in the hot loop below.
