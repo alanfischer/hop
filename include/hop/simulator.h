@@ -280,6 +280,7 @@ public:
 			// Each integration path accumulates into this (the angular-CCD loop below
 			// calls update_solid several times), so it starts the tick at zero.
 			s->ext_dv_.reset();
+			s->ext_dv_unearned_ = tr::one(); // until the sweep proves travel; see update_solid
 			if (manager_) manager_->pre_update(s, dt);
 			if (s->uses_speculative_solve()) {
 				any_speculative = true;
@@ -340,13 +341,13 @@ public:
 			manager_->post_update(dt);
 	}
 
-	// whole_tick: does this call span the entire tick? The touch cache's toi credits a
-	// contact with the share of ext_dv_ the body earned by travelling, and ext_dv_ spans
-	// the tick — so only a call that owns the whole tick can measure that share. The
+	// whole_tick: does this call span the entire tick? ext_dv_unearned_ records the share
+	// of ext_dv_ the body has NOT earned by travelling, and ext_dv_ spans the tick — so
+	// only a call that owns the whole tick can measure that share. The
 	// angular-CCD loop calls this N times at dt/N and keeps sub-stepping AFTER a contact
 	// is recorded, adding increments and motion no single sub-step's fraction accounts
 	// for; crediting there injects energy (float grew unboundedly, 2.5x over 425 bounces).
-	// Those bodies record toi 0 and pay the full, conservative subtraction, as before.
+	// Those bodies leave the share at 1 and pay the full, conservative subtraction.
 	// Crediting them properly needs Pass A to accumulate the earned increment itself.
 	void update_solid(solid<T> * solid_ptr, T dt, bool whole_tick = true);
 	// Speculative path (contact_mode::speculative). Pass A integrates velocity and
@@ -558,7 +559,6 @@ private:
 	                                                const vec3<T> & impact,
 	                                                const vec3<T> & swept_center,
 	                                                T impact_speed,
-	                                                T toi,
 	                                                T separation,
 	                                                int tick);
 	// Find an existing cache slot for (s, partner) or nullptr.
@@ -628,7 +628,6 @@ private:
 		T accum_n {};                // accumulated normal impulse magnitude (>= 0)
 		vec3<T> accum_t;             // accumulated friction impulse (a-side convention)
 		T impact_speed {};           // approach speed at TOI, for restitution
-		T toi {};                    // fraction of the tick consumed reaching the contact (see touch::toi)
 		T separation {};             // signed gap along normal (0 touching, <0 penetrating); for the speculative target
 		T vn0 {};                    // relative normal velocity entering the GS (after warm-start)
 		T cor {};                    // combined restitution
@@ -942,8 +941,9 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	vec3<T> slide_vel(solid_ptr->velocity_);
 	// Fraction of this call's path already behind us. Each trace below covers only the
 	// motion left after the previous contact, so c.time is a fraction of the remainder;
-	// composing it here keeps the touch cache's toi a fraction of the whole tick.
+	// composing it here keeps the recorded share a fraction of the whole tick.
 	T consumed {};
+	bool first_contact = true;
 	while (true) {
 		if (!first) {
 			sub(temp, new_pos, old_pos);
@@ -1053,8 +1053,17 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
 				consumed += (one - consumed) * c.time;
-				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed,
-				                     whole_tick ? consumed : T {}, separation, current_tick_);
+				// First contact only: the body earned `consumed` of this tick's external
+				// increment by travelling here, so the rest is what restitution must
+				// subtract. Taking the first (smallest) of several contacts keeps the
+				// subtraction largest, i.e. dissipative, and it is exact in the
+				// one-contact case that matters. Only a call owning the whole tick can
+				// measure this — see the whole_tick contract on update_solid.
+				if (whole_tick && first_contact) {
+					solid_ptr->ext_dv_unearned_ = one - consumed;
+					first_contact = false;
+				}
+				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly. On the
 				// approach the pair actually had: this tick's own gravity increment is
@@ -1377,9 +1386,9 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			}
 		}
 
-		// toi 0: this path discovers contacts without moving, so none of the tick's
-		// external increment has been earned by travel when solve_contacts reads it.
-		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, T {}, separation, current_tick_);
+		// ext_dv_unearned_ stays 1 on this path: it discovers contacts without moving, so
+		// none of the tick's external increment has been earned by travel.
+		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, separation, current_tick_);
 
 		// Wake a real sleeping partner so it participates in the solve (the world
 		// anchor never sleeps).
@@ -1782,7 +1791,7 @@ typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * par
 
 template <typename T>
 typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
-    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, const vec3<T> & swept_center, T impact_speed, T toi, T separation, int tick) {
+    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, const vec3<T> & swept_center, T impact_speed, T separation, int tick) {
 	const T zero_val {};
 
 	// Body-frame contact offset: the contact point relative to s's center at the
@@ -1808,12 +1817,8 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 			slot.normal.set(normal);
 			slot.impact.set(impact);
 			slot.lever.set(lever);
-			// toi is consumed by the same restitution expression as impact_speed, so it
-			// has to describe the impact that supplied it — move the two together rather
-			// than pairing the strongest hit's speed with the last hit's timing.
 			if (slot.last_tick != tick || impact_speed > slot.impact_speed) {
 				slot.impact_speed = impact_speed;
-				slot.toi = toi;
 			}
 			slot.separation = separation;
 			slot.last_tick = tick;
@@ -1831,7 +1836,6 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 		slot.accum_n = zero_val;
 		slot.accum_t.reset();
 		slot.impact_speed = impact_speed;
-		slot.toi = toi;
 		slot.separation = separation;
 		slot.last_tick = tick;
 		return &slot;
@@ -1860,7 +1864,6 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 	slot.accum_n = zero_val;
 	slot.accum_t.reset();
 	slot.impact_speed = impact_speed;
-	slot.toi = toi;
 	slot.separation = separation;
 	slot.last_tick = tick;
 	return &slot;
@@ -1959,7 +1962,6 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				p.accum_t.set(slot.accum_t);
 			}
 			p.impact_speed = slot.impact_speed;
-			p.toi = slot.toi;
 			p.separation = slot.separation;  // carried from the iterating side's slot (same as normal/impact)
 			// Combine the two bodies' coefficients of restitution. When the
 			// bodies' modes differ the higher-precedence one governs (larger
@@ -2131,11 +2133,14 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// Only the UNTRAVELLED share of that increment is free energy: a body that fell
 		// the whole tick into the surface really is g·dt faster there, so subtracting all
 		// of it discards the fall's kinetic energy — one tick of height, every bounce.
-		// Hence (1 - toi): toi 0 (already resting, no travel this tick) keeps the whole
-		// subtraction, toi -> 1 keeps none.
-		vec3<T> dv_ext;
-		sub(dv_ext, p.b->ext_dv_, p.a->ext_dv_); // same b − a convention as vrel
-		const T vn_rest = p.vn0 - dot(dv_ext, p.normal) * (one - p.toi);
+		// Each side scales its own increment by its own unearned share (see
+		// solid::ext_dv_unearned_), which stays 1 for a resting body and for every body
+		// on the speculative path, so those keep the full subtraction.
+		vec3<T> dv_ext, dv_a;
+		mul(dv_ext, p.b->ext_dv_, p.b->ext_dv_unearned_);
+		mul(dv_a, p.a->ext_dv_, p.a->ext_dv_unearned_);
+		sub(dv_ext, dv_a); // same b − a convention as vrel
+		const T vn_rest = p.vn0 - dot(dv_ext, p.normal);
 		// Restitution target and the λ mass-scale are constant across all GS
 		// sweeps for this pair, so derive them once here rather than per
 		// iteration in the hot loop below.

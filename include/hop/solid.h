@@ -62,7 +62,6 @@ public:
 		T          accum_n {};        // accumulated normal impulse magnitude (>= 0)
 		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
 		T          impact_speed {};   // approach speed at TOI; drives restitution target
-		T          toi {};            // fraction of the tick already consumed reaching this contact (0 = at tick start, 1 = end of step)
 		T          separation {};     // signed gap along normal at discovery: 0 touching, <0 penetrating (speculative target)
 		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
 		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
@@ -100,6 +99,7 @@ public:
 		velocity_.reset();
 		angular_velocity_.reset();
 		ext_dv_.reset();
+		ext_dv_unearned_ = tr::one();
 		force_.reset();
 		torque_.reset();
 		inertia_.reset();
@@ -381,6 +381,7 @@ public:
 		// instant a neighbour wakes the body. Zero it so sleep means rest.
 		velocity_.reset();
 		ext_dv_.reset();
+		ext_dv_unearned_ = tr::one();
 	}
 	bool active() const { return active_ && simulator_ != nullptr; }
 
@@ -442,6 +443,7 @@ private:
 	mat3<T> inv_inertia_world_;   // cached R·diag(inv_inertia_)·Rᵀ; see get_inv_inertia_world/update_inv_inertia_world. Zero for a non-rotating body
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
 	vec3<T> ext_dv_;              // velocity this tick's integration added from external acceleration (gravity, drag, force_); solve_contacts subtracts it out of the restitution reference. Zero for a body that didn't integrate
+	T ext_dv_unearned_ {};        // share of ext_dv_ NOT yet paid for by travel, in [0,1]; solve_contacts scales ext_dv_ by it. 1 = body never moved this tick (subtract it all), 0 = it travelled the whole tick into its contact (subtract none). Set by update_solid's sweep; left 1 everywhere else
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
 	contact_mode contact_mode_ = contact_mode::sweep_slide;  // positioning strategy (see contact_mode)
 	aa_box<T> world_bound_;       // broad phase reads this
