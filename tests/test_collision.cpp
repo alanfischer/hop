@@ -117,6 +117,23 @@ template <typename T> static std::shared_ptr<solid<T>> make_floor(simulator<T> &
 	return wall;
 }
 
+// Helper: a static, perfectly elastic, FRICTIONLESS box at `pos`. Friction is averaged
+// across a pair (see solve_contacts), so make_floor's default 0.5 would dissipate on any
+// angled hit — energy-conservation tests need this instead.
+template <typename T> static std::shared_ptr<solid<T>> make_frictionless_wall(simulator<T> & sim, const aa_box<T> & box, const vec3<T> & pos) {
+	using tr = scalar_traits<T>;
+	auto wall = std::make_shared<solid<T>>();
+	wall->set_infinite_mass();
+	wall->set_coefficient_of_gravity(T {});
+	wall->set_coefficient_of_restitution(tr::one());
+	wall->set_coefficient_of_static_friction(T {});
+	wall->set_coefficient_of_dynamic_friction(T {});
+	wall->add_shape(std::make_shared<shape<T>>(box));
+	wall->set_position(pos);
+	sim.add_solid(wall);
+	return wall;
+}
+
 // Helper: create a convex cube with given half-extent
 template <typename T> static hop::convex_solid<T> make_convex_cube(T half) {
 	using tr = scalar_traits<T>;
@@ -156,6 +173,22 @@ template <typename T> static std::shared_ptr<solid<T>> make_convex_floor(simulat
 	return wall;
 }
 
+// A frictionless, perfectly elastic unit-mass sphere dropped from z — the recipe both
+// bounce tests below need.
+template <typename T> static std::shared_ptr<solid<T>> make_bouncy_sphere(simulator<T> & sim, T z) {
+	using tr = scalar_traits<T>;
+	auto s = std::make_shared<solid<T>>();
+	s->set_mass(tr::one());
+	s->set_coefficient_of_restitution(tr::one());
+	s->set_restitution_combine(restitution_combine::minimum);
+	s->set_coefficient_of_static_friction(T {});
+	s->set_coefficient_of_dynamic_friction(T {});
+	s->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
+	s->set_position({ T {}, T {}, z });
+	sim.add_solid(s);
+	return s;
+}
+
 // Test: sphere drops onto floor and bounces (COR=1 should preserve energy)
 template <typename T> static void test_sphere_floor_bounce(const char * label) {
 	using tr = scalar_traits<T>;
@@ -164,15 +197,7 @@ template <typename T> static void test_sphere_floor_bounce(const char * label) {
 
 	make_floor(sim);
 
-	auto sphere = std::make_shared<solid<T>>();
-	sphere->set_mass(tr::one());
-	sphere->set_coefficient_of_restitution(tr::one());
-	sphere->set_restitution_combine(restitution_combine::minimum);
-	sphere->set_coefficient_of_static_friction(T {});
-	sphere->set_coefficient_of_dynamic_friction(T {});
-	sphere->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
-	sphere->set_position({ T {}, T {}, tr::from_int(5) });
-	sim.add_solid(sphere);
+	auto sphere = make_bouncy_sphere(sim, tr::from_int(5));
 
 	for (int i = 0; i < 200; ++i)
 		sim.update(tr::from_milli(10));
@@ -183,54 +208,78 @@ template <typename T> static void test_sphere_floor_bounce(const char * label) {
 	printf("OK\n");
 }
 
-// Test: a cor=1 ball bouncing on a floor must not bleed energy tick after tick.
-// The restitution reference subtracts the tick's own external (gravity) increment so
-// a bounce can't return free energy — but a sweep_slide body reaches the contact by
-// falling through that same tick, and subtracting the whole increment threw away the
-// fall's kinetic energy: one tick of height per bounce. Float and fixed32 hid it by
-// staying phase-locked to the tick grid; fixed16's quantized rebound broke the lock
-// and lost ~4% per bounce (demo_bounce --fixed visibly died down). Scaling the
-// subtraction by the untravelled fraction of the tick (1 - toi) fixes both ends, so
-// total energy must now hold across many bounces in every scalar type.
+// Worst fraction of its initial energy a frictionless cor=1 body keeps over `ticks`.
+// E = ½v² + g·h in float, so one threshold reads the same for every T; g comes from
+// the simulator so the potential term uses the value the integrator actually applied.
+// Tracks the minimum rather than the final sample because energy oscillates within a
+// bounce, making an end-of-run reading phase-dependent.
+template <typename T> static float retained_energy(simulator<T> & sim, const solid<T> & body, int ticks) {
+	using tr = scalar_traits<T>;
+	const float g = -tr::to_float(sim.get_gravity().z);
+	auto energy = [&]() {
+		return 0.5f * tr::to_float(length_squared(body.get_velocity())) + g * tr::to_float(body.get_position().z);
+	};
+	sim.update(tr::from_milli(16)); // one tick in, so e0 is a post-gravity baseline
+	const float e0 = energy();
+	float lowest = e0;
+	for (int i = 0; i < ticks; ++i) {
+		sim.update(tr::from_milli(16));
+		float e = energy();
+		if (e < lowest)
+			lowest = e;
+	}
+	return lowest / e0;
+}
+
+// Test: a cor=1 ball bouncing on a floor must not bleed energy tick after tick. The
+// restitution reference credits only the untravelled part of the tick's gravity
+// increment (see solve_contacts); crediting none of it cost one tick of height per
+// bounce. Checks total energy rather than a z-height because float and fixed32 hide
+// the leak whenever they stay phase-locked to the tick grid — only fixed16's
+// quantized rebound broke that lock, so a height check would pass on two of three.
 template <typename T> static void test_bounce_energy_conservation(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  bounce_energy_conservation[%s]: ", label);
 	simulator<T> sim;
 
 	make_floor(sim);
+	auto ball = make_bouncy_sphere(sim, tr::from_int(3));
 
-	auto ball = std::make_shared<solid<T>>();
-	ball->set_mass(tr::one());
-	ball->set_coefficient_of_restitution(tr::one());
-	ball->set_restitution_combine(restitution_combine::minimum);
-	ball->set_coefficient_of_static_friction(T {});
-	ball->set_coefficient_of_dynamic_friction(T {});
-	ball->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::half())));
-	ball->set_position({ T {}, T {}, tr::from_int(3) });
-	sim.add_solid(ball);
-
-	// E = ½v² + g·h, sampled in float so the check reads the same for every T.
-	const float g = 9.8f;
-	auto energy = [&]() {
-		float z = tr::to_float(ball->get_position().z);
-		float v = tr::to_float(ball->get_velocity().z);
-		return 0.5f * v * v + g * z;
-	};
-
-	sim.update(tr::from_milli(16));
-	const float e0 = energy();
-	float lowest = e0;
-	for (int i = 0; i < 1200; ++i) {  // ~13 bounces at dt = 16 ms
-		sim.update(tr::from_milli(16));
-		float e = energy();
-		if (e < lowest)
-			lowest = e;
-	}
-	float retained = lowest / e0;
+	float retained = retained_energy(sim, *ball, 1200); // ~13 bounces at dt = 16 ms
 	printf("retained=%.3f ", retained);
 	// Pre-fix: fixed16 fell to 0.56, float to 0.87. The residual few percent is the
 	// tick-quantized bounce itself, not a drift.
 	assert(retained > 0.97f);
+	printf("OK\n");
+}
+
+// Test: the same conservation check with angled hits and multi-contact ticks, where
+// update_solid's sweep snaps to one contact and slides the remainder into the next.
+// Guards the whole path rather than the head-on case the test above pins; note it does
+// NOT discriminate the toi composition on its own, since the second contact here is a
+// vertical wall and gravity has no component along that normal.
+template <typename T> static void test_corner_bounce_energy_conservation(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  corner_bounce_energy_conservation[%s]: ", label);
+	simulator<T> sim;
+
+	// Closed frictionless room, so the body keeps hitting things for the whole run.
+	const T zero {}, h = tr::from_int(3), thick = tr::one(), top = tr::from_int(6);
+	make_frictionless_wall(sim, aa_box<T>(vec3<T>(-h, -h, -thick), vec3<T>(h, h, zero)), vec3<T>());
+	make_frictionless_wall(sim, aa_box<T>(vec3<T>(-h, -h, zero), vec3<T>(h, h, thick)), vec3<T>(zero, zero, top));
+	make_frictionless_wall(sim, aa_box<T>(vec3<T>(-thick, -h, zero), vec3<T>(zero, h, top)), vec3<T>(-h, zero, zero));
+	make_frictionless_wall(sim, aa_box<T>(vec3<T>(zero, -h, zero), vec3<T>(thick, h, top)), vec3<T>(h, zero, zero));
+	make_frictionless_wall(sim, aa_box<T>(vec3<T>(-h, -thick, zero), vec3<T>(h, zero, top)), vec3<T>(zero, -h, zero));
+	make_frictionless_wall(sim, aa_box<T>(vec3<T>(-h, zero, zero), vec3<T>(h, thick, top)), vec3<T>(zero, h, zero));
+
+	auto ball = make_bouncy_sphere(sim, tr::from_int(4));
+	ball->set_position({ tr::one(), zero, tr::from_int(4) });
+	// Aimed into a corner fast enough that a floor and a wall land in the same tick.
+	ball->set_velocity({ -tr::from_int(7), -tr::from_int(6), -tr::from_int(5) });
+
+	float retained = retained_energy(sim, *ball, 1500);
+	printf("retained=%.3f ", retained);
+	assert(retained > 0.97f); // pre-fix: 0.895
 	printf("OK\n");
 }
 
@@ -1517,6 +1566,7 @@ template <typename T> static void run_all_tests(const char * label) {
 	test_box_stack<T>(label);
 	test_sphere_floor_bounce<T>(label);
 	test_bounce_energy_conservation<T>(label);
+	test_corner_bounce_energy_conservation<T>(label);
 	test_box_box_collision<T>(label);
 	test_sphere_sphere_collision<T>(label);
 	test_capsule_box_collision<T>(label);

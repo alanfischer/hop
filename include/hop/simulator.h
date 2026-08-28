@@ -303,7 +303,7 @@ public:
 							s->force_ = ext_force;
 							s->torque_ = ext_torque;
 						}
-						update_solid(s, sub);
+						update_solid(s, sub, /*whole_tick*/ false);
 					}
 				}
 				if (manager_) manager_->post_update(s, dt);
@@ -340,7 +340,15 @@ public:
 			manager_->post_update(dt);
 	}
 
-	void update_solid(solid<T> * solid_ptr, T dt);
+	// whole_tick: does this call span the entire tick? The touch cache's toi credits a
+	// contact with the share of ext_dv_ the body earned by travelling, and ext_dv_ spans
+	// the tick — so only a call that owns the whole tick can measure that share. The
+	// angular-CCD loop calls this N times at dt/N and keeps sub-stepping AFTER a contact
+	// is recorded, adding increments and motion no single sub-step's fraction accounts
+	// for; crediting there injects energy (float grew unboundedly, 2.5x over 425 bounces).
+	// Those bodies record toi 0 and pay the full, conservative subtraction, as before.
+	// Crediting them properly needs Pass A to accumulate the earned increment itself.
+	void update_solid(solid<T> * solid_ptr, T dt, bool whole_tick = true);
 	// Speculative path (contact_mode::speculative). Pass A integrates velocity and
 	// discovers contacts without moving the body; Pass B commits the position from
 	// the solved velocity and handles deactivation.
@@ -782,7 +790,7 @@ template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr,
 	solid_ptr->clear_torque();
 }
 
-template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt) {
+template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt, bool whole_tick) {
 	vec3<T> old_pos;
 	vec3<T> new_pos;
 	vec3<T> vel;
@@ -932,6 +940,10 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	// into a previously-hit wall. solid_ptr->velocity_ is left untouched so
 	// solve_contacts still sees the true pre-impact velocity for restitution.
 	vec3<T> slide_vel(solid_ptr->velocity_);
+	// Fraction of this call's path already behind us. Each trace below covers only the
+	// motion left after the previous contact, so c.time is a fraction of the remainder;
+	// composing it here keeps the touch cache's toi a fraction of the whole tick.
+	T consumed {};
 	while (true) {
 		if (!first) {
 			sub(temp, new_pos, old_pos);
@@ -1040,7 +1052,9 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// the legacy restitution response for this contact (the speculative
 				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
-				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, c.time, separation, current_tick_);
+				consumed += (one - consumed) * c.time;
+				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed,
+				                     whole_tick ? consumed : T {}, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly. On the
 				// approach the pair actually had: this tick's own gravity increment is
@@ -1363,6 +1377,8 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			}
 		}
 
+		// toi 0: this path discovers contacts without moving, so none of the tick's
+		// external increment has been earned by travel when solve_contacts reads it.
 		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, T {}, separation, current_tick_);
 
 		// Wake a real sleeping partner so it participates in the solve (the world
@@ -1792,12 +1808,13 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 			slot.normal.set(normal);
 			slot.impact.set(impact);
 			slot.lever.set(lever);
-			if (slot.last_tick != tick) {
+			// toi is consumed by the same restitution expression as impact_speed, so it
+			// has to describe the impact that supplied it — move the two together rather
+			// than pairing the strongest hit's speed with the last hit's timing.
+			if (slot.last_tick != tick || impact_speed > slot.impact_speed) {
 				slot.impact_speed = impact_speed;
-			} else if (impact_speed > slot.impact_speed) {
-				slot.impact_speed = impact_speed;
+				slot.toi = toi;
 			}
-			slot.toi = toi;
 			slot.separation = separation;
 			slot.last_tick = tick;
 			return &slot;
@@ -1843,6 +1860,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 	slot.accum_n = zero_val;
 	slot.accum_t.reset();
 	slot.impact_speed = impact_speed;
+	slot.toi = toi;
 	slot.separation = separation;
 	slot.last_tick = tick;
 	return &slot;
@@ -2110,14 +2128,11 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// the fixed point and it sleeps, which is why only the bounciest bodies hung.
 		// Subtracting the tick's own external increment makes the reference the approach
 		// the bodies arrived with, so |target| <= |approach| holds against gravity too.
-		// Only the share of that increment the body has NOT yet paid for with travel is
-		// free energy. A sweep_slide body that fell a full tick to reach the contact
-		// genuinely is going g·dt faster at the surface, and subtracting all of it throws
-		// away the fall's kinetic energy — one tick of height, every bounce. Scaling by
-		// (1 - toi) covers both ends: toi 0 (already resting on the contact, no travel
-		// this tick) keeps the whole subtraction; toi -> 1 (fell the entire tick into the
-		// surface) keeps none. The speculative path records toi 0 because Pass A moves
-		// nothing, so it is unaffected.
+		// Only the UNTRAVELLED share of that increment is free energy: a body that fell
+		// the whole tick into the surface really is g·dt faster there, so subtracting all
+		// of it discards the fall's kinetic energy — one tick of height, every bounce.
+		// Hence (1 - toi): toi 0 (already resting, no travel this tick) keeps the whole
+		// subtraction, toi -> 1 keeps none.
 		vec3<T> dv_ext;
 		sub(dv_ext, p.b->ext_dv_, p.a->ext_dv_); // same b − a convention as vrel
 		const T vn_rest = p.vn0 - dot(dv_ext, p.normal) * (one - p.toi);
