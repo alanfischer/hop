@@ -99,6 +99,7 @@ public:
 		velocity_.reset();
 		angular_velocity_.reset();
 		ext_dv_.reset();
+		ext_dv_unearned_ = tr::one();
 		force_.reset();
 		torque_.reset();
 		inertia_.reset();
@@ -110,7 +111,6 @@ public:
 		coefficient_of_static_friction_ = tr::half();
 		coefficient_of_dynamic_friction_ = tr::half();
 		coefficient_of_effective_drag_ = T {};
-		shape_types_ = 0;
 		local_bound_.reset();
 		world_bound_.reset();
 		collision_callback_ = nullptr;
@@ -318,7 +318,6 @@ public:
 		activate();
 	}
 	const std::vector<typename shape<T>::ptr> & get_shapes() const { return shapes_; }
-	int get_shape_types() const { return shape_types_; }
 
 	const aa_box<T> & get_local_bound() const { return local_bound_; }
 	const aa_box<T> & get_world_bound() const { return world_bound_; }
@@ -380,21 +379,19 @@ public:
 		// instant a neighbour wakes the body. Zero it so sleep means rest.
 		velocity_.reset();
 		ext_dv_.reset();
+		ext_dv_unearned_ = tr::one();
 	}
 	bool active() const { return active_ && simulator_ != nullptr; }
 
 	void update_local_bound() {
-		shape_types_ = 0;
 		if (shapes_.empty()) {
 			local_bound_.reset();
 		} else {
-			shape_types_ |= static_cast<int>(shapes_[0]->get_type());
 			shapes_[0]->get_bound(local_bound_);
 			rotate_aabb(local_bound_, local_bound_, shapes_[0]->get_local_rotation());
 			add(local_bound_, shapes_[0]->get_local_position());
 			aa_box<T> box;
 			for (int i = 1; i < static_cast<int>(shapes_.size()); ++i) {
-				shape_types_ |= static_cast<int>(shapes_[i]->get_type());
 				shapes_[i]->get_bound(box);
 				rotate_aabb(box, box, shapes_[i]->get_local_rotation());
 				add(box, shapes_[i]->get_local_position());
@@ -441,12 +438,12 @@ private:
 	mat3<T> inv_inertia_world_;   // cached R·diag(inv_inertia_)·Rᵀ; see get_inv_inertia_world/update_inv_inertia_world. Zero for a non-rotating body
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
 	vec3<T> ext_dv_;              // velocity this tick's integration added from external acceleration (gravity, drag, force_); solve_contacts subtracts it out of the restitution reference. Zero for a body that didn't integrate
+	T ext_dv_unearned_ {};        // share of ext_dv_ NOT yet paid for by travel, in [0,1]; solve_contacts scales ext_dv_ by it. 1 = body never moved this tick (subtract it all), 0 = it travelled the whole tick into its contact (subtract none). Set by update_solid's sweep; left 1 everywhere else
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
 	contact_mode contact_mode_ = contact_mode::sweep_slide;  // positioning strategy (see contact_mode)
 	aa_box<T> world_bound_;       // broad phase reads this
 	aa_box<T> local_bound_;
 	std::vector<typename shape<T>::ptr> shapes_;
-	int shape_types_ = 0;
 	T mass_ {};
 	T inv_mass_ {};
 	T coefficient_of_gravity_ {};

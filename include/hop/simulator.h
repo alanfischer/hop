@@ -280,6 +280,7 @@ public:
 			// Each integration path accumulates into this (the angular-CCD loop below
 			// calls update_solid several times), so it starts the tick at zero.
 			s->ext_dv_.reset();
+			s->ext_dv_unearned_ = tr::one(); // until the sweep proves travel; see update_solid
 			if (manager_) manager_->pre_update(s, dt);
 			if (s->uses_speculative_solve()) {
 				any_speculative = true;
@@ -303,7 +304,7 @@ public:
 							s->force_ = ext_force;
 							s->torque_ = ext_torque;
 						}
-						update_solid(s, sub);
+						update_solid(s, sub, /*whole_tick*/ false);
 					}
 				}
 				if (manager_) manager_->post_update(s, dt);
@@ -340,7 +341,15 @@ public:
 			manager_->post_update(dt);
 	}
 
-	void update_solid(solid<T> * solid_ptr, T dt);
+	// whole_tick: does this call span the entire tick? ext_dv_unearned_ records the share
+	// of ext_dv_ the body has NOT earned by travelling, and ext_dv_ spans the tick — so
+	// only a call that owns the whole tick can measure that share. The
+	// angular-CCD loop calls this N times at dt/N and keeps sub-stepping AFTER a contact
+	// is recorded, adding increments and motion no single sub-step's fraction accounts
+	// for; crediting there injects energy (float grew unboundedly, 2.5x over 425 bounces).
+	// Those bodies leave the share at 1 and pay the full, conservative subtraction.
+	// Crediting them properly needs Pass A to accumulate the earned increment itself.
+	void update_solid(solid<T> * solid_ptr, T dt, bool whole_tick = true);
 	// Speculative path (contact_mode::speculative). Pass A integrates velocity and
 	// discovers contacts without moving the body; Pass B commits the position from
 	// the solved velocity and handles deactivation.
@@ -780,7 +789,7 @@ template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr,
 	solid_ptr->clear_torque();
 }
 
-template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt) {
+template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt, bool whole_tick) {
 	vec3<T> old_pos;
 	vec3<T> new_pos;
 	vec3<T> vel;
@@ -930,6 +939,11 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	// into a previously-hit wall. solid_ptr->velocity_ is left untouched so
 	// solve_contacts still sees the true pre-impact velocity for restitution.
 	vec3<T> slide_vel(solid_ptr->velocity_);
+	// Fraction of this call's path already behind us. Each trace below covers only the
+	// motion left after the previous contact, so c.time is a fraction of the remainder;
+	// composing it here keeps the recorded share a fraction of the whole tick.
+	T consumed {};
+	bool first_contact = true;
 	while (true) {
 		if (!first) {
 			sub(temp, new_pos, old_pos);
@@ -1038,6 +1052,17 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// the legacy restitution response for this contact (the speculative
 				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
+				consumed += (one - consumed) * c.time;
+				// First contact only: the body earned `consumed` of this tick's external
+				// increment by travelling here, so the rest is what restitution must
+				// subtract. Taking the first (smallest) of several contacts keeps the
+				// subtraction largest, i.e. dissipative, and it is exact in the
+				// one-contact case that matters. Only a call owning the whole tick can
+				// measure this — see the whole_tick contract on update_solid.
+				if (whole_tick && first_contact) {
+					solid_ptr->ext_dv_unearned_ = one - consumed;
+					first_contact = false;
+				}
 				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, separation, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly. On the
@@ -1361,6 +1386,8 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			}
 		}
 
+		// ext_dv_unearned_ stays 1 on this path: it discovers contacts without moving, so
+		// none of the tick's external increment has been earned by travel.
 		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, separation, current_tick_);
 
 		// Wake a real sleeping partner so it participates in the solve (the world
@@ -1790,9 +1817,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 			slot.normal.set(normal);
 			slot.impact.set(impact);
 			slot.lever.set(lever);
-			if (slot.last_tick != tick) {
-				slot.impact_speed = impact_speed;
-			} else if (impact_speed > slot.impact_speed) {
+			if (slot.last_tick != tick || impact_speed > slot.impact_speed) {
 				slot.impact_speed = impact_speed;
 			}
 			slot.separation = separation;
@@ -2105,8 +2130,16 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// the fixed point and it sleeps, which is why only the bounciest bodies hung.
 		// Subtracting the tick's own external increment makes the reference the approach
 		// the bodies arrived with, so |target| <= |approach| holds against gravity too.
-		vec3<T> dv_ext;
-		sub(dv_ext, p.b->ext_dv_, p.a->ext_dv_); // same b − a convention as vrel
+		// Only the UNTRAVELLED share of that increment is free energy: a body that fell
+		// the whole tick into the surface really is g·dt faster there, so subtracting all
+		// of it discards the fall's kinetic energy — one tick of height, every bounce.
+		// Each side scales its own increment by its own unearned share (see
+		// solid::ext_dv_unearned_), which stays 1 for a resting body and for every body
+		// on the speculative path, so those keep the full subtraction.
+		vec3<T> dv_ext, dv_a;
+		mul(dv_ext, p.b->ext_dv_, p.b->ext_dv_unearned_);
+		mul(dv_a, p.a->ext_dv_, p.a->ext_dv_unearned_);
+		sub(dv_ext, dv_a); // same b − a convention as vrel
 		const T vn_rest = p.vn0 - dot(dv_ext, p.normal);
 		// Restitution target and the λ mass-scale are constant across all GS
 		// sweeps for this pair, so derive them once here rather than per
