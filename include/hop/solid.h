@@ -63,10 +63,17 @@ public:
 		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
 		T          impact_speed {};   // approach speed at TOI; drives restitution target
 		T          separation {};     // signed gap along normal at discovery: 0 touching, <0 penetrating (speculative target)
+		// Which point of a patch this is; 0 for a single-point contact. The cache keys
+		// on (partner, feature) so each point keeps its own accumulated impulse.
+		int        feature = 0;
 		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
 		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
 	};
-	static constexpr int max_touches = 12;
+	// Was 12, one per partner. A patched partner holds one slot per point, so a body
+	// wedged in a corner needs three patches' worth plus a few ordinary partners.
+	// Paid by every body, and it does not make a patch un-evictable: eviction scores
+	// by gravity alignment, where a patch's points score identically.
+	static constexpr int max_touches = collision<T>::max_patch_points * 3 + 4;
 
 	static T infinite_mass() { return -tr::one(); }
 

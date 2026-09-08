@@ -544,6 +544,8 @@ private:
 	// When the cache is full and the partner is new, evict the slot
 	// contributing least to gravity-aligned support (smallest dot(n, -g)),
 	// tie-breaking by oldest last_tick.
+	// `feature` names the point within a patch (0 = single-point contact); the cache
+	// keys on it alongside the partner so each point keeps its own warm start.
 	typename solid<T>::touch * add_or_refresh_touch(solid<T> * s,
 	                                                solid<T> * partner,
 	                                                const vec3<T> & normal,
@@ -551,9 +553,10 @@ private:
 	                                                const vec3<T> & swept_center,
 	                                                T impact_speed,
 	                                                T separation,
-	                                                int tick);
-	// Find an existing cache slot for (s, partner) or nullptr.
-	typename solid<T>::touch * find_touch(solid<T> * s, solid<T> * partner);
+	                                                int tick,
+	                                                int feature);
+	// Find an existing cache slot for (s, partner, feature) or nullptr.
+	typename solid<T>::touch * find_touch(solid<T> * s, solid<T> * partner, int feature);
 
 	// has_speculative gates the speculative-only shock-propagation phase (true when
 	// any body resolved this tick uses the speculative solve).
@@ -1010,7 +1013,9 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			// Collision callback recording. Suppress on sustained contact
 			// (partner was already touched last tick) so callbacks fire on
 			// the impact, not on every refresh frame of a resting pile.
-			typename solid<T>::touch * existing = hit_solid ? find_touch(solid_ptr, hit_solid) : nullptr;
+			// sweep_slide resolves by iterated slide, not solver rows: always one point.
+			typename solid<T>::touch * existing =
+				hit_solid ? find_touch(solid_ptr, hit_solid, collision<T>::no_feature) : nullptr;
 			bool sustained = (existing != nullptr && existing->last_tick == current_tick_ - 1);
 			if (!sustained &&
 			    (solid_ptr->collision_callback_ != nullptr ||
@@ -1038,7 +1043,9 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// the legacy restitution response for this contact (the speculative
 				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
-				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, separation, current_tick_);
+				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point,
+				                     impact_speed, separation, current_tick_,
+				                     collision<T>::no_feature);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly. On the
 				// approach the pair actually had: this tick's own gravity increment is
@@ -1304,8 +1311,10 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// to stay put. Contacts discovered later this tick are not re-traced from the
 	// new position, unlike the legacy slide loop, so claim-and-relocate is intended
 	// for the destroy / single-contact cases.)
-	auto record_contact = [&](solid<T> * partner) {
-		const vec3<T> & n = col.normal;
+	// `pt` is the point being recorded; time, origin and the pair are shared across a
+	// patch and read from `col`.
+	auto record_contact = [&](solid<T> * partner, const typename collision<T>::patch_point & pt) {
+		const vec3<T> & n = pt.normal;
 		const bool partner_is_world = (partner == &static_world_);
 
 		// Signed gap along the normal at the body's current (start) position. Shapes
@@ -1317,7 +1326,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		// still to cover.
 		T separation;
 		if (col.time <= zero) {
-			separation = spec_margin_ - col.depth;
+			separation = spec_margin_ - pt.depth;
 		} else {
 			vec3<T> to_contact;
 			sub(to_contact, col.point, old_pos);
@@ -1336,7 +1345,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			impact_speed = zero;
 
 		// Callback recording, suppressed on sustained contact (as update_solid).
-		typename solid<T>::touch * existing = find_touch(solid_ptr, partner);
+		typename solid<T>::touch * existing = find_touch(solid_ptr, partner, pt.feature);
 		bool sustained = (existing != nullptr && existing->last_tick == current_tick_ - 1);
 		if (!sustained && (solid_ptr->collision_callback_ != nullptr ||
 		                   (!partner_is_world && partner->collision_callback_ != nullptr))) {
@@ -1361,7 +1370,8 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			}
 		}
 
-		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, separation, current_tick_);
+		add_or_refresh_touch(solid_ptr, partner, n, pt.impact, col.point, impact_speed,
+		                     separation, current_tick_, pt.feature);
 
 		// Wake a real sleeping partner so it participates in the solve (the world
 		// anchor never sleeps).
@@ -1383,6 +1393,17 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		}
 	};
 
+	// A patch REPLACES the representative point as solver rows rather than adding to
+	// it — recording both would count the same support twice.
+	auto record_contacts = [&](solid<T> * partner) {
+		if (col.patch_count == 0) {
+			record_contact(partner, col.representative());
+			return;
+		}
+		for (int i = 0; i < col.patch_count; ++i)
+			record_contact(partner, col.patch[i]);
+	};
+
 	for (int i = 0; i < num_spacial_collection_; ++i) {
 		auto * s2 = spacial_collection_[i];
 		if (s2 == solid_ptr)
@@ -1398,7 +1419,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		if (col.time >= one && col.depth <= zero)
 			continue; // not within the inflated shell and not swept into this tick
 
-		record_contact(s2);
+		record_contacts(s2);
 	}
 
 	// --- Manager-injected geometry ---
@@ -1417,7 +1438,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		if (col.time < one || col.depth > zero) {
 			// No owning solid: resolve against the immovable world anchor. If the
 			// manager attached a real collider, prefer it as the partner.
-			record_contact(col.collider ? col.collider : &static_world_);
+			record_contacts(col.collider ? col.collider : &static_world_);
 		}
 	}
 }
@@ -1754,9 +1775,9 @@ void simulator<T>::update_acceleration(vec3<T> & result, solid<T> * s, const vec
 }
 
 template <typename T>
-typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * partner) {
+typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * partner, int feature) {
 	for (int i = 0; i < s->touch_count_; ++i) {
-		if (s->touches_[i].partner == partner)
+		if (s->touches_[i].partner == partner && s->touches_[i].feature == feature)
 			return &s->touches_[i];
 	}
 	return nullptr;
@@ -1764,7 +1785,7 @@ typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * par
 
 template <typename T>
 typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
-    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, const vec3<T> & swept_center, T impact_speed, T separation, int tick) {
+    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, const vec3<T> & swept_center, T impact_speed, T separation, int tick, int feature) {
 	const T zero_val {};
 
 	// Body-frame contact offset: the contact point relative to s's center at the
@@ -1782,7 +1803,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 	// to a continuous contact, so warm-starting from it would be unsound.
 	for (int i = 0; i < s->touch_count_; ++i) {
 		auto & slot = s->touches_[i];
-		if (slot.partner == partner) {
+		if (slot.partner == partner && slot.feature == feature) {
 			if (slot.last_tick != tick && slot.last_tick != tick - 1) {
 				slot.accum_n = zero_val;
 				slot.accum_t.reset();
@@ -1805,6 +1826,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 	if (s->touch_count_ < solid<T>::max_touches) {
 		auto & slot = s->touches_[s->touch_count_++];
 		slot.partner = partner;
+		slot.feature = feature;
 		slot.normal.set(normal);
 		slot.impact.set(impact);
 		slot.lever.set(lever);
@@ -1833,6 +1855,7 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 	}
 	auto & slot = s->touches_[evict];
 	slot.partner = partner;
+	slot.feature = feature;
 	slot.normal.set(normal);
 	slot.impact.set(impact);
 	slot.lever.set(lever);
@@ -1910,7 +1933,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			} else {
 				a = partner; b = s; slot_is_a = false;
 			}
-			auto * other_slot = find_touch(partner, s);
+			auto * other_slot = find_touch(partner, s, slot.feature);
 
 			contact_pair p;
 			p.a = a;
