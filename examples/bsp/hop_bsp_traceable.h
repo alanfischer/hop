@@ -206,6 +206,57 @@ inline bool hull_nearest_leaf_plane(const hull &h, int num, const double p[3], i
 	return true;
 }
 
+// The mover's own axes, in the hull's frame. A GoldSrc hull trace reduces the mover
+// to a point and expands every plane by how far the mover reaches along that plane's
+// normal — and "how far" depends on which way the mover is TURNED. The expansion is a
+// Minkowski sum, and the Minkowski sum of a tilted box is not the sum of its bounding
+// box: a 7x1x3 bone standing on its end reaches 3.5 units down, lying flat it reaches
+// 0.5, and a trace that reads the unrotated box gets 0.5 either way.
+//
+// Column j is the mover's local axis j expressed in GoldSrc space. `oriented` is false
+// for the identity, which is every non-rotating body — players, projectiles, doors —
+// and takes the cheap path through box_support unchanged.
+struct mover_basis {
+	double axis[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+	bool oriented = false;
+};
+
+// The support function of a box: how far half-extents `half`, turned by `b`, reach
+// past their centre along `n`. Axis-aligned this is the familiar |n|.half; turned, it
+// is the same sum taken against the mover's own axes, sum_j |n.m_j| * half_j.
+template <typename N>
+inline double box_support(const N n[3], const double half[3], const mover_basis &b) {
+	if (!b.oriented) {
+		const double nx = n[0] < 0 ? -(double)n[0] : (double)n[0];
+		const double ny = n[1] < 0 ? -(double)n[1] : (double)n[1];
+		const double nz = n[2] < 0 ? -(double)n[2] : (double)n[2];
+		return nx * half[0] + ny * half[1] + nz * half[2];
+	}
+	double sum = 0;
+	for (int j = 0; j < 3; ++j) {
+		const double d = (double)n[0] * b.axis[0][j] + (double)n[1] * b.axis[1][j] +
+		                 (double)n[2] * b.axis[2][j];
+		sum += (d < 0 ? -d : d) * half[j];
+	}
+	return sum;
+}
+
+// The turned box's own axis-aligned bound, per axis: its reach along each world axis.
+// This is what bounds an eject and what the six-axis overlap probes measure with, both
+// of which ask "how far does the mover reach THAT way" in hull axes rather than the
+// mover's own.
+inline void box_world_half(const double half[3], const mover_basis &b, double out[3]) {
+	if (!b.oriented) {
+		for (int i = 0; i < 3; ++i) out[i] = half[i];
+		return;
+	}
+	for (int i = 0; i < 3; ++i) {
+		double e[3] = { 0, 0, 0 };
+		e[i] = 1.0;
+		out[i] = box_support(e, half, b);
+	}
+}
+
 // How a sweep treats surfaces it passes near. Resolved once by hull_sweep and carried
 // down the descent: both members are invariant for a whole trace, and re-deriving them
 // per node in a self-recursive walk is work the compiler cannot hoist.
@@ -235,17 +286,17 @@ struct sweep_skin {
 	double grow = 0;               // >= 0: crosspoint back-off (speculative margin)
 	double bias = 0;               // <= 0: the STUCK_SLOP plane translation, or 0 for none
 	bool boxed = false;            // any half-extent nonzero — keeps the point walk free of the math
+	mover_basis basis;             // the mover's axes; identity for everything that does not turn
 };
 
 // How far the mover's box reaches past its centre along `pl`'s normal: the amount
 // that plane moves outward when the hull is expanded for this box. Axial planes
-// (pl.type < 3, the overwhelming majority in a BSP) read one extent directly.
-inline double plane_offset(const hop_bsp::BSPPlane &pl, const double half[3]) {
-	if (pl.type < 3) return half[pl.type];
-	const double nx = pl.normal[0] < 0 ? -pl.normal[0] : pl.normal[0];
-	const double ny = pl.normal[1] < 0 ? -pl.normal[1] : pl.normal[1];
-	const double nz = pl.normal[2] < 0 ? -pl.normal[2] : pl.normal[2];
-	return nx * half[0] + ny * half[1] + nz * half[2];
+// (pl.type < 3, the overwhelming majority in a BSP) read one extent directly — but
+// only for an axis-aligned mover, since a turned box does not line up with them.
+inline double plane_offset(const hop_bsp::BSPPlane &pl, const double half[3],
+                           const mover_basis &b) {
+	if (!b.oriented && pl.type < 3) return half[pl.type];
+	return box_support(pl.normal, half, b);
 }
 
 // Quake's SV_RecursiveHullCheck. Sweeps the point p1→p2 (GoldSrc space) through
@@ -266,7 +317,7 @@ inline bool recursive_hull_check(const hull &h, int num, double p1f, double p2f,
 	// The plane, pushed out by the mover's box. `off` is 0 for a point walk, which
 	// is every trace against a sized hull (1..3): those trees are already expanded
 	// for their box by the compiler, so expanding again would double-count.
-	const double off = skin.boxed ? plane_offset(pl, skin.half) : 0.0;
+	const double off = skin.boxed ? plane_offset(pl, skin.half, skin.basis) : 0.0;
 
 	if (t1 >= off && t2 >= off)   return recursive_hull_check(h, h.child(num, 0), p1f, p2f, p1, p2, blocking, tr, skin);
 	if (t1 < -off && t2 < -off)   return recursive_hull_check(h, h.child(num, 1), p1f, p2f, p1, p2, blocking, tr, skin);
@@ -348,9 +399,11 @@ inline hull_trace hull_sweep_skin(const hull &h, const double start[3], const do
 
 // A skin for a mover of size `half` (GoldSrc units), with `grow` as its speculative
 // crosspoint back-off. All-zero half extents give the plain point walk back.
-inline sweep_skin box_skin(const double half[3], double grow) {
+inline sweep_skin box_skin(const double half[3], double grow,
+                           const mover_basis &basis = mover_basis{}) {
 	sweep_skin s;
 	s.grow = grow;
+	s.basis = basis;
 	for (int i = 0; i < 3; ++i) {
 		s.half[i] = half[i];
 		if (half[i] != 0.0) s.boxed = true;
@@ -368,8 +421,9 @@ inline hull_trace hull_sweep(const hull &h, const double start[3], const double 
 // descends it (see sweep_skin), so the box stops ON surfaces instead of passing
 // through them until its centre is inside.
 inline hull_trace hull_sweep_box(const hull &h, const double start[3], const double end[3],
-                                 int blocking, const double half[3], double grow) {
-	return hull_sweep_skin(h, start, end, blocking, box_skin(half, grow));
+                                 int blocking, const double half[3], double grow,
+                                 const mover_basis &basis = mover_basis{}) {
+	return hull_sweep_skin(h, start, end, blocking, box_skin(half, grow, basis));
 }
 
 // A sweep against the hull translated inward by STUCK_SLOP — the same band the stuck
@@ -378,8 +432,9 @@ inline hull_trace hull_sweep_box(const hull &h, const double start[3], const dou
 // negative margin: it is a different mechanism, not a smaller one.
 inline hull_trace hull_sweep_stuck_band(const hull &h, const double start[3],
                                         const double end[3], int blocking,
-                                        const double half[3] = nullptr) {
-	sweep_skin skin = half ? box_skin(half, 0.0) : sweep_skin{};
+                                        const double half[3] = nullptr,
+                                        const mover_basis &basis = mover_basis{}) {
+	sweep_skin skin = half ? box_skin(half, 0.0, basis) : sweep_skin{};
 	skin.bias = -STUCK_SLOP;
 	return hull_sweep_skin(h, start, end, blocking, skin);
 }
@@ -396,7 +451,8 @@ inline hull_trace hull_sweep_stuck_band(const hull &h, const double start[3],
 // inside the solid it is leaving, the walk gives up again, and the move stays free.
 inline hull_trace hull_sweep_off_surface(const hull &h, const double start[3],
                                          const double end[3], int blocking,
-                                         const double half[3] = nullptr) {
+                                         const double half[3] = nullptr,
+                                         const mover_basis &basis = mover_basis{}) {
 	hull_trace miss;
 	miss.hit = false;
 	double dir[3], len2 = 0;
@@ -409,7 +465,7 @@ inline hull_trace hull_sweep_off_surface(const hull &h, const double start[3],
 	const double back = DIST_EPSILON * 2.0;
 	double from[3];
 	for (int i = 0; i < 3; ++i) from[i] = start[i] - dir[i] / len * back;
-	hull_trace nudged = half ? hull_sweep_box(h, from, end, blocking, half, 0.0)
+	hull_trace nudged = half ? hull_sweep_box(h, from, end, blocking, half, 0.0, basis)
 	                         : hull_sweep(h, from, end, blocking, 0.0);
 	if (!nudged.hit) return miss;
 	nudged.fraction = (nudged.fraction * (len + back) - back) / len;
@@ -648,7 +704,21 @@ public:
 		// turns the mover into a point: GoldSrc traces (origin + clip_mins - mins).
 		double mins[3], maxs[3];
 		solid_box_gs(s, mins, maxs);
-		const int hi = hopbsp::hull_for_size(maxs[0] - mins[0], maxs[2] - mins[2]);
+
+		// The mover's own axes in this model's frame, for a body that turns under
+		// torque. Everything else — players, doors, projectiles — gets the identity
+		// and the axis-aligned path below, bit for bit as before.
+		const hopbsp::mover_basis basis = mover_basis_gs(s, orientation);
+
+		int hi = hopbsp::hull_for_size(maxs[0] - mins[0], maxs[2] - mins[2]);
+		// Hulls 1..3 are trees the map compiler already expanded for one fixed box, and
+		// that baked expansion cannot be turned — which is why a tipped plate collides
+		// fat on its thin axis in GoldSrc too. Hull 0 is the point hull, where the
+		// expansion is still ours to compute per plane as the walk descends, so a mover
+		// that turns is traced there whatever its size. It costs CLIP brushes (they
+		// exist only in 1..3), which is the right trade for debris and the reason this
+		// is gated on rotates_dynamically() rather than on having an orientation.
+		if (basis.oriented) hi = 0;
 		const hopbsp::hull &h = hulls_[hi];
 		if (!h.valid()) return;
 		// The box this trace is effectively expanded around, and how the mover maps
@@ -754,8 +824,15 @@ public:
 		// Hull 0's box is a point, which would give a hull-0 mover no eject budget at
 		// all. Its own box is the honest bound there, and it is the box the trace is
 		// now centred on.
+		// A turned box reaches further along a hull axis than its own half-extent on
+		// that axis, so the budget is its world-aligned bound, not its local one.
 		double extent[3];
-		for (int i = 0; i < 3; ++i) extent[i] = box_maxs[i] - box_mins[i];
+		{
+			double wh[3];
+			hopbsp::box_world_half(half, basis, wh);
+			for (int i = 0; i < 3; ++i)
+				extent[i] = basis.oriented ? 2.0 * wh[i] : box_maxs[i] - box_mins[i];
+		}
 
 		double n[3], depth = 0;
 		bool start_in_solid = false;
@@ -784,12 +861,10 @@ public:
 		if ((point_solid && !touching_only) || zero_dir) {
 			if (inside) {
 				double cap = 0;
-				double reach = 0;  // how far the box reaches past its centre along n
-				for (int i = 0; i < 3; ++i) {
-					const double a = n[i] < 0 ? -n[i] : n[i];
-					cap += a * extent[i];
-					reach += a * half[i];
-				}
+				for (int i = 0; i < 3; ++i)
+					cap += (n[i] < 0 ? -n[i] : n[i]) * extent[i];
+				// How far the box reaches past its centre along n, turned as it is.
+				const double reach = hopbsp::box_support(n, half, basis);
 				if (cap > 0 && depth > cap) depth = cap;
 				// hull_push_out measured the traced POINT out of the solid; the body
 				// around it still has to clear the surface, so add its own reach.
@@ -810,7 +885,7 @@ public:
 				// the deepest. This is the contact a resting body has, so a hull-0 mover
 				// asks for it even at zero margin: its box has reach of its own.
 				if (margin_gs <= 0 && half[0] == 0 && half[1] == 0 && half[2] == 0) return;
-				if (!nearest_surface(h, start, margin_gs, half, n, depth)) return;
+				if (!nearest_surface(h, start, margin_gs, half, basis, n, depth)) return;
 				if (depth <= 0) return;
 			}
 			if (T {} >= result.time) return;
@@ -823,7 +898,7 @@ public:
 			return;
 		}
 
-		hopbsp::hull_trace ht = hopbsp::hull_sweep_box(h, start, end, blocking_, half, margin_gs);
+		hopbsp::hull_trace ht = hopbsp::hull_sweep_box(h, start, end, blocking_, half, margin_gs, basis);
 
 		// `margin_gs` inflates the hull, so a mover merely RESTING against a wall
 		// starts the sweep inside the inflated solid even though it is not touching
@@ -844,7 +919,7 @@ public:
 		// embedded), so this is an ordinary empty-to-solid trace and it stops on the
 		// surface the mover is actually driving into.
 		if (!ht.hit && ht.allsolid && margin_gs > 0)
-			ht = hopbsp::hull_sweep_box(h, start, end, blocking_, half, 0.0);
+			ht = hopbsp::hull_sweep_box(h, start, end, blocking_, half, 0.0, basis);
 
 		// Still no answer: the start is EXACTLY on the surface it is driving into.
 		// The hull walk calls a start on the plane solid and gives up, so a mover
@@ -861,7 +936,7 @@ public:
 		// special case: backing off puts the start inside the solid it is leaving, the
 		// walk gives up again, and the move stays free, which is correct.
 		if (!ht.hit && ht.allsolid) {
-			hopbsp::hull_trace nudged = hopbsp::hull_sweep_off_surface(h, start, end, blocking_, half);
+			hopbsp::hull_trace nudged = hopbsp::hull_sweep_off_surface(h, start, end, blocking_, half, basis);
 			if (nudged.hit) ht = nudged;
 		}
 
@@ -882,7 +957,7 @@ public:
 		// reported above, shallower and the start is not in solid at all — which is
 		// where traces routinely leave bodies, DIST_EPSILON being twice it.
 		if (!ht.hit && ht.allsolid && !inside)
-			ht = hopbsp::hull_sweep_stuck_band(h, start, end, blocking_, half);
+			ht = hopbsp::hull_sweep_stuck_band(h, start, end, blocking_, half, basis);
 
 		if (!ht.hit || (T)ht.fraction >= result.time) return;
 		if (hopbsp::stopped_against_sky(h, ht, blocking_)) return;
@@ -940,11 +1015,11 @@ public:
 		// result.impact also feeds velocity_at_local for moving-platform carry, where it
 		// is the same improvement — a rider samples a turning platform's ω×r at the point
 		// it stands on rather than at a corner of its own bounding box.
-		double reach = 0;
-		for (int i = 0; i < 3; ++i) {
-			const double h = (box_maxs[i] - box_mins[i]) * 0.5;
-			reach += (ht.normal[i] < 0 ? -ht.normal[i] : ht.normal[i]) * h;
-		}
+		double box_half[3];
+		for (int i = 0; i < 3; ++i) box_half[i] = (box_maxs[i] - box_mins[i]) * 0.5;
+		// On hull 0 that box IS the mover, so it turns with it; on a sized hull it is
+		// the engine's own box and the basis is identity, so this is the old sum.
+		const double reach = hopbsp::box_support(ht.normal, box_half, basis);
 		double w[3];
 		for (int i = 0; i < 3; ++i)
 			w[i] = ht.endpos[i] - ht.normal[i] * reach;
@@ -1039,6 +1114,50 @@ private:
 		}
 	}
 
+	// The mover's axes, expressed in this model's GoldSrc frame.
+	//
+	// `orientation` is the TRACEABLE's world rotation, so the mover's rotation relative
+	// to the geometry is orientation^T . solid_orientation — the same conjugation
+	// to_local does to the segment, applied to a basis rather than a point. Each column
+	// then goes through the Y-up/Z-up axis swap, which is its own inverse and has
+	// determinant +1, so it needs no special handling for a basis either.
+	//
+	// Gated on rotates_dynamically(): a body with no inertia never integrates an
+	// orientation, so it gets the identity and every trace it makes is unchanged.
+	hopbsp::mover_basis mover_basis_gs(hop::solid<T> *s, const hop::mat3<T> &orientation) const {
+		hopbsp::mover_basis b;
+		if (s == nullptr || !s->rotates_dynamically()) return b;
+
+		hop::mat3<T> Rm = s->get_orientation();
+		static const hop::mat3<T> identity;
+		if (orientation != identity) {
+			hop::mat3<T> Rt, rel;
+			hop::transpose(Rt, orientation);
+			hop::mul(rel, Rt, Rm);
+			Rm = rel;
+		}
+		if (Rm == identity) return b;
+
+		// box_support pairs column j with half[j], and `half` is indexed in GOLDSRC
+		// axes — solid_box_gs already permuted it, so half[1] is the Godot-Z extent and
+		// half[2] the Godot-Y one. The columns have to take the same permutation or
+		// each body axis is measured with another axis's extent: a bone tipped on its
+		// edge asked how far it reached downward and was told its thickness, which is
+		// what it would have answered lying flat.
+		//
+		// Only the ORDER is permuted here. Each column's components go through the
+		// direction swap, and its sign is irrelevant — box_support takes |n.m_j|.
+		static const int COL[3] = { 0, 2, 1 };  // gs x,y,z <- Godot local x,z,y
+		for (int j = 0; j < 3; ++j) {
+			const int c = COL[j];
+			b.axis[0][j] = -(double)Rm.at(0, c);
+			b.axis[1][j] = (double)Rm.at(2, c);
+			b.axis[2][j] = (double)Rm.at(1, c);
+		}
+		b.oriented = true;
+		return b;
+	}
+
 	// The mover's own box, in GoldSrc units. hop maintains this union for us and
 	// folds in each shape's local position/rotation, which a hand-rolled loop over
 	// the intrinsic shape bounds would miss — and the box is what picks the hull.
@@ -1063,14 +1182,19 @@ private:
 	// corpse capsule reaches 20 units down and 12 sideways, and measuring the floor
 	// with the sideways number is what left it resting inside the floor.
 	bool nearest_surface(const hopbsp::hull &h, const double p[3], double margin,
-	                     const double half[3], double n[3], double &depth) const {
+	                     const double half[3], const hopbsp::mover_basis &basis,
+	                     double n[3], double &depth) const {
 		static const double axes[6][3] = {
 			{ 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
 		};
+		// The probes run along the HULL's axes, so what bounds each one is the turned
+		// box's reach that way, not its own half-extent on a local axis.
+		double wh[3];
+		hopbsp::box_world_half(half, basis, wh);
 		bool found = false;
 		depth = 0.0;
 		for (int ai = 0; ai < 6; ++ai) {
-			const double limit = half[ai / 2] + margin;
+			const double limit = wh[ai / 2] + margin;
 			if (limit <= 0) continue;
 			double t_n[3];
 			const double gap = surface_gap(h, p, axes[ai], limit, t_n);

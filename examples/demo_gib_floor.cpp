@@ -1,8 +1,8 @@
-// demo_gib_floor.cpp — the BSP trace has no idea what shape it is holding.
+// demo_gib_floor.cpp — what the BSP trace knows about the shape it is holding.
 //
 // Toggle the floor between a plain aa_box and a GoldSrc BSP hull, throw gib-sized
-// debris at it, and watch what changes. Boxes and capsules, because the two are
-// supposed to rest differently and against the BSP hull they do not.
+// debris at it, and compare. This demo was written to show the BSP hull getting it
+// wrong; it now shows the half that is fixed and the half that is not.
 //
 //   F / click        floor: BOX <-> BSP
 //   1 / click        spawn 6 boxes
@@ -11,18 +11,26 @@
 //   G                show/hide what the BSP trace actually sees
 //   SPACE            pause
 //
-// WHAT TO LOOK FOR, with the BSP floor selected and G on:
+// WHAT IT USED TO DO. A GoldSrc hull trace reduces the mover to a point and expands
+// every plane by how far the mover reaches along that plane's normal. That reach came
+// from `s->get_local_bound()` — the body's bounding box with its rotation stripped out
+// — so a 12x2x7 bone reported the same 1 cm downward reach standing on its end as it
+// did lying flat. Every attitude rested at the same height, half of the wrong extent.
 //
-// Every gib is drawn twice. In colour, the shape it really is; in grey wireframe, the
-// AXIS-ALIGNED box the trace reads off it — `s->get_local_bound()`, which never turns
-// with the body. That grey box is the entire shape the solver gets. Watch a long bone
-// tumble onto its end: the grey box does not follow it, so the gib rests at the same
-// height it did lying flat, and settles at whatever attitude it happened to stop in.
-// There is no flat side to fall onto, because the solver cannot tell there is one.
+// WHAT IT DOES NOW, with the BSP floor and G on. The grey wireframe is the box the
+// trace expands the hull by, and it now turns with the body: the expansion is the
+// support function of an ORIENTED box, sum_j |n.m_j| * half_j against the mover's own
+// axes (see mover_basis in hop_bsp_traceable.h). A bone on its end rests on its long
+// half-extent, on its edge on its middle one. --selftest prints the four heights.
 //
-// The red dot under each resting gib is the contact witness the trace reported. It sits
-// straight below the centre, always, so the support impulse has no lever arm and cannot
-// tip anything over. Switch to the BOX floor and the same debris beds down on a face.
+// WHAT IS STILL WRONG. The red dot is the contact witness, and it sits down the
+// surface normal from the body centre — so its lever arm is parallel to the normal and
+// the impulse holding the gib up makes no torque. Debris balanced on an edge or a
+// corner stays there instead of falling onto a face, and keeps twitching rather than
+// sleeping. That is deliberate, not an oversight: taking the box's true support corner
+// instead picks an arm ACROSS the face, and the normal impulse then spins a gib resting
+// on flat ground up to 37 rad/s. A hull trace cannot resolve a contact PATCH, which is
+// what tipping actually needs. Switch to the BOX floor (F) to see the difference.
 //
 // Space note: this demo is Y-UP, unlike hop's other raylib demos, because the BSP
 // traceable converts between the host's space and GoldSrc's Z-up, and the host space it
@@ -321,10 +329,13 @@ static int selftest() {
 	printf("worst resting tilt:              BSP %.0f deg   box %.0f deg\n",
 	       worst_tilt_bsp, worst_tilt_box);
 	printf("\n%s\n", spread_bsp < 1e-4
-		? "BSP gives ONE height for every attitude, and the box comes to rest still standing\n"
-		  "on its end or its corner: the trace never saw the shape turn, so there is no flat\n"
-		  "side for it to fall onto. On the aa_box floor the same box tips onto its face."
-		: "BSP spread is non-zero: the trace has become orientation-aware.");
+		? "REGRESSED. BSP gives ONE height for every attitude: the trace is not seeing the\n"
+		  "shape turn, so half-Y is being used as the downward reach whatever the attitude."
+		: "BSP heights track the attitude: each is how far the TURNED box reaches downward\n"
+		  "(half-Y flat, half-X on end, half-Z on edge), so the hull expansion is oriented.\n"
+		  "The tilt column is the part still outstanding — a witness point down the normal\n"
+		  "has no arm to tip with, so a box left on its edge or corner stays there. Tipping\n"
+		  "needs a contact patch, which a hull trace cannot resolve; see the header.");
 	printf("\nThe aa_box column is orientation-AWARE, which is the point of the comparison.\n"
 	       "Its absolute numbers are honest now that the two speculative box-vs-box defects\n"
 	       "are fixed (#85, the shock pass solving at the wrong effective mass, and #86, the\n"
@@ -409,12 +420,18 @@ int main(int argc, char **argv) {
 			}
 
 			if (show_trace_view && world.bsp) {
-				// What the trace actually reads: the LOCAL bound, unrotated, at the
-				// body's position. It never turns with the body — that is the bug.
+				// The box the trace expands the hull by: the local bound, TURNED with
+				// the body. On a box gib it now coincides with the shape itself, which
+				// is the point — it used to sit there axis-aligned while the gib rolled
+				// inside it. On a capsule it is the circumscribing box, the closest a
+				// plane expansion can come to a rounded shape.
 				const hop::aa_box<T> &lb = g.solid->get_local_bound();
 				const Vector3 size = { (float)(lb.maxs.x - lb.mins.x), (float)(lb.maxs.y - lb.mins.y),
 				                       (float)(lb.maxs.z - lb.mins.z) };
-				DrawCubeWiresV(rl(p), size, (Color){ 200, 200, 205, 190 });
+				rlPushMatrix();
+				rlMultMatrixf(MatrixToFloat(to_matrix(R, p)));
+				DrawCubeWiresV((Vector3){ 0, 0, 0 }, size, (Color){ 200, 200, 205, 190 });
+				rlPopMatrix();
 
 				// And the contact witness it reported, straight below the centre.
 				for (int t = 0; t < g.solid->get_touch_count(); ++t) {
@@ -449,11 +466,11 @@ int main(int argc, char **argv) {
 		const int y0 = 244;
 		if (world.bsp) {
 			DrawRectangle(0, y0 - 8, 420, 108, Fade(BLACK, 0.45f));
-			DrawText("Grey wire = the shape the trace sees.", 16, y0, 16, (Color){ 225, 225, 230, 255 });
-			DrawText("It is the UNROTATED bound and never turns,", 16, y0 + 20, 16, (Color){ 190, 190, 200, 255 });
-			DrawText("so on-end and flat are the same state.", 16, y0 + 40, 16, (Color){ 190, 190, 200, 255 });
-			DrawText("Red dot = contact, always dead below centre:", 16, y0 + 60, 16, (Color){ 190, 190, 200, 255 });
-			DrawText("no lever arm, so nothing can tip over.", 16, y0 + 80, 16, (Color){ 190, 190, 200, 255 });
+			DrawText("Grey wire = the box the trace expands by.", 16, y0, 16, (Color){ 225, 225, 230, 255 });
+			DrawText("It TURNS with the body now, so on-end and", 16, y0 + 20, 16, (Color){ 170, 200, 170, 255 });
+			DrawText("flat rest at their own half-extents.", 16, y0 + 40, 16, (Color){ 170, 200, 170, 255 });
+			DrawText("Red dot = contact, down the normal: still", 16, y0 + 60, 16, (Color){ 210, 180, 140, 255 });
+			DrawText("no tipping torque, so edges stay balanced.", 16, y0 + 80, 16, (Color){ 210, 180, 140, 255 });
 		} else {
 			DrawRectangle(0, y0 - 8, 420, 48, Fade(BLACK, 0.45f));
 			DrawText("Box floor: real shape, real contacts.", 16, y0, 16, (Color){ 225, 225, 230, 255 });
@@ -465,9 +482,20 @@ int main(int argc, char **argv) {
 		int shown = 0;
 		for (const Gib &g : world.gibs) {
 			if (g.solid->active() || shown >= 6) continue;
+			// What the gib SHOULD rest at: how far its turned box reaches downward,
+			// which is the same support sum the trace now does. Lying flat this is
+			// half-Y; on end it is half-X. It used to be half-Y whatever the attitude.
 			const hop::aa_box<T> &lb = g.solid->get_local_bound();
-			const double expect = 0.5 * (double)(lb.maxs.y - lb.mins.y);
-			snprintf(line, sizeof line, "%-6s rest y %6.4f   half-Y %6.4f",
+			const hop::mat3<T> &Rg = g.solid->get_orientation();
+			const double lh[3] = { 0.5 * (double)(lb.maxs.x - lb.mins.x),
+			                       0.5 * (double)(lb.maxs.y - lb.mins.y),
+			                       0.5 * (double)(lb.maxs.z - lb.mins.z) };
+			double expect = 0;
+			for (int j = 0; j < 3; ++j) {
+				const double d = (double)Rg.at(1, j);  // world up . body axis j
+				expect += (d < 0 ? -d : d) * lh[j];
+			}
+			snprintf(line, sizeof line, "%-6s rest y %6.4f   reach %6.4f",
 			         GIB_SIZES[shown].name, (double)g.solid->get_position().y, expect);
 			DrawText(line, 16, H - 130 + shown * 18, 15, (Color){ 170, 200, 170, 255 });
 			++shown;
