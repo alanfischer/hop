@@ -47,6 +47,11 @@ inline constexpr double DIST_EPSILON = 0.03125;
 // surfaces by, so a point this trace could legitimately produce is never called stuck.
 inline constexpr double STUCK_SLOP = DIST_EPSILON * 0.5;
 
+// How close to parallel an axis must be to the contact surface before its end stops
+// being decidable — see box_support_point. A cosine, so this is an angle: 0.08 is
+// about 4.5 degrees of tilt.
+inline constexpr double CONTACT_TIE_BAND = 0.08;
+
 // Engine-baked hull box sizes (Half-Life). These live in the engine, not the
 // file: the compiler expanded the clipnode trees for exactly these boxes, so a
 // consumer has to know them to pick a hull and offset the traced point.
@@ -239,6 +244,45 @@ inline double box_support(const N n[3], const double half[3], const mover_basis 
 		sum += (d < 0 ? -d : d) * half[j];
 	}
 	return sum;
+}
+
+// The box feature that touches a surface whose outward normal is `n`, as an offset
+// from the box's centre: its support point along -n.
+//
+// The TIE is the whole point of this function. When one of the box's axes lies
+// parallel to the surface, "which end of it touches" has no answer — both ends do,
+// equally — and picking one anyway puts the contact at a CORNER of a box that is lying
+// FLAT. The floor then holds the box up off to one side of its own centre, and the
+// impulse that should just support it becomes a torque instead. That is what spun a
+// gib resting on flat ground to 37 rad/s when the walk-back tried the raw corner, and
+// it is why the witness has sat at the centre ever since.
+//
+// hop already solves this everywhere else: support() for an aa_box returns the axis
+// MIDPOINT when the direction component is exactly zero (math/support.h), which is
+// what makes debris bed down on a face against the aa_box floor. Two things differ
+// against a BSP plane. The dot is float noise near zero rather than zero, so the tie
+// needs a band and not an equality. And a hard edge on that band would snap the
+// contact from face centre to corner as a body settled through it, so ramp across it
+// instead: a single contact point is standing in for the resultant of a pressure
+// PATCH, and that resultant really does travel continuously out from the middle of a
+// face toward an edge as the body tips onto it.
+inline void box_support_point(const double n[3], const double half[3],
+                              const mover_basis &b, double out[3]) {
+	out[0] = out[1] = out[2] = 0;
+	for (int j = 0; j < 3; ++j) {
+		const double m[3] = { b.axis[0][j], b.axis[1][j], b.axis[2][j] };
+		const double c = n[0] * m[0] + n[1] * m[1] + n[2] * m[2];
+		const double a = c < 0 ? -c : c;
+		// Smoothstep from "tied, take the midpoint" to "decided, take the end".
+		double w = a / CONTACT_TIE_BAND;
+		if (w >= 1.0) w = 1.0;
+		else w = w * w * (3.0 - 2.0 * w);
+		if (w <= 0.0) continue;
+		const double k = (c < 0 ? half[j] : -half[j]) * w;
+		out[0] += k * m[0];
+		out[1] += k * m[1];
+		out[2] += k * m[2];
+	}
 }
 
 // The turned box's own axis-aligned bound, per axis: its reach along each world axis.
@@ -894,7 +938,20 @@ public:
 			hop::vec3<T> n_local = gs_dir_to_godot(n[0], n[1], n[2]);
 			hop::vec3<T> p_local = gs_to_godot(start[0] - offset[0], start[1] - offset[1], start[2] - offset[2]);
 			to_world(p_local, n_local, position, orientation, result.point, result.normal);
+			// This is the contact a body at REST holds, so it is the one that decides
+			// whether debris left on an edge tips onto a face. `start` is the traced
+			// point, which for hull 0 is the box centre; the witness is the feature of
+			// the box that actually touches. A mover with no orientation of its own
+			// keeps the centre it has always reported.
 			result.impact = result.point;
+			if (basis.oriented && (n[0] != 0 || n[1] != 0 || n[2] != 0)) {
+				double sp[3];
+				hopbsp::box_support_point(n, half, basis, sp);
+				hop::vec3<T> impact_local =
+					gs_to_godot(start[0] + sp[0], start[1] + sp[1], start[2] + sp[2]);
+				hop::vec3<T> ignored;
+				to_world(impact_local, n_local, position, orientation, result.impact, ignored);
+			}
 			return;
 		}
 
@@ -1017,12 +1074,20 @@ public:
 		// it stands on rather than at a corner of its own bounding box.
 		double box_half[3];
 		for (int i = 0; i < 3; ++i) box_half[i] = (box_maxs[i] - box_mins[i]) * 0.5;
-		// On hull 0 that box IS the mover, so it turns with it; on a sized hull it is
-		// the engine's own box and the basis is identity, so this is the old sum.
-		const double reach = hopbsp::box_support(ht.normal, box_half, basis);
 		double w[3];
-		for (int i = 0; i < 3; ++i)
-			w[i] = ht.endpos[i] - ht.normal[i] * reach;
+		if (basis.oriented) {
+			// The feature of the turned box that met the surface. On a face contact
+			// every axis ties and this reduces to the centre-down-the-normal point
+			// below, which is what keeps a flat landing from torquing itself.
+			double sp[3];
+			hopbsp::box_support_point(ht.normal, box_half, basis, sp);
+			for (int i = 0; i < 3; ++i) w[i] = ht.endpos[i] + sp[i];
+		} else {
+			// Axis-aligned mover: down the normal by the box's reach that way, exactly
+			// as before. Players and doors are bit-identical through here.
+			const double reach = hopbsp::box_support(ht.normal, box_half, basis);
+			for (int i = 0; i < 3; ++i) w[i] = ht.endpos[i] - ht.normal[i] * reach;
+		}
 		hop::vec3<T> impact_local = gs_to_godot(w[0], w[1], w[2]);
 		hop::vec3<T> ignored;
 		to_world(impact_local, n_local, position, orientation, result.impact, ignored);

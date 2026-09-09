@@ -23,14 +23,23 @@
 // axes (see mover_basis in hop_bsp_traceable.h). A bone on its end rests on its long
 // half-extent, on its edge on its middle one. --selftest prints the four heights.
 //
-// WHAT IS STILL WRONG. The red dot is the contact witness, and it sits down the
-// surface normal from the body centre — so its lever arm is parallel to the normal and
-// the impulse holding the gib up makes no torque. Debris balanced on an edge or a
-// corner stays there instead of falling onto a face, and keeps twitching rather than
-// sleeping. That is deliberate, not an oversight: taking the box's true support corner
-// instead picks an arm ACROSS the face, and the normal impulse then spins a gib resting
-// on flat ground up to 37 rad/s. A hull trace cannot resolve a contact PATCH, which is
-// what tipping actually needs. Switch to the BOX floor (F) to see the difference.
+// The red dot is the contact witness, and it is now the feature of the box that
+// actually touches — the corner when a gib lands on a corner, the midpoint of an edge
+// when it lands on an edge, the centre of a face when it lands flat. That last one is
+// the whole trick: on a face the box has two axes lying parallel to the floor and
+// "which end of them touches" has no answer, so box_support_point takes the midpoint
+// rather than picking a corner. Picking one is what used to spin a gib resting on flat
+// ground to 37 rad/s, and it is why the witness sat at the centre for so long.
+//
+// Debris landing on an edge or a corner therefore falls onto a face, because the
+// witness is off to one side and the floor's push has something to turn. Switch to the
+// BOX floor (F) and it should look much the same now; --selftest prints both.
+//
+// STILL MISSING. One contact per body pair per frame, so a box lying flat is held up
+// at a single point in the middle of its face. That is enough to rest and enough to
+// tip, but not enough to be STIFF: nothing resists a nudge, and a stack of gibs stays
+// wobbly. Several simultaneous contacts against one surface would need trace_solid to
+// report a set rather than one collision.
 //
 // Space note: this demo is Y-UP, unlike hop's other raylib demos, because the BSP
 // traceable converts between the host's space and GoldSrc's Z-up, and the host space it
@@ -266,26 +275,36 @@ static bool button(Button &b) {
 // rather than the picture. Drops one identical box from four attitudes on each floor
 // and prints where it comes to rest.
 static int selftest() {
+	// Named for the feature the box is actually balanced on, which is the thing the
+	// witness point has to get right. The two 90-degree cases are FACE rests — a
+	// quarter turn just puts a different face down — so staying put is correct there,
+	// and the interesting rows are the last two.
 	struct Case { const char *name; V axis; double angle; };
 	const Case cases[] = {
-		{ "flat", vec(1, 0, 0), 0.0 },
-		{ "on end  (Z by 90)", vec(0, 0, 1), M_PI / 2 },
-		{ "on edge (X by 90)", vec(1, 0, 0), M_PI / 2 },
-		{ "corner  (X by 45)", vec(1, 0, 0), M_PI / 4 },
+		{ "flat face", vec(1, 0, 0), 0.0 },
+		{ "end face   (Z 90)", vec(0, 0, 1), M_PI / 2 },
+		{ "side face  (X 90)", vec(1, 0, 0), M_PI / 2 },
+		{ "long edge  (X 45)", vec(1, 0, 0), M_PI / 4 },
+		{ "corner (111 by 45)", vec(1, 1, 1), M_PI / 4 },
 	};
+	const int NCASES = (int)(sizeof cases / sizeof cases[0]);
+	// The last two are balanced on an edge and on a corner. Nothing rests like that:
+	// they have to fall onto a face, and whether they do is what the contact point
+	// decides. The face rests above are the control — they must NOT move.
+	const int FIRST_UNSTABLE = 3;
 	const V half = vec(0.060, 0.012, 0.035);  // the bone, half-extents
 
-	printf("A box resting on each floor, from four attitudes.\n");
-	printf("A real floor gives four different heights; half-Y is %.4f, half-X %.4f.\n\n",
+	printf("A box resting on each floor, from five attitudes.\n");
+	printf("A real floor gives each face rest its own height; half-Y is %.4f, half-X %.4f.\n\n",
 	       (double)half.y, (double)half.x);
 	printf("%-20s %-22s %-22s\n", "dropped", "BSP hull", "aa_box");
 	printf("%-20s %-22s %-22s\n", "", "rest y   tilt  slept", "rest y   tilt  slept");
 
-	double rest[4][2] = {};
-	double tilt[4][2] = {};
-	bool slept[4][2] = {};
+	double rest[8][2] = {};
+	double tilt[8][2] = {};
+	bool slept[8][2] = {};
 	for (int floor_kind = 0; floor_kind < 2; ++floor_kind) {
-		for (int c = 0; c < 4; ++c) {
+		for (int c = 0; c < NCASES; ++c) {
 			World w;
 			w.build(/*use_bsp=*/floor_kind == 0);
 			auto s = std::make_shared<hop::solid<T>>();
@@ -300,7 +319,9 @@ static int selftest() {
 			s->set_coefficient_of_restitution(0);
 			s->set_position(vec(0, 0.35, 0));
 			hop::quat<T> q;
-			hop::set_quat_from_axis_angle(q, cases[c].axis, (T)cases[c].angle);
+			V ax = cases[c].axis;
+			hop::mul(ax, (T)(1.0 / hop::length(ax)));
+			hop::set_quat_from_axis_angle(q, ax, (T)cases[c].angle);
 			s->set_orientation_from_quat(q);
 			w.sim.add_solid(s);
 			for (int i = 0; i < 600; ++i) w.sim.update((T)DT);
@@ -313,29 +334,44 @@ static int selftest() {
 			tilt[c][floor_kind] = std::acos(std::fmax(-1.0, std::fmin(1.0, std::fabs(uy)))) * 180.0 / M_PI;
 		}
 	}
-	for (int c = 0; c < 4; ++c)
+	for (int c = 0; c < NCASES; ++c)
 		printf("%-20s %-8.4f %-5.0f %-7s %-8.4f %-5.0f %-7s\n", cases[c].name,
 		       rest[c][0], tilt[c][0], slept[c][0] ? "yes" : "no",
 		       rest[c][1], tilt[c][1], slept[c][1] ? "yes" : "no");
 
-	double spread_bsp = 0, spread_box = 0, worst_tilt_bsp = 0, worst_tilt_box = 0;
-	for (int c = 1; c < 4; ++c) {
+	// Two independent questions, so two numbers.
+	//
+	// SPREAD, over the face rests: does the trace see the shape TURN? A real floor
+	// gives each attitude its own height. One height for all of them means the
+	// expansion is reading the unrotated bounding box.
+	double spread_bsp = 0, spread_box = 0;
+	for (int c = 1; c < FIRST_UNSTABLE; ++c) {
 		spread_bsp = std::fmax(spread_bsp, std::fabs(rest[c][0] - rest[0][0]));
 		spread_box = std::fmax(spread_box, std::fabs(rest[c][1] - rest[0][1]));
+	}
+	// TILT, over the edge and corner rests only: does the contact point have an arm to
+	// tip with? The face rests are excluded because staying put is right for them.
+	double worst_tilt_bsp = 0, worst_tilt_box = 0;
+	for (int c = FIRST_UNSTABLE; c < NCASES; ++c) {
 		worst_tilt_bsp = std::fmax(worst_tilt_bsp, tilt[c][0]);
 		worst_tilt_box = std::fmax(worst_tilt_box, tilt[c][1]);
 	}
-	printf("\nheight spread across attitudes:  BSP %.4f   box %.4f\n", spread_bsp, spread_box);
-	printf("worst resting tilt:              BSP %.0f deg   box %.0f deg\n",
+	printf("\nheight spread, face rests:       BSP %.4f   box %.4f\n", spread_bsp, spread_box);
+	printf("worst tilt left, edge + corner:  BSP %.0f deg   box %.0f deg\n",
 	       worst_tilt_bsp, worst_tilt_box);
 	printf("\n%s\n", spread_bsp < 1e-4
-		? "REGRESSED. BSP gives ONE height for every attitude: the trace is not seeing the\n"
-		  "shape turn, so half-Y is being used as the downward reach whatever the attitude."
-		: "BSP heights track the attitude: each is how far the TURNED box reaches downward\n"
-		  "(half-Y flat, half-X on end, half-Z on edge), so the hull expansion is oriented.\n"
-		  "The tilt column is the part still outstanding — a witness point down the normal\n"
-		  "has no arm to tip with, so a box left on its edge or corner stays there. Tipping\n"
-		  "needs a contact patch, which a hull trace cannot resolve; see the header.");
+		? "REGRESSED (expansion). BSP gives ONE height for every attitude, so the trace is\n"
+		  "not seeing the shape turn and half-Y is the downward reach whatever the tilt."
+		: "Heights track the attitude: each face rest sits at how far the TURNED box\n"
+		  "reaches downward, so the hull expansion is oriented.");
+	printf("\n%s\n", worst_tilt_bsp > 15.0
+		? "REGRESSED (contact point). A box is still balanced on an edge or a corner. The\n"
+		  "witness has no arm across the surface, so the impulse holding the box up cannot\n"
+		  "turn it, and nothing makes it fall onto a face."
+		: "Edge and corner rests fall onto a face: the witness is the box feature that\n"
+		  "actually touches, so it has an arm to tip with. Face rests keep the centre —\n"
+		  "that is the tie in box_support_point, and it is what stops a flat landing from\n"
+		  "torquing itself.");
 	printf("\nThe aa_box column is orientation-AWARE, which is the point of the comparison.\n"
 	       "Its absolute numbers are honest now that the two speculative box-vs-box defects\n"
 	       "are fixed (#85, the shock pass solving at the wrong effective mass, and #86, the\n"
@@ -469,8 +505,8 @@ int main(int argc, char **argv) {
 			DrawText("Grey wire = the box the trace expands by.", 16, y0, 16, (Color){ 225, 225, 230, 255 });
 			DrawText("It TURNS with the body now, so on-end and", 16, y0 + 20, 16, (Color){ 170, 200, 170, 255 });
 			DrawText("flat rest at their own half-extents.", 16, y0 + 40, 16, (Color){ 170, 200, 170, 255 });
-			DrawText("Red dot = contact, down the normal: still", 16, y0 + 60, 16, (Color){ 210, 180, 140, 255 });
-			DrawText("no tipping torque, so edges stay balanced.", 16, y0 + 80, 16, (Color){ 210, 180, 140, 255 });
+			DrawText("Red dot = the box feature that touches:", 16, y0 + 60, 16, (Color){ 170, 200, 170, 255 });
+			DrawText("corner, edge midpoint, or face centre.", 16, y0 + 80, 16, (Color){ 170, 200, 170, 255 });
 		} else {
 			DrawRectangle(0, y0 - 8, 420, 48, Fade(BLACK, 0.45f));
 			DrawText("Box floor: real shape, real contacts.", 16, y0, 16, (Color){ 225, 225, 230, 255 });
