@@ -117,6 +117,7 @@ public:
 	T get_micro_collision_threshold() const { return micro_collision_threshold_; }
 
 	void set_deactivate_speed(T s) { deactivate_speed_ = s; }
+	T get_deactivate_speed() const { return deactivate_speed_; }
 	void set_deactivate_count(int c) { deactivate_count_ = c; }
 
 	// Contact solver. Pass B (post-integration Gauss–Seidel sweep over the
@@ -751,21 +752,43 @@ template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr,
 
 	// Euler's equation in the body frame, where the principal-axis inertia is
 	// diagonal: ω̇_b = I⁻¹·(τ_b − ω_b × (I·ω_b)). ω is stored world-frame (matching
-	// the Phase 6 ω×r carry), so rotate it in by Rᵀ and the result back by R. The
-	// gyroscopic term ω×(I·ω) is kept — cheap and stabilizing.
+	// the Phase 6 ω×r carry), so rotate it in by Rᵀ and the result back by R.
 	const mat3<T> & R = solid_ptr->orientation_;
 	mat3<T> Rt;
 	transpose(Rt, R);
 	vec3<T> wb, tb;
 	mul(wb, Rt, solid_ptr->angular_velocity_);
 	mul(tb, Rt, solid_ptr->torque_);
-	vec3<T> Iw, gyro, net, dwb;
+
+	// The two halves are stepped apart because they answer to different invariants.
+	//
+	// The gyroscopic term does exactly zero work: d/dt(½ω·Iω) = ω·(−ω×Iω) = 0, since
+	// ω×Iω ⊥ ω. So it only carries ω around the energy ellipsoid ½ω·Iω = const, and a
+	// forward step goes along the TANGENT — always landing outside, gaining energy
+	// every tick without bound. That is unbounded on anisotropic bodies (a thin rod
+	// gained 65x in 30 s) and identically zero on isotropic ones, where ω×Iω vanishes,
+	// which is why only a spinning cube ever looked right. Rescaling ω back onto the
+	// ellipsoid restores the invariant exactly and keeps the precession the term is
+	// there for. Isotropic bodies take the same path and hit the e1 == e0 early-out.
+	vec3<T> Iw, gyro, dwb;
 	mul(Iw, solid_ptr->inertia_, wb); // I·ω (component-wise, body frame)
+	const T e0 = dot(wb, Iw);         // 2·E; the ½ cancels in the ratio below
 	cross(gyro, wb, Iw);
-	sub(net, tb, gyro);
-	mul(dwb, solid_ptr->inv_inertia_, net); // I⁻¹·(τ − ω×Iω)
+	mul(dwb, solid_ptr->inv_inertia_, gyro); // I⁻¹·(ω×Iω)
 	mul(dwb, dt);
-	add(wb, dwb);
+	sub(wb, dwb);
+	vec3<T> Iw1;
+	mul(Iw1, solid_ptr->inertia_, wb);
+	const T e1 = dot(wb, Iw1);
+	if (e1 > T {} && e1 != e0)
+		mul(wb, tr::sqrt(e0 / e1));
+
+	// Applied torque is the half that genuinely changes energy, so it is added after
+	// the projection rather than through it.
+	vec3<T> dwt;
+	mul(dwt, solid_ptr->inv_inertia_, tb); // I⁻¹·τ
+	mul(dwt, dt);
+	add(wb, dwt);
 	vec3<T> w;
 	mul(w, R, wb);
 	if (max_angular_velocity_component_ > T {})
