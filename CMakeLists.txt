@@ -17,6 +17,15 @@ endif()
 
 # Examples
 option(HOP_BUILD_EXAMPLES "Build example programs" OFF)
+
+# Headless reproduction of the resting-contact spin-up. No renderer, so it builds
+# and runs anywhere, and it exits non-zero while the bug is present.
+option(HOP_BUILD_REPRO "Build headless reproduction programs" OFF)
+if(HOP_BUILD_REPRO)
+    add_executable(demo_gib_spin examples/demo_gib_spin.cpp)
+    target_link_libraries(demo_gib_spin PRIVATE hop)
+endif()
+
 if(HOP_BUILD_EXAMPLES)
     find_package(raylib REQUIRED)
     add_executable(demo_bounce examples/demo_bounce.cpp)
