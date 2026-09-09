@@ -13,10 +13,14 @@
 //
 // Table 1 gives a body no gravity, no floor, and no collision scope whatsoever,
 // spins it, and leaves it alone. Rotational energy is a conserved quantity for a
-// free rigid body, so every row must read 1.000x. A thin rod reads 65x.
+// free rigid body, so every row must read 1.000x.
 //
-// The cause is in simulator::integrate_angular, and it is one line. Euler's
-// equation is stepped with FORWARD EULER:
+// FIXED. It used to read 65x on a thin rod. Keep this table as the regression
+// guard — the failure is invisible on any isotropic body, so nothing else catches
+// it. What follows is what was wrong.
+//
+// The cause was in simulator::integrate_angular. Euler's equation was stepped
+// with FORWARD EULER:
 //
 //     cross(gyro, wb, Iw);          // w x (I.w)
 //     sub(net, tb, gyro);
@@ -36,16 +40,23 @@
 // identically zero and the whole term vanishes. Every hop demo body that spins is
 // either isotropic or does not spin long enough to notice.
 //
-// Two fixes, both verified against this table: drop the gyroscopic term (exactly
-// 1.000x everywhere, but no tennis-racket effect), or keep it and scale w back
-// onto the energy ellipsoid after the step (also 1.000x, and the physics
-// survives). The second is what Bullet does with an implicit gyroscopic solve.
+// The fix applied is the second of the two that were measured: the gyroscopic and
+// torque halves are stepped apart, and w is rescaled back onto the energy ellipsoid
+// after the gyroscopic half. That half does exactly zero work, so pinning the
+// energy across it is the physical invariant rather than a fudge. Precession
+// survives — an intermediate-axis spin still flips (tennis-racket effect). Energy
+// comes back exact; |L| is not pinned and drifts up to 8% over 60 s, bounded and
+// independent of spin rate. Bullet pins both with an implicit gyroscopic solve,
+// which needs a 3x3 inverse hop cannot do across its fixed-point scalar types.
+//
+// The rejected alternative was dropping the gyroscopic term: also 1.000x, but it
+// leaves w constant in the BODY frame, so asymmetric bodies never precess.
 //
 // ── BUG 2: a thin box landing on a floor ────────────────────────────────────
 //
 // Table 2 throws the same bodies at a floor, tumbling, and measures energy after
-// they are down. Fixing bug 1 clears every SPHERE-collider row, which is how we
-// know the two are separate — and leaves the thin-box-under-speculative rows
+// they are down. With bug 1 fixed every SPHERE-collider row is clean, which is how
+// we know the two are separate — and leaves the thin-box-under-speculative rows
 // running away by five orders of magnitude. That one is NOT diagnosed. What is
 // known: it is specific to the speculative contact mode (hop's default
 // sweep_slide is nearly clean), it tracks flatness (a cube and a chunk are fine),
