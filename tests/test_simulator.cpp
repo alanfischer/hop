@@ -962,6 +962,78 @@ template <typename T> static void test_friction_rolling(const char * label) {
 // its lever arm (τ = r × F). An off-center pull spins the body about +z; a centered
 // pull (lever = 0) produces pure translation and no spin. Exercises rotated anchors
 // + accumulate_constraint_torque, and the bit-identical center-anchor fast path.
+// Friction's tangent effective mass is DIRECTION-dependent once a lever arm is in
+// play, and the slip direction rotates during the solve. It used to be derived once
+// from the pre-solve slip and reused for every iteration, which over-relaxes by the
+// ratio between the two masses -- measured at 2.47x on a landing gib, and anything
+// past 2 makes Gauss-Seidel diverge. The slip then grew ~1.47x per iteration and one
+// tick handed a 5 cm chunk of debris several joules.
+//
+// The metric is the worst SINGLE-tick energy injection, not an end-to-end ratio: no
+// physical contact adds joules in one frame, and a ratio averages a kick away against
+// a chaotic tumble. A cube is the control -- its tangent mass is the same in every
+// direction, so the frozen scalar was always right for it and it does not move.
+template <typename T> static void test_friction_tangent_mass(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  friction_tangent_mass[%s]: ", label);
+	const T z {};
+	const T grav = tr::from_int(20);
+	// 5 x 4 x 3 cm, m = 0.2: a rock gib, and the worst offender at 10.4 J a tick.
+	const T hx = tr::from_milli(25), hy = tr::from_milli(20), hz = tr::from_milli(15);
+	const T mass = tr::from_milli(200);
+	// Godot's AABB inertia for that box at m = 0.2: 4.17e-5, 5.67e-5, 6.83e-5.
+	const T k = tr::from_int(10000000);
+	const vec3<T> inertia(tr::from_int(417) / k, tr::from_int(567) / k, tr::from_int(683) / k);
+	auto energy = [&](const std::shared_ptr<solid<T>> & b) {
+		const vec3<T> v = b->get_velocity();
+		mat3<T> Rt;
+		transpose(Rt, b->get_orientation());
+		vec3<T> wb;
+		mul(wb, Rt, b->get_angular_velocity());
+		const double m = tr::to_float(mass);
+		return 0.5 * m * tr::to_float(dot(v, v)) +
+		       0.5 * (tr::to_float(wb.x) * tr::to_float(wb.x) * tr::to_float(inertia.x) +
+		              tr::to_float(wb.y) * tr::to_float(wb.y) * tr::to_float(inertia.y) +
+		              tr::to_float(wb.z) * tr::to_float(wb.z) * tr::to_float(inertia.z)) +
+		       m * tr::to_float(grav) * tr::to_float(b->get_position().y);
+	};
+	const vec3<T> spins[3] = { vec3<T>(tr::from_int(9), tr::from_int(3), tr::from_int(5)),
+	                           vec3<T>(tr::from_int(2), tr::from_int(11), tr::from_int(4)),
+	                           vec3<T>(tr::from_int(6), tr::from_int(6), tr::from_int(12)) };
+	double worst = 0;
+	for (int s = 0; s < 3; ++s) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, -grav, z));
+		sim.set_default_contact_mode(contact_mode::speculative);
+		auto floor = std::make_shared<solid<T>>();
+		floor->set_infinite_mass();
+		floor->set_coefficient_of_gravity(z);
+		floor->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_int(60), -tr::one(), -tr::from_int(60)),
+		              vec3<T>(tr::from_int(60), z, tr::from_int(60)))));
+		sim.add_solid(floor);
+		auto b = std::make_shared<solid<T>>();
+		b->set_mass(mass);
+		b->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-hx, -hy, -hz), vec3<T>(hx, hy, hz))));
+		b->set_inertia(inertia);
+		b->set_position(vec3<T>(z, tr::from_milli(900), z));
+		b->set_velocity(vec3<T>(tr::from_milli(1200), tr::from_int(2), -tr::from_milli(800)));
+		b->set_angular_velocity(spins[s]);
+		sim.add_solid(b);
+		double prev = energy(b);
+		for (int i = 0; i < 3600; ++i) {   // 60 s: the worst kick is not always early
+			sim.update(tr::one() / tr::from_int(60));
+			const double e = energy(b);
+			if (i > 60)   // past the landing transient
+				worst = std::fmax(worst, e - prev);
+			prev = e;
+		}
+	}
+	printf("worst single-tick injection = %.4f J ", worst);
+	assert(worst < 0.5);   // was 10.4 J
+	printf("OK\n");
+}
+
 template <typename T> static void test_constraint_anchor_torque(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  constraint_anchor_torque[%s]: ", label);
@@ -1189,6 +1261,7 @@ int main() {
 	test_friction_rolling<float>("float");
 	test_shock_angular_mass<float>("float");
 	test_contact_arm_not_face_centre<float>("float");
+	test_friction_tangent_mass<float>("float");
 	test_constraint_anchor_torque<float>("float");
 	test_fast_spinner_no_tunnel<float>("float");
 	test_angular_substep_ccd<float>("float");

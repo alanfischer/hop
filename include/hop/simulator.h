@@ -2407,8 +2407,23 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			// λ_t = −v_t / m_t. Non-angular: m_t = inv_m_sum (cached friction_scale).
 			// Angular (Phase 9): the tangent effective mass along the slip direction,
 			// so a tangential contact also torques the body (rolling).
+			// The tangent effective mass is DIRECTION-dependent once a lever arm is in
+			// play, and the slip direction rotates during the solve — so unlike the
+			// normal (whose direction is fixed for the whole solve, which is why its
+			// response vectors are cached), the tangent mass has to be re-derived at the
+			// live slip. Reusing the pre-solve one over-relaxes by the ratio between
+			// them, measured at 2.47x on a landing gib, and anything above 2 diverges.
+			T scale_t = p.friction_scale_t;
+			if (p.has_angular) {
+				vec3<T> t_hat(vt);
+				if (normalize_carefully(t_hat, epsilon_)) {
+					const T eff_t = angular_eff_mass<T>(p, t_hat);
+					if (eff_t > zero_val)
+						scale_t = -one / eff_t;
+				}
+			}
 			vec3<T> lambda_t;
-			mul(lambda_t, vt, p.friction_scale_t);
+			mul(lambda_t, vt, scale_t);
 			vec3<T> new_accum_t;
 			add(new_accum_t, p.accum_t, lambda_t);
 			// Coulomb stick/slip: the contact holds (static) as long as the
