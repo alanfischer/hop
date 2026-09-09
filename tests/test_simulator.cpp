@@ -789,6 +789,76 @@ template <typename T> static void test_angular_impulse(const char * label) {
 // sliding along the floor decelerates AND tips forward (acquires ω about the axis
 // perpendicular to motion), the start of rolling. Exercises the angular friction
 // (tangent effective-mass) path.
+// Shock propagation must solve a contact at the same effective mass the main
+// Gauss-Seidel sweep does. It used to pass the bare inverse-mass sum, which ignores
+// the lever-arm term a rotating body contributes — for a flat slab contacted under a
+// corner that is ~6x too small, so every shock pass over-relaxed the normal
+// constraint by that factor and the residual error grew instead of shrinking. A
+// landing then ran away by orders of magnitude (E30/E5 above 700x here) until the
+// velocity cap caught it. Speculative only (shock propagation runs nowhere else) and
+// rotating-body only (with inv_inertia == 0 the two masses are equal, so this is a
+// no-op for every non-spinning body).
+template <typename T> static void test_shock_angular_mass(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  shock_angular_mass[%s]: ", label);
+	const T z {};
+	const T grav = tr::from_int(20);
+	// 12 x 3 x 12 cm, m = 0.2: a gib-sized slab, thin on Y.
+	const T hx = tr::from_milli(60), hy = tr::from_milli(15), hz = tr::from_milli(60);
+	const T mass = tr::from_milli(200);
+	const T k = tr::from_int(1000);
+	const vec3<T> inertia(tr::from_milli(255) / k, tr::from_milli(480) / k, tr::from_milli(255) / k);
+	auto energy = [&](const std::shared_ptr<solid<T>> & b) {
+		const vec3<T> v = b->get_velocity();
+		mat3<T> Rt;
+		transpose(Rt, b->get_orientation());
+		vec3<T> wb;
+		mul(wb, Rt, b->get_angular_velocity());   // body frame, where the inertia is diagonal
+		const double m = tr::to_float(mass);
+		return 0.5 * m * tr::to_float(dot(v, v)) +
+		       0.5 * (tr::to_float(wb.x) * tr::to_float(wb.x) * tr::to_float(inertia.x) +
+		              tr::to_float(wb.y) * tr::to_float(wb.y) * tr::to_float(inertia.y) +
+		              tr::to_float(wb.z) * tr::to_float(wb.z) * tr::to_float(inertia.z)) +
+		       m * tr::to_float(grav) * tr::to_float(b->get_position().y);
+	};
+	// Judge energy, never |w|: a small body rolling legitimately spins fast, so a |w|
+	// threshold flags honest rolling and misses a body quietly doubling its energy.
+	const vec3<T> spins[3] = { vec3<T>(tr::from_int(9), tr::from_int(3), tr::from_int(5)),
+	                           vec3<T>(tr::from_int(2), tr::from_int(11), tr::from_int(4)),
+	                           vec3<T>(tr::from_int(6), tr::from_int(6), tr::from_int(12)) };
+	double worst = 0;
+	for (int s = 0; s < 3; ++s) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, -grav, z));
+		sim.set_default_contact_mode(contact_mode::speculative);
+		auto floor = std::make_shared<solid<T>>();
+		floor->set_infinite_mass();
+		floor->set_coefficient_of_gravity(z);
+		floor->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_int(60), -tr::one(), -tr::from_int(60)),
+		              vec3<T>(tr::from_int(60), z, tr::from_int(60)))));
+		sim.add_solid(floor);
+		auto b = std::make_shared<solid<T>>();
+		b->set_mass(mass);
+		b->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-hx, -hy, -hz), vec3<T>(hx, hy, hz))));
+		b->set_inertia(inertia);   // finite inertia IS rotation unlocked
+		b->set_position(vec3<T>(z, tr::from_milli(900), z));
+		b->set_velocity(vec3<T>(tr::from_milli(1200), tr::from_int(2), -tr::from_milli(800)));
+		b->set_angular_velocity(spins[s]);
+		sim.add_solid(b);
+		// Energy at 30 s over energy at 5 s, so growth AFTER the landing transient.
+		double landed = 0;
+		for (int i = 0; i < 1800; ++i) {
+			sim.update(tr::one() / tr::from_int(60));
+			if (i == 300) landed = energy(b);
+		}
+		if (landed > 1e-6) worst = std::fmax(worst, energy(b) / landed);
+	}
+	printf("worst E30/E5 = %.2fx ", worst);
+	assert(worst < 10.0);   // was 710x (double) / 2160x (float)
+	printf("OK\n");
+}
+
 template <typename T> static void test_friction_rolling(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  friction_rolling[%s]: ", label);
@@ -1055,6 +1125,7 @@ int main() {
 	test_dynamic_spin<float>("float");
 	test_angular_impulse<float>("float");
 	test_friction_rolling<float>("float");
+	test_shock_angular_mass<float>("float");
 	test_constraint_anchor_torque<float>("float");
 	test_fast_spinner_no_tunnel<float>("float");
 	test_angular_substep_ccd<float>("float");
