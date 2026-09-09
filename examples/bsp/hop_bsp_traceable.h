@@ -221,8 +221,21 @@ inline bool hull_nearest_leaf_plane(const hull &h, int num, const double p[3], i
 // Column j is the mover's local axis j expressed in GoldSrc space. `oriented` is false
 // for the identity, which is every non-rotating body — players, projectiles, doors —
 // and takes the cheap path through box_support unchanged.
+// `hext` is the half-extent along each of those axes and `radius` rounds the whole
+// thing off, so one struct describes both shapes a hull expansion can carry exactly:
+// a box is (hext, radius 0), and a capsule is a degenerate box with only its spine —
+// hext = (half_length, 0, 0) — plus its radius. Both reduce to ONE symmetric offset
+// per plane, which is all a Minkowski-expanded hull can hold.
 struct mover_basis {
 	double axis[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+	double hext[3] = { 0, 0, 0 };
+	double radius = 0;
+	// Support along each of the hull's OWN axes. An axial plane's normal is a world
+	// axis, so its offset is one of these three and never a dot product — and axial
+	// planes are the overwhelming majority in a BSP, which is what keeps an oriented
+	// trace costing about what an axis-aligned one does. Also the mover's world-aligned
+	// bound, which is what the eject budget and the six-axis probes measure with.
+	double axial[3] = { 0, 0, 0 };
 	bool oriented = false;
 };
 
@@ -237,11 +250,15 @@ inline double box_support(const N n[3], const double half[3], const mover_basis 
 		const double nz = n[2] < 0 ? -(double)n[2] : (double)n[2];
 		return nx * half[0] + ny * half[1] + nz * half[2];
 	}
-	double sum = 0;
+	// Oriented, the shape describes itself: `half` is the caller's axis-aligned bound
+	// and no longer the right answer. A capsule's spine contributes |n.axis| * half and
+	// its roundness a flat radius, which is the exact support of a capsule.
+	double sum = b.radius;
 	for (int j = 0; j < 3; ++j) {
+		if (b.hext[j] == 0) continue;
 		const double d = (double)n[0] * b.axis[0][j] + (double)n[1] * b.axis[1][j] +
 		                 (double)n[2] * b.axis[2][j];
-		sum += (d < 0 ? -d : d) * half[j];
+		sum += (d < 0 ? -d : d) * b.hext[j];
 	}
 	return sum;
 }
@@ -269,7 +286,9 @@ inline double box_support(const N n[3], const double half[3], const mover_basis 
 inline void box_support_point(const double n[3], const double half[3],
                               const mover_basis &b, double out[3]) {
 	out[0] = out[1] = out[2] = 0;
+	const double *h = b.oriented ? b.hext : half;
 	for (int j = 0; j < 3; ++j) {
+		if (h[j] == 0) continue;
 		const double m[3] = { b.axis[0][j], b.axis[1][j], b.axis[2][j] };
 		const double c = n[0] * m[0] + n[1] * m[1] + n[2] * m[2];
 		const double a = c < 0 ? -c : c;
@@ -278,11 +297,18 @@ inline void box_support_point(const double n[3], const double half[3],
 		if (w >= 1.0) w = 1.0;
 		else w = w * w * (3.0 - 2.0 * w);
 		if (w <= 0.0) continue;
-		const double k = (c < 0 ? half[j] : -half[j]) * w;
+		const double k = (c < 0 ? h[j] : -h[j]) * w;
 		out[0] += k * m[0];
 		out[1] += k * m[1];
 		out[2] += k * m[2];
 	}
+	// Round it off. The spine gives a capsule WHERE along its length it touches; the
+	// surface itself is one radius further out along -n. The smoothstep above is what
+	// keeps this honest as a rod comes level: both ends support it equally there, so
+	// the tie pulls the point back to the middle rather than picking an arbitrary end
+	// and handing a level rod a lever arm it does not have.
+	if (b.radius > 0)
+		for (int i = 0; i < 3; ++i) out[i] -= n[i] * b.radius;
 }
 
 // The turned box's own axis-aligned bound, per axis: its reach along each world axis.
@@ -290,14 +316,15 @@ inline void box_support_point(const double n[3], const double half[3],
 // of which ask "how far does the mover reach THAT way" in hull axes rather than the
 // mover's own.
 inline void box_world_half(const double half[3], const mover_basis &b, double out[3]) {
-	if (!b.oriented) {
-		for (int i = 0; i < 3; ++i) out[i] = half[i];
-		return;
-	}
+	for (int i = 0; i < 3; ++i) out[i] = b.oriented ? b.axial[i] : half[i];
+}
+
+// Fill the axial cache. Called once, when the basis is built.
+inline void set_axial(mover_basis &b) {
 	for (int i = 0; i < 3; ++i) {
 		double e[3] = { 0, 0, 0 };
 		e[i] = 1.0;
-		out[i] = box_support(e, half, b);
+		b.axial[i] = box_support(e, b.hext, b);
 	}
 }
 
@@ -339,7 +366,7 @@ struct sweep_skin {
 // only for an axis-aligned mover, since a turned box does not line up with them.
 inline double plane_offset(const hop_bsp::BSPPlane &pl, const double half[3],
                            const mover_basis &b) {
-	if (!b.oriented && pl.type < 3) return half[pl.type];
+	if (pl.type < 3) return b.oriented ? b.axial[pl.type] : half[pl.type];
 	return box_support(pl.normal, half, b);
 }
 
@@ -1179,7 +1206,7 @@ private:
 		}
 	}
 
-	// The mover's axes, expressed in this model's GoldSrc frame.
+	// The mover's shape, expressed in this model's GoldSrc frame.
 	//
 	// `orientation` is the TRACEABLE's world rotation, so the mover's rotation relative
 	// to the geometry is orientation^T . solid_orientation — the same conjugation
@@ -1188,7 +1215,10 @@ private:
 	// determinant +1, so it needs no special handling for a basis either.
 	//
 	// Gated on rotates_dynamically(): a body with no inertia never integrates an
-	// orientation, so it gets the identity and every trace it makes is unchanged.
+	// orientation, so it gets the identity and every trace it makes is unchanged. That
+	// gate is load-bearing beyond mere caution — an oriented mover is forced onto hull 0
+	// (see trace_solid), so letting a player's capsule through here would take players
+	// off the sized hulls they are built for.
 	hopbsp::mover_basis mover_basis_gs(hop::solid<T> *s, const hop::mat3<T> &orientation) const {
 		hopbsp::mover_basis b;
 		if (s == nullptr || !s->rotates_dynamically()) return b;
@@ -1201,26 +1231,106 @@ private:
 			hop::mul(rel, Rt, Rm);
 			Rm = rel;
 		}
-		if (Rm == identity) return b;
 
-		// box_support pairs column j with half[j], and `half` is indexed in GOLDSRC
-		// axes — solid_box_gs already permuted it, so half[1] is the Godot-Z extent and
-		// half[2] the Godot-Y one. The columns have to take the same permutation or
-		// each body axis is measured with another axis's extent: a bone tipped on its
-		// edge asked how far it reached downward and was told its thickness, which is
-		// what it would have answered lying flat.
-		//
-		// Only the ORDER is permuted here. Each column's components go through the
-		// direction swap, and its sign is irrelevant — box_support takes |n.m_j|.
-		static const int COL[3] = { 0, 2, 1 };  // gs x,y,z <- Godot local x,z,y
-		for (int j = 0; j < 3; ++j) {
-			const int c = COL[j];
-			b.axis[0][j] = -(double)Rm.at(0, c);
-			b.axis[1][j] = (double)Rm.at(2, c);
-			b.axis[2][j] = (double)Rm.at(1, c);
+		// A capsule has to be carried at EVERY attitude, including square-on: traced as
+		// its bounding box it is a brick, and a brick has corners a capsule does not.
+		// A box square-on to the hull is exactly what the plain AABB path already
+		// traces, so it stays on it and stays bit-identical.
+		const bool round = single_centred_capsule(s, Rm, b);
+		if (!round && Rm == identity) return b;
+
+		if (!round) {
+			// Half-extents along the mover's own axes. Prefer the shape's own box; fall
+			// back to the local bound for anything this cannot describe exactly (a
+			// compound, an off-centre shape), which is the same box the axis-aligned
+			// path uses and no worse than what it had.
+			if (!single_centred_box_hext(s, b.hext)) {
+				hop::aa_box<T> lb = s->get_local_bound();
+				b.hext[0] = 0.5 * (double)(lb.maxs.x - lb.mins.x) * inv_scale_;
+				b.hext[1] = 0.5 * (double)(lb.maxs.z - lb.mins.z) * inv_scale_;
+				b.hext[2] = 0.5 * (double)(lb.maxs.y - lb.mins.y) * inv_scale_;
+			}
+			// box_support pairs column j with hext[j], and both are indexed in GOLDSRC
+			// axes — solid_box_gs already permuted the extents, so hext[1] is the
+			// Godot-Z one and hext[2] the Godot-Y one. The columns take the same
+			// permutation or each body axis is measured with another axis's extent: a
+			// bone tipped on its edge asks how far it reaches downward and is told its
+			// thickness, which is what it would have answered lying flat.
+			//
+			// Only the ORDER is permuted. Each column's components go through the
+			// direction swap, and its sign is irrelevant — box_support takes |n.m_j|.
+			static const int COL[3] = { 0, 2, 1 };  // gs x,y,z <- Godot local x,z,y
+			for (int j = 0; j < 3; ++j) {
+				const int c = COL[j];
+				b.axis[0][j] = -(double)Rm.at(0, c);
+				b.axis[1][j] = (double)Rm.at(2, c);
+				b.axis[2][j] = (double)Rm.at(1, c);
+			}
 		}
 		b.oriented = true;
+		hopbsp::set_axial(b);
 		return b;
+	}
+
+	// Half-extents of a solid that IS one centred, unrotated-in-its-own-frame box, in
+	// GoldSrc axis order. False for anything else.
+	bool single_centred_box_hext(hop::solid<T> *s, double hext[3]) const {
+		const auto &shapes = s->get_shapes();
+		if (shapes.size() != 1) return false;
+		hop::shape<T> *sh = shapes[0].get();
+		if (sh->get_type() != hop::shape_type::box) return false;
+		const hop::vec3<T> &lp = sh->get_local_position();
+		if (!(lp.x == T {} && lp.y == T {} && lp.z == T {})) return false;
+		const hop::aa_box<T> &box = sh->get_box();
+		hop::vec3<T> centre;
+		hop::add(centre, box.mins, box.maxs);
+		if (!(centre.x == T {} && centre.y == T {} && centre.z == T {})) return false;
+		hext[0] = 0.5 * (double)(box.maxs.x - box.mins.x) * inv_scale_;
+		hext[1] = 0.5 * (double)(box.maxs.z - box.mins.z) * inv_scale_;
+		hext[2] = 0.5 * (double)(box.maxs.y - box.mins.y) * inv_scale_;
+		return true;
+	}
+
+	// A solid that IS one centred capsule, laid into the basis: spine in column 0,
+	// the other two extents zero, roundness in `radius`.
+	//
+	// The spine goes into a FIXED column whichever local axis it was authored along.
+	// Godot builds capsules along Y and this file's own tests along X, and reading the
+	// spine out of a fixed local slot gives one of them a zero-length spine — the
+	// contact then lands under the centre, the lever arm vanishes, and a gib stands
+	// exactly as it did before while the other axis's test passes.
+	bool single_centred_capsule(hop::solid<T> *s, const hop::mat3<T> &Rm,
+	                            hopbsp::mover_basis &b) const {
+		const auto &shapes = s->get_shapes();
+		if (shapes.size() != 1) return false;
+		hop::shape<T> *sh = shapes[0].get();
+		if (sh->get_type() != hop::shape_type::capsule) return false;
+		const hop::vec3<T> &lp = sh->get_local_position();
+		if (!(lp.x == T {} && lp.y == T {} && lp.z == T {})) return false;
+
+		const hop::capsule<T> &c = sh->get_capsule();
+		hop::vec3<T> spine_half(c.direction);
+		hop::mul(spine_half, hop::scalar_traits<T>::half());
+		hop::vec3<T> centre;
+		hop::add(centre, c.origin, spine_half);
+		if (!(centre.x == T {} && centre.y == T {} && centre.z == T {})) return false;
+
+		hop::vec3<T> spine_w;
+		hop::mul(spine_w, Rm, spine_half);
+		const double len = std::sqrt((double)spine_w.x * (double)spine_w.x +
+		                             (double)spine_w.y * (double)spine_w.y +
+		                             (double)spine_w.z * (double)spine_w.z);
+		if (len <= 0) return false;  // a sphere in capsule clothing: no spine to lay
+		b.axis[0][0] = -(double)spine_w.x / len;
+		b.axis[1][0] = (double)spine_w.z / len;
+		b.axis[2][0] = (double)spine_w.y / len;
+		b.hext[0] = len * inv_scale_;
+		for (int j = 1; j < 3; ++j) {
+			b.hext[j] = 0;
+			for (int i = 0; i < 3; ++i) b.axis[i][j] = (i == j) ? 1.0 : 0.0;
+		}
+		b.radius = (double)c.radius * inv_scale_;
+		return true;
 	}
 
 	// The mover's own box, in GoldSrc units. hop maintains this union for us and
