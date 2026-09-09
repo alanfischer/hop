@@ -2473,7 +2473,14 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				T inv_sum = inv_a + inv_b;
 				if (inv_sum <= zero_val)
 					continue;
-				solve_normal(p, inv_a, inv_b, inv_sum);
+				// Effective normal mass with the frozen anchor's LINEAR term removed but
+				// the angular response kept (apply_normal_impulse still torques a frozen
+				// rotating body). Passing the bare inverse-mass sum here overstates the
+				// step by eff_n/inv_m_sum for any body with an off-axis lever arm.
+				T eff_shock = p.eff_n - p.inv_m_sum + inv_sum;
+				if (eff_shock <= zero_val)
+					continue;
+				solve_normal(p, inv_a, inv_b, eff_shock);
 			}
 		}
 	}
