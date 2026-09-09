@@ -859,6 +859,68 @@ template <typename T> static void test_shock_angular_mass(const char * label) {
 	printf("OK\n");
 }
 
+// A lever arm has to belong to the body it turns. When only one side of a pair
+// discovers a contact, the other side's arm is fabricated from the discovering
+// side's contact point — and support() cannot recover the tangential position of a
+// FACE contact, so it collapses to the face CENTRE. For a floor that is the floor
+// box's own centre, which is wherever the level author put it, and the arm it
+// implies torques the partner about a point metres outside itself.
+//
+// The invariant: two floors that present the SAME plane under the body, differing
+// only in where the box's centre sits, must produce the same landing. They used to
+// produce different ones, which is how you can tell a fabricated arm is being used
+// as if it were real.
+template <typename T> static void test_contact_arm_not_face_centre(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  contact_arm_not_face_centre[%s]: ", label);
+	const T z {};
+	// `extra` grows the floor box in +x/+z only, moving its centre away from the
+	// landing without changing the surface the body actually meets.
+	auto land = [&](T extra, int spin_idx, vec3<T> & end_pos, T & end_speed) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
+		sim.set_default_contact_mode(contact_mode::speculative);
+		auto floor = std::make_shared<solid<T>>();
+		floor->set_infinite_mass();
+		floor->set_coefficient_of_gravity(z);
+		floor->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_int(60), -tr::one(), -tr::from_int(60)),
+		              vec3<T>(tr::from_int(60) + extra, z, tr::from_int(60) + extra))));
+		sim.add_solid(floor);
+		auto b = std::make_shared<solid<T>>();
+		const T hx = tr::from_milli(60), hy = tr::from_milli(15), hz = tr::from_milli(60);
+		const T k = tr::from_int(1000);
+		b->set_mass(tr::from_milli(200));
+		b->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-hx, -hy, -hz), vec3<T>(hx, hy, hz))));
+		b->set_inertia(vec3<T>(tr::from_milli(255) / k, tr::from_milli(480) / k, tr::from_milli(255) / k));
+		b->set_position(vec3<T>(z, tr::from_milli(900), z));
+		b->set_velocity(vec3<T>(tr::from_milli(1200), tr::from_int(2), -tr::from_milli(800)));
+		const vec3<T> spins[3] = { vec3<T>(tr::from_int(9), tr::from_int(3), tr::from_int(5)),
+		                           vec3<T>(tr::from_int(2), tr::from_int(11), tr::from_int(4)),
+		                           vec3<T>(tr::from_int(6), tr::from_int(6), tr::from_int(12)) };
+		b->set_angular_velocity(spins[spin_idx]);
+		sim.add_solid(b);
+		for (int i = 0; i < 1800; ++i)
+			sim.update(tr::one() / tr::from_int(60));
+		end_pos.set(b->get_position());
+		end_speed = length(b->get_velocity());
+	};
+	float worst = 0;
+	for (int s = 0; s < 3; ++s) {
+		vec3<T> centred, offset;
+		T v_centred, v_offset;
+		land(z, s, centred, v_centred);                    // 120 m floor, centre under the landing
+		land(tr::from_int(2000), s, offset, v_offset);     // same plane, centre 1 km away
+		vec3<T> delta;
+		sub(delta, offset, centred);
+		worst = std::fmax(worst, tr::to_float(length(delta)));
+		worst = std::fmax(worst, std::fabs(tr::to_float(v_offset) - tr::to_float(v_centred)));
+	}
+	printf("worst divergence = %.4f m ", worst);
+	assert(worst < 0.01f);   // was 0.5-2 m: the landing followed the floor box's centre
+	printf("OK\n");
+}
+
 template <typename T> static void test_friction_rolling(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  friction_rolling[%s]: ", label);
@@ -1126,6 +1188,7 @@ int main() {
 	test_angular_impulse<float>("float");
 	test_friction_rolling<float>("float");
 	test_shock_angular_mass<float>("float");
+	test_contact_arm_not_face_centre<float>("float");
 	test_constraint_anchor_torque<float>("float");
 	test_fast_spinner_no_tunnel<float>("float");
 	test_angular_substep_ccd<float>("float");

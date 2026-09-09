@@ -2047,6 +2047,32 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 					vec3<T> world_contact;
 					add(world_contact, s->position_, slot.lever);
 					sub(partner_r, world_contact, partner->position_);
+					// That point is only a contact point if it lies ON the partner.
+					// support() cannot recover the tangential position of a FACE contact
+					// and collapses it to the face CENTRE, so when the iterating side was
+					// contacted on a face this is that side's own centre — the world origin
+					// for a floor centred there — and the arm it implies torques the partner
+					// about a point metres outside itself. A speculative contact sits
+					// legitimately off the surface by up to the margin and the frame's
+					// approach, so the test is the partner's own bounding sphere rather than
+					// its box: loose enough for a real contact, and 25x clear of a face
+					// centre. Falling back to the radial arm gives the contact straight
+					// along the normal, which is what a face contact under the partner would
+					// have produced and what every rounded partner already gets.
+					// Only worth checking when the arm is actually read: a partner with no
+					// inertia never spins, so its arm is unused whatever we put in it.
+					if (partner->rotates_dynamically()) {
+						aa_box<T> partner_bound;
+						partner->get_bound_about_position(partner_bound);
+						vec3<T> reach;
+						for (int axis = 0; axis < 3; ++axis) {
+							const T lo = tr::abs(partner_bound.mins[axis]);
+							const T hi = tr::abs(partner_bound.maxs[axis]);
+							reach[axis] = (lo > hi ? lo : hi) + spec_margin_ + epsilon_;
+						}
+						if (length_squared(partner_r) > length_squared(reach))
+							support(partner_r, partner_bound, slot.normal);
+					}
 				}
 				// Normal effective mass, plus the per-body angular impulse-response
 				// vectors I⁻¹(rₐ×n) / I⁻¹(r_b×n). A normal impulse is always along n, so
