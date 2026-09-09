@@ -44,6 +44,12 @@ if(HOP_BUILD_EXAMPLES)
 
     add_executable(demo_rotating_platform examples/demo_rotating_platform.cpp)
     target_link_libraries(demo_rotating_platform PRIVATE hop raylib)
+
+    # Gibs on a BSP hull vs an aa_box floor. The GoldSrc traceable it needs is copied
+    # into examples/bsp from hop-godot — see the README there.
+    add_executable(demo_gib_floor examples/demo_gib_floor.cpp)
+    target_link_libraries(demo_gib_floor PRIVATE hop raylib)
+    target_include_directories(demo_gib_floor PRIVATE examples)
 endif()
 
 # ReactPhysics3D port of demo_bounce — side-by-side performance comparison.
