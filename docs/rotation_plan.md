@@ -658,6 +658,70 @@ capsule-only with boxes immune; boxes are immune only while they are axis-aligne
 is a contact manifold — two or four points under a resting face — and that is a phase of
 its own.
 
+### Phase 13 — swing and twist limits (a corpse that keeps its shape) — **SHIPPED**
+
+The phase Phase 12 deferred, in the terms it deferred it. Watching a pin-only ragdoll
+answered the question: a pin is a **ball-socket — it constrains position and nothing else**,
+so all twenty of a corpse's joints are free 360° swivels and a neck folded to the knees
+satisfies every constraint in the system. `demo_ragdoll`'s Table 4 measures it: head to
+pelvis is 0.66 m standing, 0.29 m on pins alone, 0.64 m with limits.
+
+- **A limit is a contact, not a joint.** Unilateral: silent inside the cone, pushing back
+  and never pulling at the boundary, with the same clamped accumulator (`accum >= 0`) that
+  stops a contact becoming sticky. It lives ON the pin — `constraint<T>` gains `frame_a_` /
+  `frame_b_`, `swing_span_` / `twist_span_` and Godot's three knobs — because a cone-twist
+  *is* a ball-socket plus limits, and two constraint objects over one pair of bodies would
+  double the rows and then fight over them. **A negative span means no limit**, so every
+  pin built before this is bit-identical, which `test_limit_is_unilateral` holds to.
+- **Swing–twist decomposition** (`decompose_swing_twist`, `constraint.h`), once per tick in
+  `build_joint_rows`: project the relative orientation onto the joint frame's local **+X**
+  (Bullet's twist axis, and therefore Godot's), call what is left the swing. The swing axis
+  comes out exactly perpendicular to +X — the x component cancels algebraically — so the two
+  limits are independent 1-DOF rows rather than one coupled mess.
+- **The axis points the way the violation is RELIEVED**, like a contact normal. This is the
+  trap: point it the natural-reading way, the way the violation grows, and every restoring
+  impulse is negative, the `accum >= 0` clamp eats all of them, and the limit silently does
+  nothing at the velocity level at all.
+- **It is solved at the velocity level only, and there is no position pass.** A violated
+  limit winds itself back in by driving the relative angular velocity along the recovery
+  axis, capped at 16 rad/s — the same trick a speculative contact uses to turn a separation
+  into a velocity. It has to be an impulse for two reasons, and the second one cost a
+  release. **One:** an impulse propagates down the chain through the pins, where a
+  pseudo-position moves only its own row's two bodies — measured, the pin to the arm cancels
+  the push exactly and a shoulder sits **140° outside a 20° cone forever**. **Two:** a
+  contact in the way can *refuse* an impulse, and cannot refuse a pseudo-position. A forearm
+  pinned under a torso against the floor is outside its cone and physically cannot get back
+  in, so a position pass re-corrected it every tick forever and teleported the corpse a
+  couple of centimetres a tick doing it. Over 32 thrown corpses that was **0.20 m of crawl
+  per half-second against a pin-only corpse's 0.035 m, and two in twelve ever came to rest.**
+  The corpse writhed on the ground until the game's bake timer stopped it. Deleting the
+  position pass took the crawl to 0.025 m — *below* the pin-only corpse — and left the joints
+  no worse held. `demo_ragdoll`'s Table 4 measures exactly this, and its crawl bar is the
+  pin-only corpse beside it: adding limits must not add motion.
+- **`SOFTNESS` is the fraction of the span at which the limit starts to resist.** Inside
+  `softness·span` it does nothing; from there to the span it damps the approach without
+  pushing back positionally; past the span it is a hard stop. That band is what makes a limit
+  read as flesh instead of a detent. `BIAS` and `RELAXATION` are the position fraction and
+  the velocity scale. Godot's defaults — 45°, 180°, 0.3, 0.8, 1.0 — are hop's defaults.
+- **Sleep: a joint resting on its limit must be allowed to sleep**, like a body resting on a
+  floor. `is_loaded` counts an engaged limit as load only while it is still *violated* by
+  more than a degree, never merely because it is engaged. Get it backwards and every corpse
+  with an arm against its stop stays awake for its whole lifetime — and corpses already
+  cannot sleep for an unrelated reason (the oriented-box spin above), which would hide it.
+- **Cost:** eight corpses, 168 bodies, 4.26 ms/tick resting with limits against 4.52 ms
+  without — inside the noise, because most rows are inactive most of the time. And a limited
+  corpse settles *sooner* than a pin-only one (1.86 s against 2.19 s), so it is off the bill
+  earlier as well.
+- **Still stubs:** `_joint_make_hinge`, `_joint_make_slider` and their `*_set_param`
+  siblings. A cone centred *off* the rest pose approximates a hinge well enough for a
+  corpse — an elbow at centre 60° with a span of 60° travels 0° to 120° and never backwards
+  — which is what `joint_offset.basis` is for on the game side.
+- **Tests:** `test_cone_limit_holds` (an arm gravity would hang at 86° stops at its 30°
+  cone, and the pin under it reads *better* than the unlimited one), `test_twist_limit_holds`,
+  `test_limit_is_unilateral` (bit-identical to a plain pin inside the cone),
+  `test_joint_on_its_limit_sleeps` (awake while violating, asleep once resting on it).
+  Demo: `demo_ragdoll` Table 4.
+
 ---
 
 ## Open decisions
@@ -772,6 +836,14 @@ its own.
   `commit_solid` — all in `simulator.h`. hop-godot: `_joint_make_pin` builds a `rigid` and
   pushes `pin_bias`/`pin_damping`/`pin_impulse_clamp` through, in `hop_physics_server.cpp`.
   Tests: `test_rigid_joint_chain`, `test_rigid_joint_sleeps`; demo `examples/demo_ragdoll.cpp`.
+- Phase 13 (swing/twist limits): `decompose_swing_twist`, the frame/span/knob members and
+  their accessors, `measure_limits`, and the limit branch of `is_loaded` in `constraint.h`;
+  `joint_row::limit_row`, the limit block of `build_joint_rows` (which now takes `dt`) and
+  the limit sweep at the end of `solve_joints` — both in `simulator.h`. Nothing in
+  `correct_positions`: see above, a limit deliberately has no position pass. hop-godot: `_joint_make_cone_twist` and `_cone_twist_joint_set_param` /
+  `_get_param` in `hop_physics_server.cpp`, the `cone_*` fields in `hop_joint_data.h`.
+  Tests: `test_cone_limit_holds`, `test_twist_limit_holds`, `test_limit_is_unilateral`,
+  `test_joint_on_its_limit_sleeps`; demo `examples/demo_ragdoll.cpp` Table 4.
 - Toadlet port reference:
   `/Users/afischer/personal/toadlet/source/cpp/toadlet/egg/mathfixed/` —
   original quaternion/matrix3x3 ops and fixed-point polynomial asin/acos.

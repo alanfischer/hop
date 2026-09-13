@@ -164,6 +164,10 @@ public:
 	T get_speculative_slop() const { return spec_slop_; }
 	void set_position_baumgarte(T b) { spec_pos_baumgarte_ = b; }
 	T get_position_baumgarte() const { return spec_pos_baumgarte_; }
+	// Ceiling on how fast a violated angular joint limit winds itself back in (rad/s).
+	// See build_joint_rows: it is what keeps the recovery from being a catapult.
+	void set_limit_recovery_max(T r) { limit_recovery_max_ = r; }
+	T get_limit_recovery_max() const { return limit_recovery_max_; }
 	void set_position_iterations(int n) { spec_pos_iters_ = n < 0 ? 0 : n; }
 	int get_position_iterations() const { return spec_pos_iters_; }
 
@@ -512,6 +516,7 @@ private:
 		spec_margin_ = epsilon_ * tr::from_int(8);  // discover contacts this far past the predicted motion
 		spec_slop_ = epsilon_;                       // penetration tolerated without correction (anti-jitter)
 		spec_pos_baumgarte_ = tr::from_milli(800);   // 0.8 — fraction of penetration removed per NGS iteration
+		limit_recovery_max_ = tr::from_int(16);      // rad/s a violated angular limit may close at
 	}
 
 	void report_collisions();
@@ -574,7 +579,7 @@ private:
 	// one Gauss-Seidel visit per row, interleaved with the contact sweeps so a pinned
 	// limb whose parent rests on a floor solves against that floor instead of fighting
 	// it. correct_positions runs the matching position pass.
-	void build_joint_rows(int nsolids);
+	void build_joint_rows(int nsolids, T dt);
 	void solve_joints();
 
 	void integration_step(solid<T> * s,
@@ -692,6 +697,39 @@ private:
 		T damping {};                // fraction of the residual anchor velocity removed per iteration
 		T bias {};                   // fraction of the residual separation removed per position iteration
 		T impulse_clamp {};          // per-iteration impulse magnitude cap; 0 = uncapped
+		// Phase 13 angular limits, which turn the pin into a cone-twist. A limit is a
+		// CONTACT, not a second joint: silent inside the cone, unilateral at the
+		// boundary, clamped accumulator so it never pulls.
+		//
+		// It is solved ONLY at the velocity level, and that is the whole difference
+		// between a corpse that settles and one that writhes. A limit also had a position
+		// pass once — a pseudo-rotation into rot_correction_, the way the pin has one —
+		// and a pseudo-position cannot be argued with: a limb pinned under a torso
+		// against the floor is outside its cone and CANNOT get back in, so the position
+		// pass re-corrected it every tick forever and teleported the corpse a couple of
+		// centimetres a tick while it did. Measured over 32 thrown corpses, that was
+		// 0.20 m of crawl per half-second against a pin-only corpse's 0.035 m, and two in
+		// twelve ever came to rest. Deleting it took the crawl to 0.025 m — BELOW the
+		// pin-only corpse — and left the joints no worse held: an impulse can be refused
+		// by the contact that is in the way, and that is exactly the property wanted.
+		struct limit_row {
+			bool on = false;
+			// World, and pointing the way the violation is RELIEVED — the same convention
+			// as a contact normal, which is what makes `accum >= 0` mean the same thing
+			// here: a restoring impulse is positive, and the clamp that stops a contact
+			// becoming sticky stops this becoming a hinge. Point it the other way (the
+			// way the violation grows, which reads more natural and is a trap) and every
+			// restoring impulse is negative, the clamp eats all of them, and the limit
+			// silently does nothing at the velocity level at all.
+			vec3<T> axis;
+			T recover {};      // rad/s the velocity sweep drives it back in at; zero inside
+			T soft {};         // velocity engagement: 0 at softness*span, 1 at the span
+			T eff_spin {};     // 1 / (axis . (Ia^-1 + Ib^-1) . axis): the torque mass about it
+			T accum {};
+		};
+		limit_row swing;
+		limit_row twist;
+		T limit_relax {};
 	};
 	std::vector<joint_row> joint_rows_;
 	// Shock-propagation scratch, all reused per tick (no steady-state alloc):
@@ -707,6 +745,7 @@ private:
 	T spec_margin_ {};         // discover contacts up to this far beyond the predicted motion
 	T spec_slop_ {};           // penetration tolerated without correction (kills resting jitter)
 	T spec_pos_baumgarte_ {};  // fraction of remaining penetration removed per NGS position iteration
+	T limit_recovery_max_ {};  // rad/s ceiling on an angular joint limit's recovery (see build_joint_rows)
 	int spec_pos_iters_ = 8;   // NGS position-solver iterations per tick
 	// Shock-propagation passes appended to the velocity solve. Each pass walks
 	// contacts bottom-up and freezes every body once its support-from-below is
@@ -828,6 +867,7 @@ template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr,
 	mul(dwt, solid_ptr->inv_inertia_, tb); // I⁻¹·τ
 	mul(dwt, dt);
 	add(wb, dwt);
+
 	vec3<T> w;
 	mul(w, R, wb);
 	if (max_angular_velocity_component_ > T {})
@@ -2045,9 +2085,20 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 // arms and the 3x3 effective mass are derived once and the sweep below is a matrix
 // multiply and two adds per visit.
 template <typename T>
-void simulator<T>::build_joint_rows(int nsolids) {
+void simulator<T>::build_joint_rows(int nsolids, T dt) {
 	joint_rows_.clear();
 	const T zero {};
+	// How fast a violated limit winds itself back in, as a target relative angular
+	// velocity along the recovery axis — the same trick a speculative contact uses to
+	// turn a separation distance into a velocity. This is the ONLY thing that closes a
+	// violated limit; there is deliberately no position pass (see joint_row::limit_row).
+	// It has to be an impulse for two reasons: it propagates down the chain through the
+	// pins, where a pseudo-position moves only the row's own two bodies and a shoulder
+	// sits 140 degrees outside a 20 degree cone forever; and a contact in the way can
+	// REFUSE it, where a pseudo-position simply teleports through and drives the corpse
+	// across the floor. The cap is what keeps it from being a catapult.
+	const T inv_dt = (dt > zero) ? tr::one() / dt : zero;
+	const T max_recover = limit_recovery_max_;
 	for (auto & held : constraints_) {
 		constraint<T> * c = held.get();
 		if (!c || !c->is_active() || c->type_ != constraint<T>::type::rigid)
@@ -2122,6 +2173,78 @@ void simulator<T>::build_joint_rows(int nsolids) {
 			r.damping = tr::one();  // over-relaxing a Gauss-Seidel row diverges
 		r.bias = c->bias_;
 		r.impulse_clamp = c->impulse_clamp_;
+
+		// The angular limits. Everything here is fixed for the solve exactly as K is —
+		// orientation does not change between Pass A and Pass B — so the swing-twist
+		// decomposition happens once, here, and each sweep below is a dot product and
+		// two adds. A limit-free pin (both spans negative) leaves every field alone and
+		// takes not one instruction more than it did in Phase 12.
+		if (c->has_limits() && (r.a_rotates || r.b_rotates)) {
+			r.limit_relax = c->limit_relaxation_;
+			quat<T> qa, q_rel;
+			joint_relative_orientation(qa, q_rel, a->get_orientation_quat(), c->frame_a_,
+			                           b ? &b->get_orientation_quat() : nullptr, c->frame_b_);
+			T swing {}, twist {};
+			vec3<T> swing_axis;
+			decompose_swing_twist(q_rel, swing, swing_axis, twist, epsilon_);
+			T softness = c->limit_softness_;
+			if (softness < zero)
+				softness = zero;
+			else if (softness > tr::one())
+				softness = tr::one();
+			// Shared by both limits: turn an angle and its span into a world axis, the
+			// angular mass the pair presents about it, and how hard the velocity sweep
+			// should lean on it.
+			auto arm = [&](const vec3<T> & local_axis, T angle, T span,
+			               typename joint_row::limit_row & out) {
+				if (span < zero)
+					return;  // negative span: no limit at all
+				const T engage = span * softness;
+				if (angle <= engage)
+					return;  // deep inside the cone; costs nothing and changes nothing
+				vec3<T> axis;
+				mul(axis, qa, local_axis);  // parent's joint frame into world
+				neg(axis);                  // ...and point it at the way back in
+				T spin = zero;
+				if (r.a_rotates) {
+					vec3<T> t;
+					apply_inv_inertia_world(a, axis, t);
+					spin += dot(axis, t);
+				}
+				if (r.b_rotates) {
+					vec3<T> t;
+					apply_inv_inertia_world(b, axis, t);
+					spin += dot(axis, t);
+				}
+				// Neither end can turn about this axis. A limit has no linear half to
+				// fall back on, so there is nothing to solve.
+				if (spin <= zero)
+					return;
+				out.on = true;
+				out.axis = axis;
+				out.eff_spin = tr::one() / spin;
+				const T viol = (angle > span) ? angle - span : zero;
+				out.recover = viol * inv_dt * c->limit_bias_;
+				if (out.recover > max_recover)
+					out.recover = max_recover;
+				// Inside the soft band the limit only damps the approach, ramping from
+				// nothing at softness*span to full at the span. Past the span it is a
+				// hard stop and the position pass takes over.
+				out.soft = (span > engage) ? (angle - engage) / (span - engage) : tr::one();
+				if (out.soft > tr::one())
+					out.soft = tr::one();
+			};
+			arm(swing_axis, swing, c->swing_span_, r.swing);
+			// Twist is signed, and its violation axis is +X when the joint has wound one
+			// way and -X when it has wound the other — so both directions are the same
+			// one-sided row, and only the axis flips.
+			vec3<T> twist_axis(tr::one(), zero, zero);
+			if (twist < zero) {
+				twist_axis.x = -tr::one();
+				twist = -twist;
+			}
+			arm(twist_axis, twist, c->twist_span_, r.twist);
+		}
 		joint_rows_.push_back(r);
 	}
 }
@@ -2179,6 +2302,43 @@ void simulator<T>::solve_joints() {
 			apply_inv_inertia_world(r.b, rxj, dw);
 			add(sb.angular_velocity, dw);
 		}
+		if (!r.swing.on && !r.twist.on)
+			continue;
+		// The angular limits ride on the pin and are solved AFTER it, so each sees the
+		// answer the pin has just given. Drive the relative angular velocity along the
+		// violation axis to zero; the clamped accumulator is what makes it a stop rather
+		// than a hinge, so a limb swinging back off its limit is free the instant it
+		// turns around.
+		//
+		// Pure torque, equal and opposite: whatever a limit does to the bodies' spin it
+		// adds no linear momentum, so the pin's own row is the only thing moving them.
+		auto solve_limit = [&](typename joint_row::limit_row & lim) {
+			if (!lim.on)
+				return;
+			vec3<T> wrel;
+			sub(wrel, sb.angular_velocity, sa.angular_velocity);
+			T lambda = (lim.recover - dot(wrel, lim.axis)) * lim.eff_spin * lim.soft * r.limit_relax;
+			T next = lim.accum + lambda;
+			if (next < zero) {
+				lambda = -lim.accum;  // clamp >= 0: the limit pushes back, never pulls in
+				next = zero;
+			}
+			lim.accum = next;
+			if (lambda == zero)
+				return;
+			vec3<T> imp, dw;
+			mul(imp, lim.axis, lambda);
+			if (r.a_rotates) {
+				apply_inv_inertia_world(r.a, imp, dw);
+				sub(sa.angular_velocity, dw);
+			}
+			if (r.b_rotates) {
+				apply_inv_inertia_world(r.b, imp, dw);
+				add(sb.angular_velocity, dw);
+			}
+		};
+		solve_limit(r.swing);
+		solve_limit(r.twist);
 	}
 }
 
@@ -2210,7 +2370,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 
 	// Rigid joints share this tick's solver state and iteration budget with the
 	// contacts; the indices they address were just assigned above.
-	build_joint_rows(nsolids);
+	build_joint_rows(nsolids, dt);
 
 	// --- 1. Build the canonical pair list ---
 	// Walk every active solid's cache exactly once. For each refreshed slot,
