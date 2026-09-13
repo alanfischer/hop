@@ -1231,6 +1231,359 @@ template <typename T> static void test_angular_substep_ccd(const char * label) {
 	printf("OK\n");
 }
 
+// Phase 12: a rigid pin HOLDS. Two links hang off a world point under gravity; a force
+// spring at any stiffness sags (it needs a stretch to produce force at all), while the
+// rigid solve drives the anchor pair together at both the velocity and position level.
+// The assertion is on the joint error, not the position: a chain is allowed to swing.
+template <typename T> static void test_rigid_joint_chain(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  rigid_joint_chain[%s]: ", label);
+	const T z {};
+	const T half = tr::half();
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));  // hang along -y, not hop's default -z
+	auto link = [&](T y) {
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one()));
+		s->set_collide_with_scope(0);  // a hanging chain, nothing to hit
+		s->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_milli(100), -half, -tr::from_milli(100)),
+		              vec3<T>(tr::from_milli(100), half, tr::from_milli(100)))));
+		s->set_position(vec3<T>(z, y, z));
+		sim.add_solid(s);
+		// After add_solid, which stamps the space default: a rigid joint solves in Pass B,
+		// so its bodies must not have committed their position already in Pass A.
+		s->set_contact_mode(contact_mode::speculative);
+		return s;
+	};
+	// Anchors at (0,0,0) and (0,-1,0): link 1 hangs off the world, link 2 off link 1.
+	auto s1 = link(-half);
+	auto s2 = link(-half - tr::one());
+	auto top = std::make_shared<constraint<T>>(s1, vec3<T>(z, z, z));
+	top->set_type(constraint<T>::type::rigid);
+	top->set_local_anchor_a(vec3<T>(z, half, z));
+	sim.add_constraint(top);
+	auto mid = std::make_shared<constraint<T>>(s1, s2);
+	mid->set_type(constraint<T>::type::rigid);
+	mid->set_local_anchor_a(vec3<T>(z, -half, z));
+	mid->set_local_anchor_b(vec3<T>(z, half, z));
+	sim.add_constraint(mid);
+
+	auto anchor_of = [](const std::shared_ptr<solid<T>> & s, const vec3<T> & local) {
+		vec3<T> lever, out;
+		mul(lever, s->get_orientation(), local);
+		add(out, s->get_position(), lever);
+		return out;
+	};
+	float worst_top = 0.0f;
+	float worst_mid = 0.0f;
+	for (int i = 0; i < 300; ++i) {
+		sim.update(tr::from_milli(16));
+		vec3<T> a = anchor_of(s1, vec3<T>(z, half, z));
+		float e_top = std::sqrt(tr::to_float(length_squared(a, vec3<T>(z, z, z))));
+		vec3<T> b = anchor_of(s1, vec3<T>(z, -half, z));
+		vec3<T> c = anchor_of(s2, vec3<T>(z, half, z));
+		float e_mid = std::sqrt(tr::to_float(length_squared(b, c)));
+		if (i > 30) {  // the first few ticks are the chain taking up its own weight
+			if (e_top > worst_top) worst_top = e_top;
+			if (e_mid > worst_mid) worst_mid = e_mid;
+		}
+	}
+	float span = tr::to_float(s2->get_position().y);
+	printf("top_err=%.4f mid_err=%.4f tail_y=%.3f ", worst_top, worst_mid, span);
+	assert(worst_top < 0.02f);   // the chain hangs where it is pinned
+	assert(worst_mid < 0.02f);
+	assert(span > -2.2f);        // and did not stretch or fall away
+	printf("OK\n");
+}
+
+// A satisfied rigid pin reads UNLOADED, so the body it holds can sleep. This is not a
+// nicety: a soft spring holding a limb up against gravity is loaded by definition — it
+// needs a nonzero stretch to produce any force — so a spring ragdoll never deactivates,
+// and 21 bodies per corpse stay awake for the corpse's whole lifetime.
+template <typename T> static void test_rigid_joint_sleeps(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  rigid_joint_sleeps[%s]: ", label);
+	const T z {};
+	auto hang = [&](typename constraint<T>::type kind) {
+		simulator<T> sim;
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_collide_with_scope(0);
+		s->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()),
+		              vec3<T>(tr::half(), tr::half(), tr::half()))));
+		s->set_position(vec3<T>(z, z, z));
+		sim.add_solid(s);
+		s->set_contact_mode(contact_mode::speculative);  // after add_solid; see above
+		auto c = std::make_shared<constraint<T>>(s, vec3<T>(z, z, z));
+		c->set_type(kind);
+		c->set_rest_length(z);
+		c->set_spring_constant(tr::from_int(200));
+		c->set_damping_constant(kind == constraint<T>::type::rigid ? tr::one() : tr::from_int(20));
+		sim.add_constraint(c);
+		for (int i = 0; i < 400; ++i)
+			sim.update(tr::from_milli(16));
+		return s->active();
+	};
+	bool spring_awake = hang(constraint<T>::type::spring);
+	bool rigid_awake = hang(constraint<T>::type::rigid);
+	printf("spring_awake=%d rigid_awake=%d ", spring_awake ? 1 : 0, rigid_awake ? 1 : 0);
+	assert(spring_awake);   // a loaded spring can never go quiet — the contrast is the point
+	assert(!rigid_awake);   // the pin holds it exactly, so it has nothing left to do
+	printf("OK\n");
+}
+
+// ── Phase 13: angular limits ────────────────────────────────────────────────
+//
+// A horizontal arm pinned to a fixed post at its inboard end. Gravity folds it down, and
+// the whole question is where it stops: a plain pin lets it hang straight down (90 degrees
+// of swing, which on a corpse is a neck folded to the knees), and a cone limit must catch
+// it at its span. `span` negative builds the unlimited pin for comparison.
+//
+// Reports the settled swing, the worst swing seen, and the worst PIN error — that last one
+// is the assertion that matters most: a limit's impulse is pure torque, so hanging a limit
+// off a pin must not open the pin.
+template <typename T> struct limit_arm_result {
+	float settled_swing = 0.0f;
+	float worst_swing = 0.0f;
+	float worst_pin = 0.0f;
+	float final_x = 0.0f;
+	float final_y = 0.0f;
+};
+
+template <typename T>
+static limit_arm_result<T> run_limit_arm(T swing_span, T twist_span, int ticks) {
+	using tr = scalar_traits<T>;
+	const T z {};
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
+	// The post: immovable, and the frame every angle below is measured against.
+	auto post = std::make_shared<solid<T>>();
+	post->set_infinite_mass();
+	post->set_coefficient_of_gravity(z);
+	post->set_collide_with_scope(0);
+	post->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::from_milli(50), -tr::from_milli(50), -tr::from_milli(50)),
+	              vec3<T>(tr::from_milli(50), tr::from_milli(50), tr::from_milli(50)))));
+	post->set_position(vec3<T>(z, z, z));
+	sim.add_solid(post);
+	post->set_contact_mode(contact_mode::speculative);
+	// The arm: 1 m long down its own +X, which is the twist axis, so the cone points
+	// along the arm exactly as it does down a GoldSrc bone.
+	const T half_len = tr::half();
+	const T half_thick = tr::from_milli(100);
+	auto arm = std::make_shared<solid<T>>();
+	arm->set_mass(tr::one());
+	arm->set_inertia(vec3<T>(tr::from_milli(7), tr::from_milli(87), tr::from_milli(87)));
+	arm->set_collide_with_scope(0);
+	arm->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-half_len, -half_thick, -half_thick),
+	              vec3<T>(half_len, half_thick, half_thick))));
+	arm->set_position(vec3<T>(half_len, z, z));
+	sim.add_solid(arm);
+	arm->set_contact_mode(contact_mode::speculative);
+
+	auto c = std::make_shared<constraint<T>>(post, arm);
+	c->set_type(constraint<T>::type::rigid);
+	c->set_local_anchor_a(vec3<T>(z, z, z));
+	c->set_local_anchor_b(vec3<T>(-half_len, z, z));
+	c->set_swing_span(swing_span);
+	c->set_twist_span(twist_span);
+	sim.add_constraint(c);
+
+	const T eps = tr::from_milli(1);
+	limit_arm_result<T> out;
+	for (int i = 0; i < ticks; ++i) {
+		sim.update(tr::from_milli(16));
+		T swing {}, twist {};
+		c->measure_limits(swing, twist, eps);
+		vec3<T> lever, anchor;
+		mul(lever, arm->get_orientation(), vec3<T>(-half_len, z, z));
+		add(anchor, arm->get_position(), lever);
+		float pin = std::sqrt(tr::to_float(length_squared(anchor, vec3<T>(z, z, z))));
+		if (i > 30) {  // the first few ticks are the arm taking up its own weight
+			float sw = tr::to_float(swing);
+			if (sw > out.worst_swing) out.worst_swing = sw;
+			if (pin > out.worst_pin) out.worst_pin = pin;
+		}
+		out.settled_swing = tr::to_float(swing);
+	}
+	out.final_x = tr::to_float(arm->get_position().x);
+	out.final_y = tr::to_float(arm->get_position().y);
+	return out;
+}
+
+// The cone catches the arm where it says it will, and the pin underneath it still holds.
+template <typename T> static void test_cone_limit_holds(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  cone_limit_holds[%s]: ", label);
+	const T span = tr::from_milli(524);  // 30 degrees
+	auto limited = run_limit_arm<T>(span, -tr::one(), 300);
+	auto free_pin = run_limit_arm<T>(-tr::one(), -tr::one(), 300);
+	printf("limited=%.1f deg (worst %.1f, pin_err %.4f) free=%.1f deg (pin_err %.4f) ",
+	       limited.settled_swing * 57.2958f, limited.worst_swing * 57.2958f, limited.worst_pin,
+	       free_pin.settled_swing * 57.2958f, free_pin.worst_pin);
+	// The unlimited arm hangs straight down. Without this the test would pass on a limit
+	// that does nothing because nothing ever pushed on it.
+	assert(free_pin.settled_swing > 1.4f);
+	// The limited one stops at its span. The slack is the overshoot one tick of gravity
+	// buys before the velocity sweep sees it, which the position pass then unwinds.
+	assert(limited.worst_swing < tr::to_float(span) + 0.10f);
+	assert(limited.settled_swing < tr::to_float(span) + 0.05f);
+	assert(limited.settled_swing > tr::to_float(span) - 0.15f);  // it did reach its stop
+	// The point of item 1: a limit is pure torque, so carrying load on one must not open
+	// the pin it rides on. Same bound as the plain pin, not a looser one.
+	assert(limited.worst_pin < 0.02f);
+	assert(limited.worst_pin < free_pin.worst_pin + 0.005f);
+	printf("OK\n");
+}
+
+// Spin the arm about its own length and the twist limit stops it there.
+template <typename T> static void test_twist_limit_holds(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  twist_limit_holds[%s]: ", label);
+	const T z {};
+	const T span = tr::from_milli(524);  // 30 degrees
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>(z, z, z));  // gravity is the swing's business, not the twist's
+	auto post = std::make_shared<solid<T>>();
+	post->set_infinite_mass();
+	post->set_coefficient_of_gravity(z);
+	post->set_collide_with_scope(0);
+	post->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::from_milli(50), -tr::from_milli(50), -tr::from_milli(50)),
+	              vec3<T>(tr::from_milli(50), tr::from_milli(50), tr::from_milli(50)))));
+	sim.add_solid(post);
+	post->set_contact_mode(contact_mode::speculative);
+	auto arm = std::make_shared<solid<T>>();
+	arm->set_mass(tr::one());
+	arm->set_inertia(vec3<T>(tr::from_milli(7), tr::from_milli(87), tr::from_milli(87)));
+	arm->set_collide_with_scope(0);
+	arm->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::half(), -tr::from_milli(100), -tr::from_milli(100)),
+	              vec3<T>(tr::half(), tr::from_milli(100), tr::from_milli(100)))));
+	arm->set_position(vec3<T>(tr::half(), z, z));
+	sim.add_solid(arm);
+	arm->set_contact_mode(contact_mode::speculative);
+	// About +X, which is the twist axis: the pin sees none of this, so whatever stops it
+	// is the twist limit and nothing else.
+	arm->set_angular_velocity(vec3<T>(tr::from_int(5), z, z));
+
+	auto c = std::make_shared<constraint<T>>(post, arm);
+	c->set_type(constraint<T>::type::rigid);
+	c->set_local_anchor_a(vec3<T>(z, z, z));
+	c->set_local_anchor_b(vec3<T>(-tr::half(), z, z));
+	c->set_swing_span(-tr::one());  // cone free; only the twist is under test
+	c->set_twist_span(span);
+	sim.add_constraint(c);
+
+	const T eps = tr::from_milli(1);
+	float worst = 0.0f;
+	T swing {}, twist {};
+	for (int i = 0; i < 200; ++i) {
+		sim.update(tr::from_milli(16));
+		c->measure_limits(swing, twist, eps);
+		float t = std::fabs(tr::to_float(twist));
+		if (t > worst)
+			worst = t;
+	}
+	printf("twist=%.1f deg worst=%.1f deg swing=%.2f deg ",
+	       tr::to_float(twist) * 57.2958f, worst * 57.2958f, tr::to_float(swing) * 57.2958f);
+	assert(worst < tr::to_float(span) + 0.15f);          // it stopped at its span
+	assert(std::fabs(tr::to_float(twist)) > 0.2f);       // and it did wind up to it
+	assert(tr::to_float(swing) < 0.05f);                 // the twist row is not a cone row
+	printf("OK\n");
+}
+
+// A limit that is not engaged must cost nothing and CHANGE nothing. Bit-identical is the
+// bar, because anything less means a cone-twist is a different joint from a pin even in
+// the middle of its range, and every tuned number in the game's table would then be
+// covering for a solver that moved.
+template <typename T> static void test_limit_is_unilateral(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  limit_is_unilateral[%s]: ", label);
+	// A swing angle is at most pi by construction and a twist at most pi, so a span of
+	// 229 degrees cannot be engaged even at the far end of its soft band. The arm below
+	// swings all the way through vertical and up the other side, which is most of that
+	// range, and still never touches these.
+	const T wide = tr::from_milli(4000);  // 229 degrees
+	auto plain = run_limit_arm<T>(-tr::one(), -tr::one(), 200);
+	auto wide_cone = run_limit_arm<T>(wide, wide, 200);
+	printf("plain=(%.6f,%.6f) wide=(%.6f,%.6f) swing=%.1f deg ",
+	       plain.final_x, plain.final_y, wide_cone.final_x, wide_cone.final_y,
+	       wide_cone.settled_swing * 57.2958f);
+	assert(wide_cone.final_x == plain.final_x);
+	assert(wide_cone.final_y == plain.final_y);
+	assert(wide_cone.settled_swing == plain.settled_swing);
+	printf("OK\n");
+}
+
+// Item 6, and the one most likely to be got wrong. A joint RESTING on its limit is a body
+// resting on a floor: held, but not working, and it has to be allowed to sleep. The
+// counter-test is in the same run — while the limit is still being violated the joint IS
+// loaded and nothing may sleep, or the pair freezes in a pose the limit forbids.
+template <typename T> static void test_joint_on_its_limit_sleeps(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  joint_on_its_limit_sleeps[%s]: ", label);
+	const T z {};
+	const T span = tr::from_milli(524);  // 30 degrees
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>(z, z, z));
+	auto make = [&](T x) {
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_inertia(vec3<T>(tr::from_milli(7), tr::from_milli(87), tr::from_milli(87)));
+		s->set_collide_with_scope(0);
+		s->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::half(), -tr::from_milli(100), -tr::from_milli(100)),
+		              vec3<T>(tr::half(), tr::from_milli(100), tr::from_milli(100)))));
+		s->set_position(vec3<T>(x, z, z));
+		sim.add_solid(s);
+		s->set_contact_mode(contact_mode::speculative);
+		return s;
+	};
+	auto parent = make(-tr::half());
+	auto child = make(tr::half());
+	// Start the child folded 60 degrees into a 30-degree cone, at rest. Nothing but the
+	// limit's own recovery can unwind this, and until it has, nothing may sleep.
+	mat3<T> folded;
+	set_mat3_from_axis_angle(folded, vec3<T>(z, z, tr::one()), tr::from_milli(1047));
+	child->set_orientation(folded);
+
+	auto c = std::make_shared<constraint<T>>(parent, child);
+	c->set_type(constraint<T>::type::rigid);
+	c->set_local_anchor_a(vec3<T>(tr::half(), z, z));
+	c->set_local_anchor_b(vec3<T>(-tr::half(), z, z));
+	c->set_swing_span(span);
+	c->set_twist_span(-tr::one());
+	// BIAS sets the recovery rate, so a small one is a deliberately slow unwind: "still
+	// violating" and "resting on the limit" land dozens of ticks apart and the test can
+	// look at both.
+	c->set_limit_bias(tr::from_milli(20));
+	sim.add_constraint(c);
+
+	const T eps = tr::from_milli(1);
+	T swing {}, twist {};
+	bool awake_while_violating = false;
+	for (int i = 0; i < 600; ++i) {
+		sim.update(tr::from_milli(16));
+		if (i == 5) {
+			c->measure_limits(swing, twist, eps);
+			awake_while_violating = child->active() && swing > span + tr::from_milli(17);
+		}
+	}
+	c->measure_limits(swing, twist, eps);
+	printf("swing=%.1f deg awake_at_5=%d asleep=%d ", tr::to_float(swing) * 57.2958f,
+	       awake_while_violating ? 1 : 0, (!child->active() && !parent->active()) ? 1 : 0);
+	assert(awake_while_violating);        // a violated limit is load, and load stays awake
+	assert(tr::to_float(swing) < tr::to_float(span) + 0.03f);  // it unwound to its stop
+	assert(!child->active());             // and then, resting on it, went quiet
+	assert(!parent->active());
+	printf("OK\n");
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -1263,6 +1616,12 @@ int main() {
 	test_contact_arm_not_face_centre<float>("float");
 	test_friction_tangent_mass<float>("float");
 	test_constraint_anchor_torque<float>("float");
+	test_rigid_joint_chain<float>("float");
+	test_rigid_joint_sleeps<float>("float");
+	test_cone_limit_holds<float>("float");
+	test_twist_limit_holds<float>("float");
+	test_limit_is_unilateral<float>("float");
+	test_joint_on_its_limit_sleeps<float>("float");
 	test_fast_spinner_no_tunnel<float>("float");
 	test_angular_substep_ccd<float>("float");
 	test_dual_instantiation<float>();
@@ -1304,6 +1663,11 @@ int main() {
 	test_angular_impulse<fixed16>("fixed16");
 	test_friction_rolling<fixed16>("fixed16");
 	test_constraint_anchor_torque<fixed16>("fixed16");
+	// The decomposition is more trig than hop does anywhere else, and asin/acos/atan2 are
+	// polynomials in fixed point. The game's space is float, so this is a
+	// correctness-of-the-port question, not a shipping one — instantiated, not tuned on.
+	test_cone_limit_holds<fixed16>("fixed16");
+	test_twist_limit_holds<fixed16>("fixed16");
 	test_fast_spinner_no_tunnel<fixed16>("fixed16");
 	test_angular_substep_ccd<fixed16>("fixed16");
 

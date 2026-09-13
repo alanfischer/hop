@@ -437,6 +437,7 @@ private:
 	vec3<T> inv_inertia_;         // per-component reciprocal of inertia_ (0 where a component is 0). PRIMARY marker: inv_inertia_==0 ⇒ never spins dynamically. Zero by default ⇒ rotation is opt-in
 	mat3<T> inv_inertia_world_;   // cached R·diag(inv_inertia_)·Rᵀ; see get_inv_inertia_world/update_inv_inertia_world. Zero for a non-rotating body
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
+	vec3<T> rot_correction_;      // the angular half of the same scratch: a small-angle world-frame rotation (axis * radians). Written only by the rigid-joint position pass, which cannot fix an anchor error by translation alone
 	vec3<T> ext_dv_;              // velocity this tick's integration added from external acceleration (gravity, drag, force_); solve_contacts subtracts it out of the restitution reference. Zero for a body that didn't integrate
 	T ext_dv_unearned_ {};        // share of ext_dv_ NOT yet paid for by travel, in [0,1]; solve_contacts scales ext_dv_ by it. 1 = body never moved this tick (subtract it all), 0 = it travelled the whole tick into its contact (subtract none). Set by update_solid's sweep; left 1 everywhere else
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
