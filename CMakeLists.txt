@@ -24,6 +24,10 @@ option(HOP_BUILD_REPRO "Build headless reproduction programs" OFF)
 if(HOP_BUILD_REPRO)
     add_executable(demo_gib_spin examples/demo_gib_spin.cpp)
     target_link_libraries(demo_gib_spin PRIVATE hop)
+
+    # A 21-box, 20-pin corpse: does the chain hold, does it sleep, what does it cost.
+    add_executable(demo_ragdoll examples/demo_ragdoll.cpp)
+    target_link_libraries(demo_ragdoll PRIVATE hop)
 endif()
 
 if(HOP_BUILD_EXAMPLES)

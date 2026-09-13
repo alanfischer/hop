@@ -48,6 +48,7 @@ discovery and damping.
 | 8. Dynamic orientation state (angular integration under torque) | done | `solid.inertia_/inv_inertia_/torque_/orientation_q_`; `integrate_angular` (body-frame Euler eq + gyroscopic + exponential quat step) in `simulator.h`; `inv_inertia==0` opt-out (default); angular cap + deactivation. hop-godot: inertia auto-compute, torque, ω state, orientation writeback |
 | 9. Angular impulse response | done | lever-arm impulse in the GS velocity solver (`solve_contacts`): off-center hits transfer linear↔angular, friction induces rolling, Phase 6 carry is the infinite-inertia limit. Gated on `rotates_dynamically()` so non-rotating pairs stay bit-identical. + broad-phase inflation for spinners. (End-of-step SAT recovery deferred) |
 | 10. Constraints and friction use angular | done | `constraint<T>` anchors rotate with their solid (`R·local_anchor`) and exert torque via lever arm (`accumulate_constraint_torque`, τ = r×F); anchor velocity carries `ω×r` for damping. Center anchors (the default) stay bit-identical. Friction already shipped in Phase 9 |
+| 12. Rigid constraints (`type::rigid`) | done | a ball-socket pin that is ENFORCED, not a stiff spring: 3-DOF velocity solve interleaved with the contact sweeps + a full pseudo-impulse position pass (translation **and** rotation). Pins hold exactly and a pinned body deactivates normally, which a force spring can never do. `_joint_make_pin` now builds one, and the three Godot pin params it stored and ignored are wired |
 | 11. Docs, examples, bindings | done | README de-"translation-only" + opt-in/identity-fast-path framing + traceable migration note; `demo_rotating_platform` (Phase 6 carry); web bindings expose orientation/angular-velocity/inertia/torque; hop-godot wrapper already wired |
 
 ---
@@ -574,6 +575,91 @@ a `RigidBody3D`) — the hop-godot binding does not yet plumb per-joint local an
 
 ---
 
+### Phase 12 — rigid constraints (a pin that holds) — **SHIPPED**
+
+Wanted for ragdolls: `plans/one_corpse_ragdoll.md` in wizardwars builds a corpse out of
+21 `PhysicalBone3D` bodies and 20 pin joints taken straight from the model's own MDL
+hitboxes. `constraint<T>` could not carry that, because everything it had was a *force*.
+
+- **`constraint<T>::type::rigid`**, alongside `spring` and `rope`. Additive: the demos
+  and tests that build a `type::spring` are untouched, and nothing in wizardwars used a
+  joint before this. `rest_length_` takes no part in it — a rigid pin holds its two
+  anchors coincident, full stop.
+- **Why not just a stiff spring.** `constraint_force_on` computes `k·(|d| − rest) + c·v̇`
+  and hands it to the integrator. That *pulls* anchors together; it does not enforce that
+  they coincide, and it needs a nonzero stretch to produce any force at all — so a limb
+  chain hung off one sags by construction. Raising `k` to hide the sag is what makes an
+  explicitly-integrated spring chain ring and then leave. `constraint_force_on` now
+  returns false for a rigid pin, so it contributes nothing to the acceleration or to the
+  Phase 10 anchor torque; the solver owns it end to end.
+- **Velocity level** (`solve_joints`, one visit per row per sweep): drive the full 3-DOF
+  relative anchor velocity to zero, `λ = K⁻¹·(−damping·v_rel)`, where
+  `K = (1/mₐ + 1/m_b)I − [rₐ]ₓIₐ⁻¹[rₐ]ₓ − [r_b]ₓI_b⁻¹[r_b]ₓ` is built once per tick
+  (orientation is fixed for the whole solve, exactly as for contacts). All three axes
+  together, not one at a time: a ball-socket is fully coupled and axis-by-axis converges
+  at a rate that reads as a sagging chain.
+- **Interleaved with contacts**, between the normal and friction sweeps, sharing
+  `solver_iterations_`. A pinned limb whose parent rests on a floor converges only if the
+  joint and the contact are solved against each other; two separate passes fight.
+- **Position level** (in `correct_positions`, against the same running corrections as the
+  contact pass): a full pseudo-impulse, *including the angular half*. This is the part
+  worth reading twice. A pin's residual error is mostly ROTATIONAL — Pass A steps a body's
+  orientation with the ω it held *before* the solve, so a bone the solver is about to spin
+  has already turned by the wrong amount and its anchor has walked off its partner's by
+  ~`Δω·|r|·dt`. Sliding the bone sideways to close that only opens the next joint along;
+  measured, a translation-only pass left a corpse sagging 25 cm at the wrists. So
+  `solid` gained `rot_correction_` next to `pos_correction_` — a small-angle world-frame
+  rotation, folded into the orientation by `commit_solid` the way the linear one is folded
+  into the position. Geometry only: no velocity is touched, so nothing here hands the
+  chain energy back. (A Baumgarte bias in the *velocity* sweep does the same job and does
+  hand it energy; it was tried, and a corpse converts that into a permanent shiver.)
+- **The three Godot pin params are wired at last.** `_pin_joint_set_param` stored `BIAS`,
+  `DAMPING` and `IMPULSE_CLAMP` and nothing read them. `BIAS` → the fraction of the
+  separation the position pass removes per iteration; `DAMPING` → the fraction of the
+  residual relative anchor velocity removed per iteration (clamped to 1 — over-relaxing a
+  Gauss–Seidel row diverges); `IMPULSE_CLAMP` → a per-iteration cap on |λ|, the safety
+  valve that turns a solver blow-up into a floppy joint instead of a body launched out of
+  the map.
+- **Sleep falls out of it, and that was the point.** The sleep rule keeps a body awake
+  while any constraint `is_loaded(epsilon_)`, and a soft spring holding a limb up against
+  gravity is loaded *by definition*. A satisfied rigid pin sits at ~zero error and reads
+  unloaded, so the assembly deactivates normally. `is_loaded` measures a rigid pin against
+  zero rather than `rest_length_`.
+- **Requires `contact_mode::speculative`.** A `sweep_slide` body commits its position back
+  in Pass A, before the solver runs, so a joint impulse would reach it a tick late and
+  there would be no position pass to take the residual out. hop-godot puts every RIGID
+  body on speculative, so the game path is right by default.
+- **Still stubs, deliberately:** `_joint_make_hinge`, `_joint_make_slider`,
+  `_joint_make_cone_twist` and their `*_set_param` siblings. A pin-only ragdoll is what
+  the corpse work asked for — knees bending backwards included — and angular limits become
+  their own phase if watching one says we need them.
+  `_joint_disable_collisions_between_bodies` also still stores a flag nobody reads; moot
+  for a ragdoll whose bones are on layer 0 and never pair with each other, but do not
+  assume it works.
+- **Tests:** `test_rigid_joint_chain` (two links hung off a world point hold both anchors
+  to <2 cm under gravity and do not stretch) and `test_rigid_joint_sleeps` (the same body
+  on a spring is still awake after 400 ticks; on a pin it is asleep) in
+  `tests/test_simulator.cpp`. Demo: `examples/demo_ragdoll.cpp`, headless under
+  `HOP_BUILD_REPRO`, builds the real 21-bone / 20-pin corpse.
+
+**What the demo turned up, which is not this phase's to fix.** The joints are exact — in
+free fall the 20 pins hold to 0.0000 m and the bones do not spin at all. On a floor the
+corpse never sleeps, and the joints are not why: *an oriented box resting on a floor spins
+forever*. The demo's control drops one box, no joints anywhere. Axis-aligned it settles and
+sleeps; tilted three degrees it turns at several rad/s indefinitely, worse the smaller the
+body (|ω| ≈ 1/size), and damping does not touch it because the spin is handed out fresh
+each tick rather than accumulating. It is arithmetic, not a solver bug: hop resolves a pair
+at ONE point, and `support()` on a tilted box returns a CORNER — the face centre it
+collapses to for an axis-aligned box is precisely why that case works. One tick of
+gravity's impulse at a corner lever is worth ~4 rad/s on a 0.35 kg bone, so it tips, catches
+the next corner, and rocks there permanently. This is bug 2 of `plans/rotating_gibs.md`
+("a capsule resting on a floor creates spin from nothing"), which was recorded as
+capsule-only with boxes immune; boxes are immune only while they are axis-aligned. The fix
+is a contact manifold — two or four points under a resting face — and that is a phase of
+its own.
+
+---
+
 ## Open decisions
 
 - [x] Fixed-point drift: ~0.1–0.2°/rev with exponential integration. **Accepted.**
@@ -678,6 +764,14 @@ a `RigidBody3D`) — the hop-godot binding does not yet plumb per-joint local an
   `setOrientation`/`getOrientation`/`setAngularVelocity`/`getAngularVelocity`/`setInertia`/`addTorque`
   bindings in `web/hop_bindings.cpp`; the `demo_rotating_platform` target in
   `CMakeLists.txt` + `examples/demo_rotating_platform.cpp`.
+- Phase 12 (rigid constraints): `constraint<T>::type::rigid` + `bias_`/`impulse_clamp_` +
+  the rigid branch of `is_loaded` in `constraint.h`; `solid::rot_correction_` in `solid.h`;
+  `set_skew`, the `joint_row` working set, `build_joint_rows`, `solve_joints`, the joint
+  sweep inside `solve_contacts`' Gauss–Seidel loop, the joint block in `correct_positions`,
+  the `rigid` early-out in `constraint_force_on`, and the `rot_correction_` fold in
+  `commit_solid` — all in `simulator.h`. hop-godot: `_joint_make_pin` builds a `rigid` and
+  pushes `pin_bias`/`pin_damping`/`pin_impulse_clamp` through, in `hop_physics_server.cpp`.
+  Tests: `test_rigid_joint_chain`, `test_rigid_joint_sleeps`; demo `examples/demo_ragdoll.cpp`.
 - Toadlet port reference:
   `/Users/afischer/personal/toadlet/source/cpp/toadlet/egg/mathfixed/` —
   original quaternion/matrix3x3 ops and fixed-point polynomial asin/acos.

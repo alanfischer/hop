@@ -1231,6 +1231,110 @@ template <typename T> static void test_angular_substep_ccd(const char * label) {
 	printf("OK\n");
 }
 
+// Phase 12: a rigid pin HOLDS. Two links hang off a world point under gravity; a force
+// spring at any stiffness sags (it needs a stretch to produce force at all), while the
+// rigid solve drives the anchor pair together at both the velocity and position level.
+// The assertion is on the joint error, not the position: a chain is allowed to swing.
+template <typename T> static void test_rigid_joint_chain(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  rigid_joint_chain[%s]: ", label);
+	const T z {};
+	const T half = tr::half();
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));  // hang along -y, not hop's default -z
+	auto link = [&](T y) {
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one()));
+		s->set_collide_with_scope(0);  // a hanging chain, nothing to hit
+		s->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_milli(100), -half, -tr::from_milli(100)),
+		              vec3<T>(tr::from_milli(100), half, tr::from_milli(100)))));
+		s->set_position(vec3<T>(z, y, z));
+		sim.add_solid(s);
+		// After add_solid, which stamps the space default: a rigid joint solves in Pass B,
+		// so its bodies must not have committed their position already in Pass A.
+		s->set_contact_mode(contact_mode::speculative);
+		return s;
+	};
+	// Anchors at (0,0,0) and (0,-1,0): link 1 hangs off the world, link 2 off link 1.
+	auto s1 = link(-half);
+	auto s2 = link(-half - tr::one());
+	auto top = std::make_shared<constraint<T>>(s1, vec3<T>(z, z, z));
+	top->set_type(constraint<T>::type::rigid);
+	top->set_local_anchor_a(vec3<T>(z, half, z));
+	sim.add_constraint(top);
+	auto mid = std::make_shared<constraint<T>>(s1, s2);
+	mid->set_type(constraint<T>::type::rigid);
+	mid->set_local_anchor_a(vec3<T>(z, -half, z));
+	mid->set_local_anchor_b(vec3<T>(z, half, z));
+	sim.add_constraint(mid);
+
+	auto anchor_of = [](const std::shared_ptr<solid<T>> & s, const vec3<T> & local) {
+		vec3<T> lever, out;
+		mul(lever, s->get_orientation(), local);
+		add(out, s->get_position(), lever);
+		return out;
+	};
+	float worst_top = 0.0f;
+	float worst_mid = 0.0f;
+	for (int i = 0; i < 300; ++i) {
+		sim.update(tr::from_milli(16));
+		vec3<T> a = anchor_of(s1, vec3<T>(z, half, z));
+		float e_top = std::sqrt(tr::to_float(length_squared(a, vec3<T>(z, z, z))));
+		vec3<T> b = anchor_of(s1, vec3<T>(z, -half, z));
+		vec3<T> c = anchor_of(s2, vec3<T>(z, half, z));
+		float e_mid = std::sqrt(tr::to_float(length_squared(b, c)));
+		if (i > 30) {  // the first few ticks are the chain taking up its own weight
+			if (e_top > worst_top) worst_top = e_top;
+			if (e_mid > worst_mid) worst_mid = e_mid;
+		}
+	}
+	float span = tr::to_float(s2->get_position().y);
+	printf("top_err=%.4f mid_err=%.4f tail_y=%.3f ", worst_top, worst_mid, span);
+	assert(worst_top < 0.02f);   // the chain hangs where it is pinned
+	assert(worst_mid < 0.02f);
+	assert(span > -2.2f);        // and did not stretch or fall away
+	printf("OK\n");
+}
+
+// A satisfied rigid pin reads UNLOADED, so the body it holds can sleep. This is not a
+// nicety: a soft spring holding a limb up against gravity is loaded by definition — it
+// needs a nonzero stretch to produce any force — so a spring ragdoll never deactivates,
+// and 21 bodies per corpse stay awake for the corpse's whole lifetime.
+template <typename T> static void test_rigid_joint_sleeps(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  rigid_joint_sleeps[%s]: ", label);
+	const T z {};
+	auto hang = [&](typename constraint<T>::type kind) {
+		simulator<T> sim;
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_collide_with_scope(0);
+		s->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()),
+		              vec3<T>(tr::half(), tr::half(), tr::half()))));
+		s->set_position(vec3<T>(z, z, z));
+		sim.add_solid(s);
+		s->set_contact_mode(contact_mode::speculative);  // after add_solid; see above
+		auto c = std::make_shared<constraint<T>>(s, vec3<T>(z, z, z));
+		c->set_type(kind);
+		c->set_rest_length(z);
+		c->set_spring_constant(tr::from_int(200));
+		c->set_damping_constant(kind == constraint<T>::type::rigid ? tr::one() : tr::from_int(20));
+		sim.add_constraint(c);
+		for (int i = 0; i < 400; ++i)
+			sim.update(tr::from_milli(16));
+		return s->active();
+	};
+	bool spring_awake = hang(constraint<T>::type::spring);
+	bool rigid_awake = hang(constraint<T>::type::rigid);
+	printf("spring_awake=%d rigid_awake=%d ", spring_awake ? 1 : 0, rigid_awake ? 1 : 0);
+	assert(spring_awake);   // a loaded spring can never go quiet — the contrast is the point
+	assert(!rigid_awake);   // the pin holds it exactly, so it has nothing left to do
+	printf("OK\n");
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -1263,6 +1367,8 @@ int main() {
 	test_contact_arm_not_face_centre<float>("float");
 	test_friction_tangent_mass<float>("float");
 	test_constraint_anchor_torque<float>("float");
+	test_rigid_joint_chain<float>("float");
+	test_rigid_joint_sleeps<float>("float");
 	test_fast_spinner_no_tunnel<float>("float");
 	test_angular_substep_ccd<float>("float");
 	test_dual_instantiation<float>();

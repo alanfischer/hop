@@ -16,7 +16,20 @@ public:
 	// Behavior of the distance term.
 	//   spring: bilateral. Force = k * (|d| - rest) along d. Pulls when stretched, pushes when compressed.
 	//   rope:   unilateral. Force kicks in only when |d| > rest (max-length leash).
-	enum class type { spring, rope };
+	//   rigid:  bilateral and ENFORCED — a ball-socket pin, not a force at all. The two
+	//           anchors are held coincident (rest_length_ takes no part in it) by the
+	//           simulator's Pass-B solver: it drives the full 3-DOF relative anchor
+	//           velocity to zero and pushes the residual separation out positionally.
+	//           This is what a jointed chain needs. A force spring hung with limbs off it
+	//           sags — it needs a nonzero stretch to produce any force at all — and
+	//           stiffening k to hide the sag is what makes an explicitly-integrated
+	//           spring chain ring and then leave.
+	//
+	//           Needs contact_mode::speculative on its bodies. A sweep_slide body commits
+	//           its position in Pass A, before the solver runs, so the joint impulse
+	//           would only reach it a tick late and there would be no position pass to
+	//           take the residual out. hop-godot puts every RIGID body on speculative.
+	enum class type { spring, rope, rigid };
 
 	constraint() { reset(); }
 
@@ -51,6 +64,8 @@ public:
 		rest_length_ = tr::one();
 		spring_constant_ = tr::one();
 		damping_constant_ = tr::one();
+		bias_ = tr::from_milli(300);   // Godot's PIN_JOINT_BIAS default
+		impulse_clamp_ = T {};         // uncapped
 		local_anchor_a_.reset();
 		local_anchor_b_.reset();
 		end_point_.reset();
@@ -124,8 +139,23 @@ public:
 
 	void set_spring_constant(T c) { spring_constant_ = c; }
 	T get_spring_constant() const { return spring_constant_; }
+	// For spring/rope: the damping force per unit relative anchor speed (N per m/s).
+	// For rigid:      the FRACTION of the residual relative anchor velocity the solver
+	//                 removes per iteration — dimensionless, 1 = fully rigid. Godot's
+	//                 PIN_JOINT_DAMPING, which also defaults to 1.
 	void set_damping_constant(T c) { damping_constant_ = c; }
 	T get_damping_constant() const { return damping_constant_; }
+
+	// --- rigid only; ignored by spring and rope ---
+	// Fraction of the remaining anchor separation the position pass removes per
+	// iteration. Godot's PIN_JOINT_BIAS.
+	void set_bias(T b) { bias_ = b; }
+	T get_bias() const { return bias_; }
+	// Cap on the magnitude of the impulse one solver iteration may apply; 0 = uncapped.
+	// Godot's PIN_JOINT_IMPULSE_CLAMP, and the safety valve that turns a solver blow-up
+	// into a visibly floppy joint rather than a body launched out of the map.
+	void set_impulse_clamp(T c) { impulse_clamp_ = c; }
+	T get_impulse_clamp() const { return impulse_clamp_; }
 
 	bool is_active() const { return simulator_ != nullptr; }
 
@@ -151,6 +181,13 @@ public:
 			b_world = end_point_;
 		}
 		T d2 = length_squared(a_world, b_world);
+		// A rigid pin holds its anchors coincident, so its equilibrium is zero separation
+		// whatever rest_length_ says. This is the whole reason a ragdoll can sleep: a
+		// SATISFIED pin sits at ~zero error and reads unloaded, where a spring holding a
+		// limb up against gravity is loaded BY DEFINITION (no stretch, no force) and
+		// would keep every bone awake for the corpse's whole lifetime.
+		if (type_ == type::rigid)
+			return d2 > tolerance * tolerance;
 		T hi = rest_length_ + tolerance;
 		T hi2 = hi * hi;
 		if (type_ == type::spring) {
@@ -182,6 +219,8 @@ private:
 	T rest_length_ {};
 	T spring_constant_ {};
 	T damping_constant_ {};
+	T bias_ {};
+	T impulse_clamp_ {};
 
 	simulator<T> * simulator_ = nullptr;
 

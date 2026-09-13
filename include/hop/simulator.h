@@ -569,6 +569,14 @@ private:
 	// any body resolved this tick uses the speculative solve).
 	void solve_contacts(T dt, bool has_speculative);
 
+	// Phase 12: rigid joints. Rebuild the per-tick row for every constraint<T> of
+	// type::rigid (solver body indices, lever arms, and the 3x3 effective mass), then
+	// one Gauss-Seidel visit per row, interleaved with the contact sweeps so a pinned
+	// limb whose parent rests on a floor solves against that floor instead of fighting
+	// it. correct_positions runs the matching position pass.
+	void build_joint_rows(int nsolids);
+	void solve_joints();
+
 	void integration_step(solid<T> * s,
 	                      const vec3<T> & x,
 	                      const vec3<T> & v,
@@ -664,6 +672,28 @@ private:
 		vec3<T> angular_velocity;
 	};
 	std::vector<solver_body> solver_bodies_;
+	// Pass-B rigid-joint working set, rebuilt each tick from constraints_ (Phase 12).
+	// A row is a ball-socket between two anchors: all 3 DOF, no accumulator — the
+	// impulse clamp is per-iteration, so there is nothing to carry across ticks, and
+	// hop bodies already hold last tick's impulses in their velocity.
+	struct joint_row {
+		constraint<T> * c = nullptr;
+		solid<T> * a = nullptr;
+		solid<T> * b = nullptr;      // null when the far end is a fixed world point
+		int index_a {};
+		int index_b {};              // static_world_'s immutable slot when b is null
+		vec3<T> r_a, r_b;            // world lever arms: orientation-rotated local anchors
+		vec3<T> anchor_b;            // world far anchor; the constraint's end_point when b is null
+		bool a_rotates = false;
+		bool b_rotates = false;
+		T inv_ma {};
+		T inv_mb {};
+		mat3<T> eff_inv;             // K^-1, where K = (1/ma + 1/mb)I - [r_a]x Ia^-1 [r_a]x - [r_b]x Ib^-1 [r_b]x
+		T damping {};                // fraction of the residual anchor velocity removed per iteration
+		T bias {};                   // fraction of the residual separation removed per position iteration
+		T impulse_clamp {};          // per-iteration impulse magnitude cap; 0 = uncapped
+	};
+	std::vector<joint_row> joint_rows_;
 	// Shock-propagation scratch, all reused per tick (no steady-state alloc):
 	// shock_order_ is pair indices sorted support-end-first; shock_key_[k] is pair
 	// k's gravity-depth sort key; shock_lo_[k] is its deeper (anchor) body. Depths
@@ -717,6 +747,15 @@ inline void apply_inv_inertia_world(const solid<T> * s, const vec3<T> & v, vec3<
 	// angular pair × solver iterations, plus on every angular impulse — is a single
 	// mat3×vec3 instead of the transpose + two matrix multiplies it used to do.
 	mul(out, s->get_inv_inertia_world(), v);
+}
+
+// Skew-symmetric cross-product matrix: skew(r)*v == r x v. The building block of a
+// ball-socket's effective mass, where each body's angular contribution to the motion of
+// its anchor is -[r]x I^-1 [r]x.
+template <typename T> inline void set_skew(mat3<T> & m, const vec3<T> & r) {
+	m.set_at(0, 0, T {});  m.set_at(0, 1, -r.z);  m.set_at(0, 2,  r.y);
+	m.set_at(1, 0,  r.z);  m.set_at(1, 1, T {});  m.set_at(1, 2, -r.x);
+	m.set_at(2, 0, -r.y);  m.set_at(2, 1,  r.x);  m.set_at(2, 2, T {});
 }
 
 // Angular effective mass of a contact pair along a unit direction `dir` at the lever
@@ -1266,6 +1305,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// Reset this tick's NGS position correction (commit_solid folds it in for every
 	// body, so it must start at zero whether or not the body gets contacts).
 	solid_ptr->pos_correction_.reset();
+	solid_ptr->rot_correction_.reset();
 
 	// Semi-implicit (symplectic) Euler: v += a(x, v)·dt, committed now; position
 	// is integrated in Pass B from the *solved* velocity. The high-order
@@ -1488,6 +1528,20 @@ template <typename T> void simulator<T>::commit_solid(solid<T> * solid_ptr, T dt
 
 	try_deactivate(solid_ptr, new_pos, dt);
 	solid_ptr->set_position_direct(new_pos);
+
+	// The angular half of the same pseudo-correction (rigid joints only — nothing
+	// else writes it). Pure geometry, like the translation: the body is turned, its
+	// angular velocity is not, so nothing here hands the solve energy back.
+	const T angle = length(solid_ptr->rot_correction_);
+	if (angle > epsilon_) {
+		vec3<T> axis;
+		mul(axis, solid_ptr->rot_correction_, tr::one() / angle);
+		quat<T> dq, q;
+		set_quat_from_axis_angle(dq, axis, angle);
+		mul(q, dq, solid_ptr->orientation_q_);
+		normalize(q);
+		solid_ptr->set_orientation_from_quat(q);
+	}
 }
 
 // Iterative non-linear Gauss–Seidel position solver. Accumulates a per-body
@@ -1506,6 +1560,14 @@ template <typename T> void simulator<T>::correct_positions() {
 	for (auto & p : contact_pairs_) {
 		p.a->pos_correction_.reset();
 		p.b->pos_correction_.reset();
+	}
+	for (auto & r : joint_rows_) {
+		r.a->pos_correction_.reset();
+		r.a->rot_correction_.reset();
+		if (r.b) {
+			r.b->pos_correction_.reset();
+			r.b->rot_correction_.reset();
+		}
 	}
 	for (int iter = 0; iter < spec_pos_iters_; ++iter) {
 		// With unchanged pseudo-positions, a later NGS pass would visit the
@@ -1547,6 +1609,87 @@ template <typename T> void simulator<T>::correct_positions() {
 				vec3<T> d;
 				mul(d, p.normal, corr * (inv_a / inv_sum));
 				sub(p.a->pos_correction_, d);
+			}
+		}
+		// Rigid joints, in the same sweep and against the same running corrections, so a
+		// bone a floor has just pushed up drags its neighbours with it.
+		//
+		// This is a full pseudo-impulse, angular half included, and that is not
+		// optional: a pin's error is mostly ROTATIONAL. Pass A steps a body's
+		// orientation with the ω it held BEFORE the solve, so a bone the contact solver
+		// is about to spin has already turned by the wrong amount and its anchor has
+		// walked off its partner's by roughly Δω·|r|·dt. Sliding the bone sideways to
+		// close that gap only opens the next joint along — measured, a translation-only
+		// pass left a corpse sagging 25 cm at the wrists. Turning the body instead costs
+		// one extra vec3 of scratch and closes it exactly.
+		//
+		// Why here and not as a velocity bias: a Baumgarte term in the velocity sweep
+		// would do the same job and hand the chain real energy for it, and a corpse
+		// lying on a floor is a machine for converting that into a permanent shiver —
+		// each bone's single corner contact torques it, the bias answers, and 21 bones
+		// buzz at 7 rad/s forever and never sleep. A pseudo-impulse moves the geometry
+		// and leaves the velocities alone, so there is nothing to feed back.
+		for (auto & r : joint_rows_) {
+			// Only an awake speculative body absorbs correction, exactly as above.
+			const bool a_free = r.a->active_ && r.a->uses_speculative_solve();
+			const bool b_free = r.b && r.b->active_ && r.b->uses_speculative_solve();
+			if (!a_free && !b_free)
+				continue;
+			const T inv_a = a_free ? r.inv_ma : zero;
+			const T inv_b = b_free ? r.inv_mb : zero;
+			const bool spin_a = a_free && r.a_rotates;
+			const bool spin_b = b_free && r.b_rotates;
+			// Where each anchor has been pushed to so far this pass. The lever turns
+			// with the running angular correction: for the small angles at stake,
+			// R(δ)·r ≈ r + δ × r.
+			vec3<T> anchor_a, anchor_b, twist, err;
+			add(anchor_a, r.a->position_, r.r_a);
+			add(anchor_a, r.a->pos_correction_);
+			if (spin_a) {
+				cross(twist, r.a->rot_correction_, r.r_a);
+				add(anchor_a, twist);
+			}
+			anchor_b = r.anchor_b;
+			if (r.b) {
+				add(anchor_b, r.b->pos_correction_);
+				if (spin_b) {
+					cross(twist, r.b->rot_correction_, r.r_b);
+					add(anchor_b, twist);
+				}
+			}
+			sub(err, anchor_b, anchor_a);
+			if (length_squared(err) <= epsilon_ * epsilon_)
+				continue;
+			// The same K the velocity sweep uses — the response of the anchor pair to a
+			// push is the response to an impulse, read as displacement. Full-strength
+			// bodies only: freezing an anchor mid-pass by zeroing its inverse mass would
+			// need K rebuilt, so a row with an immovable end simply over-corrects the
+			// free one slightly and the next iteration takes up the rest.
+			mul(err, -r.bias);
+			vec3<T> lambda;
+			mul(lambda, r.eff_inv, err);
+			corrected = true;
+			if (inv_a > zero) {
+				vec3<T> d;
+				mul(d, lambda, -inv_a);
+				add(r.a->pos_correction_, d);
+			}
+			if (inv_b > zero) {
+				vec3<T> d;
+				mul(d, lambda, inv_b);
+				add(r.b->pos_correction_, d);
+			}
+			if (spin_a) {
+				vec3<T> rxj, dw;
+				cross(rxj, r.r_a, lambda);
+				apply_inv_inertia_world(r.a, rxj, dw);
+				sub(r.a->rot_correction_, dw);
+			}
+			if (spin_b) {
+				vec3<T> rxj, dw;
+				cross(rxj, r.r_b, lambda);
+				apply_inv_inertia_world(r.b, rxj, dw);
+				add(r.b->rot_correction_, dw);
 			}
 		}
 		if (!corrected)
@@ -1683,6 +1826,11 @@ bool simulator<T>::constraint_force_on(constraint<T> * c,
                                        vec3<T> & force,
                                        vec3<T> & lever) {
 	if (!c->is_active())
+		return false;
+	// A rigid pin is not a force. It is solved as an impulse in Pass B (solve_joints)
+	// and as a pseudo-position correction in correct_positions, so it contributes
+	// nothing to the integrator's acceleration or to the Phase 10 anchor torque.
+	if (c->type_ == constraint<T>::type::rigid)
 		return false;
 
 	// Lever arm = orientation-rotated local anchor (zero anchor → zero lever, so
@@ -1892,6 +2040,148 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
 	return &slot;
 }
 
+// Build one row per active rigid constraint. Everything here is fixed for the duration
+// of the solve — orientations do not change between Pass A and Pass B — so the lever
+// arms and the 3x3 effective mass are derived once and the sweep below is a matrix
+// multiply and two adds per visit.
+template <typename T>
+void simulator<T>::build_joint_rows(int nsolids) {
+	joint_rows_.clear();
+	const T zero {};
+	for (auto & held : constraints_) {
+		constraint<T> * c = held.get();
+		if (!c || !c->is_active() || c->type_ != constraint<T>::type::rigid)
+			continue;
+		solid<T> * a = c->start_solid_.get();
+		if (!a || a->solver_body_index_ < 0 || a->solver_body_index_ >= nsolids)
+			continue;
+		solid<T> * b = c->end_solid_.get();
+		// A solid pinned to itself has no relative motion to solve, and a far end the
+		// simulator does not own cannot be moved — fall back to treating it as a fixed
+		// world point rather than writing through a bogus solver index.
+		if (b == a)
+			continue;
+		if (b && (b->solver_body_index_ < 0 || b->solver_body_index_ >= nsolids))
+			b = nullptr;
+		// Both ends asleep or immovable: no free body, nothing to converge.
+		if (!a->active_ && (!b || !b->active_))
+			continue;
+
+		joint_row r;
+		r.c = c;
+		r.a = a;
+		r.b = b;
+		r.index_a = a->solver_body_index_;
+		r.index_b = b ? b->solver_body_index_ : nsolids;
+		anchor_lever(r.r_a, a, c->local_anchor_a_);
+		if (b) {
+			anchor_lever(r.r_b, b, c->local_anchor_b_);
+			add(r.anchor_b, b->position_, r.r_b);
+		} else {
+			r.r_b.reset();
+			r.anchor_b = c->end_point_;
+		}
+		r.a_rotates = a->rotates_dynamically();
+		r.b_rotates = b && b->rotates_dynamically();
+		r.inv_ma = a->inv_mass_;
+		r.inv_mb = b ? b->inv_mass_ : zero;
+		if (r.inv_ma + r.inv_mb <= zero && !r.a_rotates && !r.b_rotates)
+			continue;  // two anchors pinned to each other
+
+		// K = (1/ma + 1/mb)I - [r_a]x Ia^-1 [r_a]x - [r_b]x Ib^-1 [r_b]x: the mass the
+		// anchor pair presents to an impulse, in every direction at once. Solving all
+		// three DOF together is the point — a ball-socket is fully coupled, and taking
+		// the axes one at a time converges at a rate that shows up as a sagging chain.
+		mat3<T> k;
+		const T diag = r.inv_ma + r.inv_mb;
+		k.set_at(0, 0, diag); k.set_at(0, 1, zero); k.set_at(0, 2, zero);
+		k.set_at(1, 0, zero); k.set_at(1, 1, diag); k.set_at(1, 2, zero);
+		k.set_at(2, 0, zero); k.set_at(2, 1, zero); k.set_at(2, 2, diag);
+		auto subtract_angular = [&k](const solid<T> * s, const vec3<T> & lever) {
+			mat3<T> skew, tmp, term;
+			set_skew(skew, lever);
+			mul(tmp, skew, s->get_inv_inertia_world());
+			mul(term, tmp, skew);
+			for (int i = 0; i < 9; ++i)
+				k.data[i] -= term.data[i];
+		};
+		if (r.a_rotates)
+			subtract_angular(a, r.r_a);
+		if (r.b_rotates)
+			subtract_angular(b, r.r_b);
+		// Zero threshold, not epsilon_: epsilon_ is a LENGTH, and K's determinant scales
+		// with the cube of inverse mass, so a pair of heavy bodies has a legitimately
+		// tiny determinant that an epsilon test would reject as singular.
+		if (!invert(r.eff_inv, k, zero))
+			continue;
+
+		r.damping = c->damping_constant_;
+		if (r.damping <= zero)
+			r.damping = tr::one();
+		else if (r.damping > tr::one())
+			r.damping = tr::one();  // over-relaxing a Gauss-Seidel row diverges
+		r.bias = c->bias_;
+		r.impulse_clamp = c->impulse_clamp_;
+		joint_rows_.push_back(r);
+	}
+}
+
+// One Gauss-Seidel visit per joint: drive the relative velocity of the two anchors to
+// zero. lambda = K^-1 * (-damping * v_rel), applied as -lambda at a's anchor and
+// +lambda at b's, which also torques each body through its lever arm.
+template <typename T>
+void simulator<T>::solve_joints() {
+	const T zero {};
+	for (auto & r : joint_rows_) {
+		solver_body & sa = solver_bodies_[r.index_a];
+		solver_body & sb = solver_bodies_[r.index_b];
+		// Live surface velocity at each anchor (v + w x r) — w evolves during the sweep,
+		// so unlike the lever arms this cannot be precomputed.
+		vec3<T> va(sa.velocity), vb(sb.velocity), vrel;
+		if (r.a_rotates) {
+			vec3<T> w;
+			cross(w, sa.angular_velocity, r.r_a);
+			add(va, w);
+		}
+		if (r.b_rotates) {
+			vec3<T> w;
+			cross(w, sb.angular_velocity, r.r_b);
+			add(vb, w);
+		}
+		sub(vrel, vb, va);
+		mul(vrel, -r.damping);
+		vec3<T> lambda;
+		mul(lambda, r.eff_inv, vrel);
+		if (r.impulse_clamp > zero) {
+			T mag = length(lambda);
+			if (mag > r.impulse_clamp)
+				mul(lambda, r.impulse_clamp / mag);
+		}
+		if (r.inv_ma > zero) {
+			vec3<T> d;
+			mul(d, lambda, -r.inv_ma);
+			add(sa.velocity, d);
+		}
+		if (r.inv_mb > zero) {
+			vec3<T> d;
+			mul(d, lambda, r.inv_mb);
+			add(sb.velocity, d);
+		}
+		if (r.a_rotates) {
+			vec3<T> rxj, dw;
+			cross(rxj, r.r_a, lambda);
+			apply_inv_inertia_world(r.a, rxj, dw);
+			sub(sa.angular_velocity, dw);
+		}
+		if (r.b_rotates) {
+			vec3<T> rxj, dw;
+			cross(rxj, r.r_b, lambda);
+			apply_inv_inertia_world(r.b, rxj, dw);
+			add(sb.angular_velocity, dw);
+		}
+	}
+}
+
 template <typename T>
 void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	const T zero_val {};
@@ -1917,6 +2207,10 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	static_world_.solver_body_index_ = nsolids;
 	solver_bodies_[nsolids].velocity.set(static_world_.velocity_);
 	solver_bodies_[nsolids].angular_velocity.set(static_world_.angular_velocity_);
+
+	// Rigid joints share this tick's solver state and iteration budget with the
+	// contacts; the indices they address were just assigned above.
+	build_joint_rows(nsolids);
 
 	// --- 1. Build the canonical pair list ---
 	// Walk every active solid's cache exactly once. For each refreshed slot,
@@ -2128,7 +2422,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		}
 	}
 
-	if (contact_pairs_.empty())
+	if (contact_pairs_.empty() && joint_rows_.empty())
 		return;
 
 	// Relative velocity of the pair at the contact, used by the vn0 snapshot and both
@@ -2390,6 +2684,12 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				continue;
 			solve_normal(p, p.inv_ma, p.inv_mb, p.eff_n);
 		}
+		// Joint sweep, between the normal and friction sweeps rather than in a pass of
+		// its own: a pinned limb resting on a floor converges only if the joint and the
+		// contact are solved against each other. Two separate passes fight, each undoing
+		// what the other just did. Friction still runs last, so it reads the normal load
+		// and the joint's correction together.
+		solve_joints();
 		// Friction sweep (same per-tick flip)
 		for (int k = 0; k < npairs; ++k) {
 			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
@@ -2580,6 +2880,12 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	for (auto & p : contact_pairs_) {
 		finalize(p.a, p.index_a, p.inv_ma);
 		finalize(p.b, p.index_b, p.inv_mb);
+	}
+	// A body held only by a joint touches nothing, so the walk above never reaches it.
+	for (auto & r : joint_rows_) {
+		finalize(r.a, r.index_a, r.inv_ma);
+		if (r.b)
+			finalize(r.b, r.index_b, r.inv_mb);
 	}
 	// Commit the dense scratch state once the iterative solve, cap, and wake
 	// decisions are complete. static_world_ has no entry in solids_ and remains
