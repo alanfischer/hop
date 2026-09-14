@@ -272,12 +272,118 @@ template <typename T> static void bench_compound_narrow(const char * label) {
 }
 
 // ----------------------------------------------------------------------------
+// Scenario 5: manifold piles — boxes stacked on a floor, the only scene shape
+// that fills the manifold provisioning. The stress scene above is spheres, and a
+// sphere contact is a single point, so nothing there ever exercises the 12 slots
+// x 4 points every solid carries (3360 of solid<float>'s 3864 bytes).
+//
+// It reports what the pile actually uses alongside the tick cost, because the two
+// together are the answer to "is the provisioning worth slimming?". A 6x6x6 pile
+// keeps 88% of its slots live, half of them at all 12, and fills about half the
+// points provisioned inside them — so the worst case is real for a pile, even though
+// a ragdoll never approaches it (its bones sit at one slot with one point 96% of the
+// time, and 168 of them walk ~650 KB to say so).
+//
+// The footprint does not convert into time, though, which is the finding this
+// scenario exists to keep honest. Measured on an M1 Max (12 MB L2): padding
+// touch::point by 60 bytes (solid<float> 3864 -> 6744) and contact_pair by 64
+// (192 -> 256) — the duplication a per-pair header plus slim per-point rows would
+// remove — moved nothing. This pile, the 200-sphere stress and demo_ragdoll's 168
+// bones all landed inside run noise, and so did a 3136-box pile whose 11.6 MB of
+// solids do not fit in L2 at all (padded to 20.2 MB it was, if anything, marginally
+// faster). These passes are bound by narrow-phase math, not by bandwidth. Re-run
+// that padding control on a cache-poorer target before spending a restructure on it.
+// ----------------------------------------------------------------------------
+
+template <typename T> static void setup_pile_scene(simulator<T> & sim, int per_side, int layers) {
+	using tr = scalar_traits<T>;
+	sim.set_gravity({ T {}, T {}, -tr::from_int(20) });
+	sim.set_default_contact_mode(contact_mode::speculative);
+
+	auto floor_solid = std::make_shared<solid<T>>();
+	floor_solid->set_infinite_mass();
+	floor_solid->set_coefficient_of_gravity(T {});
+	floor_solid->set_position({ T {}, T {}, -tr::half() });
+	floor_solid->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(-tr::from_int(40), -tr::from_int(40), -tr::half(),
+	              tr::from_int(40), tr::from_int(40), tr::half())));
+	sim.add_solid(floor_solid);
+
+	// 0.4 m boxes on a 0.41 m lattice: they land face to face, which is what makes
+	// four-point manifolds instead of the single point a sphere would give.
+	const T half = tr::from_milli(200);
+	for (int L = 0; L < layers; ++L)
+	for (int i = 0; i < per_side; ++i)
+	for (int j = 0; j < per_side; ++j) {
+		auto b = std::make_shared<solid<T>>();
+		b->set_mass(tr::one());
+		b->set_inertia({ tr::from_milli(27), tr::from_milli(27), tr::from_milli(27) });
+		b->set_coefficient_of_restitution(T {});
+		b->set_position({ tr::from_milli(410 * (i - per_side / 2)),
+		                  tr::from_milli(410 * (j - per_side / 2)),
+		                  tr::from_milli(210 + 430 * L) });
+		b->add_shape(std::make_shared<shape<T>>(aa_box<T>(half)));
+		sim.add_solid(b);
+	}
+}
+
+// What share of the provisioning is live, sampled over the timed run.
+template <typename T> static void report_pile_occupancy(const simulator<T> & sim) {
+	long long slots_live = 0, slots_provisioned = 0, points_live = 0, points_provisioned = 0;
+	long long full_slots = 0, bodies = 0;
+	for (const auto & sp : sim.get_solids()) {
+		const solid<T> * b = sp.get();
+		++bodies;
+		int n = b->get_touch_count();
+		slots_live += n;
+		slots_provisioned += solid<T>::max_touches;
+		if (n == solid<T>::max_touches)
+			++full_slots;
+		for (int i = 0; i < n; ++i) {
+			points_live += b->get_touch(i).point_count;
+			points_provisioned += max_manifold_points;
+		}
+	}
+	printf("    %lld bodies: %lld/%lld slots live (%.0f%%, %lld at all %d), "
+	       "%lld/%lld points in those slots (%.0f%%)\n",
+	       bodies, slots_live, slots_provisioned,
+	       100.0 * double(slots_live) / double(slots_provisioned ? slots_provisioned : 1),
+	       full_slots, solid<T>::max_touches, points_live, points_provisioned,
+	       100.0 * double(points_live) / double(points_provisioned ? points_provisioned : 1));
+}
+
+template <typename T> static void bench_manifold_pile(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("[manifold_pile %s]\n", label);
+
+	struct config { int per_side; int layers; int iters; };
+	config configs[] = { { 4, 4, 400 }, { 6, 6, 150 } };
+
+	for (auto c : configs) {
+		auto sim = std::make_shared<simulator<T>>();
+		setup_pile_scene(*sim, c.per_side, c.layers);
+		// Settle first: a pile in free fall has no manifolds yet, and the resting
+		// pile is the state the solver actually spends its time in.
+		for (int i = 0; i < 100; ++i)
+			sim->update(tr::from_milli(16));
+		char name[64];
+		std::snprintf(name, sizeof(name), "%dx%d x %d layers (%d boxes)",
+		              c.per_side, c.per_side, c.layers, c.per_side * c.per_side * c.layers);
+		bench::go(name, c.iters, [&] { sim->update(tr::from_milli(16)); });
+		report_pile_occupancy(*sim);
+	}
+}
+
+// ----------------------------------------------------------------------------
 
 int main() {
 	printf("hop bench\n");
 	printf("---------\n");
 	printf("sizeof(shape<float>) = %zu bytes\n", sizeof(shape<float>));
 	printf("sizeof(solid<float>) = %zu bytes\n", sizeof(solid<float>));
+	printf("sizeof(solid<float>::touch) = %zu bytes  (%d slots x %d points = %zu bytes of the solid)\n",
+	       sizeof(solid<float>::touch), solid<float>::max_touches, max_manifold_points,
+	       sizeof(solid<float>::touch) * solid<float>::max_touches);
 	printf("sizeof(simulator<float>) = %zu bytes\n", sizeof(simulator<float>));
 	printf("\n");
 
@@ -292,6 +398,9 @@ int main() {
 
 	bench_compound_narrow<float>("float");
 	bench_compound_narrow<fixed16>("fixed16");
+
+	bench_manifold_pile<float>("float");
+	bench_manifold_pile<fixed16>("fixed16");
 
 	printf("\ndone\n");
 	return 0;
