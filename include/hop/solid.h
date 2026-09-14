@@ -131,6 +131,7 @@ public:
 		coefficient_of_dynamic_friction_ = tr::half();
 		coefficient_of_rolling_friction_ = T {};  // opt-in: see set_coefficient_of_rolling_friction
 		coefficient_of_effective_drag_ = T {};
+		coefficient_of_angular_damping_ = T {};
 		local_bound_.reset();
 		world_bound_.reset();
 		collision_callback_ = nullptr;
@@ -325,6 +326,15 @@ public:
 	T get_coefficient_of_rolling_friction() const { return coefficient_of_rolling_friction_; }
 	void set_coefficient_of_effective_drag(T c) { coefficient_of_effective_drag_ = c; }
 	T get_coefficient_of_effective_drag() const { return coefficient_of_effective_drag_; }
+	// How fast free spin bleeds away, as the fraction of ω removed per second: ω is
+	// scaled by (1 - c*dt) each integration, so it decays with time constant 1/c and
+	// never reverses. A rate rather than a torque on purpose — a torque would divide by
+	// the inertia and so damp a thin gib and a fat one at different rates, where what a
+	// caller asks for here is "shed this tumble in about a second". It is the angular
+	// half of coefficient_of_effective_drag, which is a fluid force because a fluid
+	// really does push on a body; nothing pushes on spin. Zero by default.
+	void set_coefficient_of_angular_damping(T c) { coefficient_of_angular_damping_ = c; }
+	T get_coefficient_of_angular_damping() const { return coefficient_of_angular_damping_; }
 
 	// Shapes
 	void add_shape(typename shape<T>::ptr s) {
@@ -486,6 +496,7 @@ private:
 	T inv_mass_ {};
 	T coefficient_of_gravity_ {};
 	T coefficient_of_effective_drag_ {};
+	T coefficient_of_angular_damping_ {};
 
 	// -- Warm: collision response (read on actual hits, not per pair) --
 	T coefficient_of_restitution_ {};

@@ -751,6 +751,73 @@ template <typename T> static void test_dynamic_spin(const char * label) {
 // spin) strikes a free finite-inertia box; the +y-offset hit pushing +x torques the
 // box clockwise about Z (ω.z < 0), and the box's linear speed is lower than the
 // centered case because energy went into rotation.
+// Angular damping: the rate a caller asks for, and nothing more. hop-godot used to run
+// this itself in a post-step loop over every body, which it could only do through
+// set_angular_velocity — and that activates the body, so a gib damped down to a
+// standstill reset its deactivation counter every tick and could never sleep. Damping
+// inside the integrator is a plain member write, so case (4) is the one that matters.
+template <typename T> static void test_angular_damping(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  angular_damping[%s]: ", label);
+	const T z {};
+	auto make = [&](T damping, const vec3<T> & w0) {
+		auto sim = std::make_shared<simulator<T>>();
+		sim->set_gravity(vec3<T>(z, z, z));
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one())); // isotropic: no precession to confuse |ω|
+		s->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::half(), -tr::half(), -tr::half()), vec3<T>(tr::half(), tr::half(), tr::half()))));
+		s->set_collide_with_scope(0);
+		s->set_coefficient_of_angular_damping(damping);
+		s->set_angular_velocity(w0);
+		sim->add_solid(s);
+		return std::make_pair(sim, s);
+	};
+	const vec3<T> w0(z, z, tr::from_int(10));
+
+	// (1) Undamped is the control: ω is untouched by the coefficient being there.
+	{
+		auto [sim, s] = make(z, w0);
+		for (int i = 0; i < 60; ++i) sim->update(tr::from_milli(16));
+		printf("free wz=%.2f ", tr::to_float(s->get_angular_velocity().z));
+		assert(std::fabs(tr::to_float(s->get_angular_velocity().z) - 10.0f) < 0.2f);
+	}
+	// (2) c = 2 over 1 s: ω *= (1 - 2·dt) sixty times ≈ e⁻² → 10 rad/s becomes ~1.3.
+	//     It decays, it never crosses zero, and it keeps its axis.
+	{
+		auto [sim, s] = make(tr::two(), w0);
+		for (int i = 0; i < 60; ++i) {
+			sim->update(tr::from_milli(16));
+			assert(tr::to_float(s->get_angular_velocity().z) > 0.0f); // damping removes spin, never reverses it
+		}
+		const float wz = tr::to_float(s->get_angular_velocity().z);
+		printf("damped wz=%.2f ", wz);
+		assert(wz > 1.0f && wz < 1.8f);
+	}
+	// (3) A coefficient past 1/dt would flip the spin if it were applied blind. Clamped
+	//     to a standstill instead.
+	{
+		auto [sim, s] = make(tr::from_int(200), w0);
+		sim->update(tr::from_milli(16));
+		printf("over wz=%.3f ", tr::to_float(s->get_angular_velocity().z));
+		assert(std::fabs(tr::to_float(s->get_angular_velocity().z)) < 0.01f);
+	}
+	// (4) A damped body still goes to sleep. Needs deactivate_count consecutive still
+	//     ticks, so anything that re-activates the body each step defeats it forever.
+	{
+		auto [sim, s] = make(tr::from_int(5), w0);
+		int slept = -1;
+		for (int i = 0; i < 600 && slept < 0; ++i) {
+			sim->update(tr::from_milli(16));
+			if (!s->active()) slept = i;
+		}
+		printf("slept@%d ", slept);
+		assert(slept > 0);
+	}
+	printf("OK\n");
+}
+
 template <typename T> static void test_angular_impulse(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  angular_impulse[%s]: ", label);
@@ -1611,6 +1678,7 @@ int main() {
 	test_oriented_box_rest<float>("float");
 	test_dynamic_spin<float>("float");
 	test_angular_impulse<float>("float");
+	test_angular_damping<float>("float");
 	test_friction_rolling<float>("float");
 	test_shock_angular_mass<float>("float");
 	test_contact_arm_not_face_centre<float>("float");
@@ -1661,6 +1729,7 @@ int main() {
 	test_oriented_box_rest<fixed16>("fixed16");
 	test_dynamic_spin<fixed16>("fixed16");
 	test_angular_impulse<fixed16>("fixed16");
+	test_angular_damping<fixed16>("fixed16");
 	test_friction_rolling<fixed16>("fixed16");
 	test_constraint_anchor_torque<fixed16>("fixed16");
 	// The decomposition is more trig than hop does anywhere else, and asin/acos/atan2 are
