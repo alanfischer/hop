@@ -1455,6 +1455,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// partner (nothing here persists across ticks — see add_or_refresh_manifold).
 	contact_point<T> manifold[max_manifold_points];
 	int manifold_count = 0;
+	bool manifold_is_shared = false;  // clipped, so the partner may mirror it
 
 	// Turn the narrowphase's report of `col` against `partner` into manifold points.
 	// The signed gap along the normal is recovered per point: shapes were inflated by
@@ -1476,6 +1477,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		// per face corner — only to discard every one of them. Rejecting on the distance
 		// first costs three multiplies and a dot.
 		manifold_count = 0;
+		manifold_is_shared = false;
 		bool worth_clipping = true;
 		if (col.depth <= zero && col.time > zero) {
 			vec3<T> travel;
@@ -1483,9 +1485,31 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			const T reach = spec_margin_ + epsilon_;
 			worth_clipping = length_squared(travel) <= reach * reach;
 		}
-		if (worth_clipping)
+		// The partner may already have clipped this pair's manifold this tick, and it is
+		// the same contact, so mirror it rather than spend a second clip. Both sides then
+		// hold the same points in the same order under the same ids, which is what lets
+		// the solver pair rows to partner points by ID. Levers stay per-side: each is
+		// measured from its own body's swept centre (see add_or_refresh_manifold).
+		if (worth_clipping && partner) {
+			const typename solid<T>::touch * twin = find_touch(partner, solid_ptr);
+			if (twin && twin->manifold_tick == current_tick_) {
+				manifold_count = twin->point_count;
+				for (int i = 0; i < manifold_count; ++i) {
+					manifold[i].impact.set(twin->points[i].impact);
+					neg(manifold[i].normal, twin->points[i].normal);
+					manifold[i].separation = twin->points[i].separation;
+					manifold[i].id = twin->points[i].id;
+				}
+				manifold_is_shared = manifold_count > 0;
+			}
+		}
+		if (manifold_count == 0 && worth_clipping) {
 			manifold_count = hop::manifold_for_solids(manifold, max_manifold_points, col,
 			                                          solid_ptr, partner, spec_margin_, epsilon_);
+			// Only a clipped manifold may be mirrored: the fallback below carries this
+			// body's own closing distance, which means nothing to the partner.
+			manifold_is_shared = manifold_count > 0 && partner != nullptr;
+		}
 		if (manifold_count == 0) {
 			// Swept contact, or a pair the manifold generator declines: the single point
 			// the trace reported.
@@ -1563,7 +1587,10 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 		// ext_dv_unearned_ stays 1 on this path: it discovers contacts without moving, so
 		// none of the tick's external increment has been earned by travel.
-		add_or_refresh_manifold(solid_ptr, partner, manifold, manifold_count, col.point, impact_speed, current_tick_);
+		auto * refreshed = add_or_refresh_manifold(solid_ptr, partner, manifold, manifold_count,
+		                                           col.point, impact_speed, current_tick_);
+		if (refreshed && manifold_is_shared)
+			refreshed->manifold_tick = current_tick_;
 
 		// Wake a real sleeping partner so it participates in the solve (the world
 		// anchor never sleeps).
@@ -2186,8 +2213,10 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_manifold(
 		fresh_slot = true;
 		// A slot claimed by eviction carries the previous partner's dedup marker; left
 		// alone it can read as "already built this tick" and silently drop the new
-		// partner's pairs from the solve.
+		// partner's pairs from the solve; its manifold marker would likewise offer the
+		// new partner points clipped against the old one.
 		found->pair_built_tick = -1;
+		found->manifold_tick = -1;
 	}
 	auto & slot = *found;
 
@@ -2577,58 +2606,62 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 
 			// Canonicalize by the solids' stable insertion ids so we have a
 			// reproducible "a < b" within the pair (a raw pointer compare would
-			// reorder run-to-run under ASLR; see solid::solve_id_). The actual
-			// slot.normal / accum_t conventions then depend on whether the
-			// iterating side ended up as a or b.
+			// reorder run-to-run under ASLR; see solid::solve_id_). The stored
+			// normal / accum_t conventions then depend on which side a slot
+			// belongs to.
 			solid<T> * a;
 			solid<T> * b;
-			bool slot_is_a;
 			if (s->solve_id_ < partner->solve_id_) {
-				a = s; b = partner; slot_is_a = true;
+				a = s; b = partner;
 			} else {
-				a = partner; b = s; slot_is_a = false;
+				a = partner; b = s;
 			}
 			auto * other_slot = find_touch(partner, s);
+			auto * slot_a = (a == s) ? &slot : other_slot;
+			auto * slot_b = (a == s) ? other_slot : &slot;
+			const bool a_fresh = slot_a && slot_a->last_tick == current_tick_;
+			const bool b_fresh = slot_b && slot_b->last_tick == current_tick_;
 
-			// Build the pair from whichever side has the RICHER manifold. Both bodies
-			// discover the same contact independently and they need not agree on how
-			// many points it has — a capsule resting on level geometry clips to two
-			// points from its own side while the geometry's side of the same contact is
-			// a single one, and a body whose partner cannot produce a manifold at all
-			// is the ordinary case. Taking whichever side the iteration reached first
-			// then alternates the row count with update()'s per-tick order flip, and a
-			// contact that is two rows on one tick and one row on the next cannot hold
-			// anything still: the rod it was meant to settle spun at 2.5 rad/s instead.
-			// Deferring needs the partner to actually be coming: it must be awake, so
-			// its own slots are walked, or the pair would never be built at all.
-			if (other_slot && other_slot->last_tick == current_tick_ &&
-			    other_slot->pair_built_tick != current_tick_ &&
-			    other_slot->point_count > slot.point_count && partner->active_)
-				continue;
+			// Which side's points become the rows. Both sides normally carry the same
+			// manifold (see build_manifold's mirror), but a body sweeping into a
+			// resting one takes the single-point path while the resting side clips a
+			// full manifold — and a contact that is four rows on one tick and one on
+			// the next holds nothing still. Richer wins, ties to `a`: both are
+			// properties of the pair, not of traversal order or of who is asleep.
+			const bool auth_is_a = (a_fresh && b_fresh)
+			    ? slot_a->point_count >= slot_b->point_count
+			    : a_fresh;
+			auto & src = auth_is_a ? *slot_a : *slot_b;
+			auto * mate_slot = auth_is_a ? slot_b : slot_a;
+			solid<T> * auth_solid = auth_is_a ? a : b;
+			solid<T> * mate_solid = auth_is_a ? b : a;
 
 			// One row per MANIFOLD POINT, sharing a, b and this slot's partner-level
 			// data, each with its own normal, lever arms, separation and accumulators.
 			// The Gauss-Seidel sweep needs no structural change for this: four rows
 			// under a box level it because each row sees its own gap, and that is the
 			// entire fix.
-			for (int q = 0; q < slot.point_count; ++q) {
-				auto & pt = slot.points[q];
-				// The partner's own view of this same point, matched by world position —
-				// the two sides generate their manifolds independently and need not order
-				// or ID them alike, but they witness the same contacts. Used for the
-				// partner's lever arm and for impulse writeback. Degenerates to "the only
-				// point" when either side reports one, which is every pre-manifold path.
-				typename solid<T>::touch::point * other_pt = nullptr;
-				if (other_slot && other_slot->point_count > 0) {
-					T best {};
-					for (int j = 0; j < other_slot->point_count; ++j) {
-						const T d2 = length_squared(other_slot->points[j].impact, pt.impact);
-						if (!other_pt || d2 < best) {
-							other_pt = &other_slot->points[j];
-							best = d2;
+			for (int q = 0; q < src.point_count; ++q) {
+				auto & pt = src.points[q];
+				// The other side's view of this same point, matched by FEATURE ID: the
+				// mirror gives both sides the same ids, so the correspondence is exact
+				// rather than the nearest-position guess it replaces.
+				typename solid<T>::touch::point * mate_pt = nullptr;
+				if (mate_slot) {
+					for (int j = 0; j < mate_slot->point_count; ++j) {
+						if (mate_slot->points[j].id == pt.id) {
+							mate_pt = &mate_slot->points[j];
+							break;
 						}
 					}
 				}
+				// Only a matched point may be WRITTEN to, or four rows alias onto one
+				// accumulator and the last wins; an unmatched side warm-starts cold. Its
+				// single point is still the right lever arm, which is every pre-manifold
+				// path.
+				typename solid<T>::touch::point * mate_writeback = mate_pt;
+				if (!mate_pt && mate_slot && mate_slot->point_count == 1)
+					mate_pt = &mate_slot->points[0];
 
 				contact_pair p;
 				p.a = a;
@@ -2639,23 +2672,23 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				// direction that pushes b away from a when we apply +λ to b's
 				// velocity along it).
 				//
-				// slot.normal (this side, "self") points from partner toward
-				// self. If self == a, slot.normal points from b toward a — the
-				// opposite of pair.normal. If self == b, slot.normal points
+				// A point's normal points from its slot's partner toward its slot's
+				// owner. If the authoritative slot is a's, its normal points from b
+				// toward a — the opposite of pair.normal. If it is b's, it points
 				// from a toward b — same direction.
-				if (slot_is_a) {
+				if (auth_is_a) {
 					neg(p.normal, pt.normal);
 				} else {
 					p.normal.set(pt.normal);
 				}
 				p.accum_n = pt.accum_n;
-				if (slot_is_a) {
+				if (auth_is_a) {
 					neg(p.accum_t, pt.accum_t);
 				} else {
 					p.accum_t.set(pt.accum_t);
 				}
-				p.impact_speed = slot.impact_speed;  // per-partner: wake / callback gating only
-				p.separation = pt.separation;  // carried from the iterating side's point (same as normal/impact)
+				p.impact_speed = src.impact_speed;  // per-partner: wake / callback gating only
+				p.separation = pt.separation;  // carried from the authoritative side's point (same as normal/impact)
 				// Combine the two bodies' coefficients of restitution. When the
 				// bodies' modes differ the higher-precedence one governs (larger
 				// enumerator: average < minimum < multiply < maximum). See the
@@ -2676,8 +2709,8 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				p.inv_ma = a->inv_mass_;
 				p.inv_mb = b->inv_mass_;
 				p.inv_m_sum = p.inv_ma + p.inv_mb;
-				p.slot_a = slot_is_a ? &pt : other_pt;
-				p.slot_b = slot_is_a ? other_pt : &pt;
+				p.slot_a = auth_is_a ? &pt : mate_writeback;
+				p.slot_b = auth_is_a ? mate_writeback : &pt;
 
 				// Phase 9: angular impulse response. Active only when a body in the pair
 				// spins dynamically (inv_inertia != 0). The non-angular case keeps eff_n ==
@@ -2703,21 +2736,22 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 					//     both radial under pile separation/penetration, where the centers are
 					//     not exactly a diameter apart and a shared anchor would fabricate a
 					//     tangential moment on the partner.
-					// The partner's twin slot is fresh whenever it is a dynamic body (it
+					// The other side's twin slot is fresh whenever it is a dynamic body (it
 					// discovers the same contact in its own pass); the world-anchor fallback
 					// only runs for a static/asleep partner, whose inv_inertia is zero so the
 					// arm is unused. For a resting contact the sweep is ~0 — unchanged there.
-					// `s` (the iterating side) owns `slot`; bind its arm and the partner's so
-					// the two assignments below don't restate the a/b canonicalization.
-					vec3<T> & self_r    = slot_is_a ? p.r_a : p.r_b;
-					vec3<T> & partner_r = slot_is_a ? p.r_b : p.r_a;
+					// `auth_solid` owns `src`, so its own arm is the stored lever; bind it and
+					// the other body's so the two assignments below don't restate the a/b
+					// canonicalization.
+					vec3<T> & self_r    = auth_is_a ? p.r_a : p.r_b;
+					vec3<T> & partner_r = auth_is_a ? p.r_b : p.r_a;
 					self_r.set(pt.lever);
-					if (other_pt && other_slot->last_tick == current_tick_) {
-						partner_r.set(other_pt->lever);
+					if (mate_pt && mate_slot->last_tick == current_tick_) {
+						partner_r.set(mate_pt->lever);
 					} else {
 						vec3<T> world_contact;
-						add(world_contact, s->position_, pt.lever);
-						sub(partner_r, world_contact, partner->position_);
+						add(world_contact, auth_solid->position_, pt.lever);
+						sub(partner_r, world_contact, mate_solid->position_);
 						// That point is only a contact point if it lies ON the partner.
 						// support() cannot recover the tangential position of a FACE contact
 						// and collapses it to the face CENTRE, so when the iterating side was
@@ -2732,9 +2766,9 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 						// have produced and what every rounded partner already gets.
 						// Only worth checking when the arm is actually read: a partner with no
 						// inertia never spins, so its arm is unused whatever we put in it.
-						if (partner->rotates_dynamically()) {
+						if (mate_solid->rotates_dynamically()) {
 							aa_box<T> partner_bound;
-							partner->get_bound_about_position(partner_bound);
+							mate_solid->get_bound_about_position(partner_bound);
 							vec3<T> reach;
 							for (int axis = 0; axis < 3; ++axis) {
 								const T lo = tr::abs(partner_bound.mins[axis]);

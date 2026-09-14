@@ -345,6 +345,155 @@ static void test_a_box_on_static_geometry_settles_flat() {
 	printf("  a_box_on_static_geometry_settles_flat ok (tilt %.5f rad, drift %.5f m)\n", tilt, drift);
 }
 
+// --- the pair decides, not the caller -------------------------------------
+
+// A ground plane, so a manifold can be asked for with a TRACEABLE on either side of the
+// pair. Only trace_segment is exercised: that is what the traceable manifold probes with.
+class plane_traceable : public traceable<T> {
+public:
+	void get_bound(aa_box<T> & result) override {
+		result.mins.set((T)-50, (T)-1, (T)-50);
+		result.maxs.set((T)50, T {}, (T)50);
+	}
+	void trace_segment(collision<T> & result, const vec3<T> & position, const mat3<T> &,
+	                   const segment<T> & seg) override {
+		const T y = position.y;
+		if (seg.direction.y >= T {})
+			return;
+		const T t = (y - seg.origin.y) / seg.direction.y;
+		if (t < T {} || t >= (T)1)
+			return;
+		result.time = t;
+		result.normal = v(0, 1, 0);
+		V travel;
+		mul(travel, seg.direction, t);
+		add(result.point, seg.origin, travel);
+		result.impact.set(result.point);
+	}
+	void trace_solid(collision<T> &, solid<T> *, const vec3<T> &, const mat3<T> &,
+	                 const segment<T> &, T) override {}
+};
+
+// Each body used to ask for the manifold with ITSELF as the mover, which reached a
+// different branch and got a different answer: a rod under a slab clipped two points
+// asked from the capsule's side and NONE from the box's. Asking from either side must
+// now return the same points with the normals reversed.
+static void assert_both_sides_agree(const char * what, solid<T> * s1, solid<T> * s2,
+                                    V normal_toward_s1, int expect) {
+	collision<T> c1;
+	c1.reset();
+	c1.time = T {};
+	c1.normal = normal_toward_s1;
+	c1.collider = s2;
+	collision<T> c2;
+	c2.reset();
+	c2.time = T {};
+	neg(c2.normal, normal_toward_s1);
+	c2.collider = s1;
+
+	contact_point<T> from_1[max_manifold_points];
+	contact_point<T> from_2[max_manifold_points];
+	const int n1 = manifold_for_solids(from_1, max_manifold_points, c1, s1, s2, kMargin, kEps);
+	const int n2 = manifold_for_solids(from_2, max_manifold_points, c2, s2, s1, kMargin, kEps);
+	assert(n1 == expect && "asked from one side");
+	assert(n2 == expect && "asked from the other");
+	for (int i = 0; i < n1; ++i) {
+		assert(from_1[i].id == from_2[i].id && "same feature, same warm-start key");
+		assert(from_1[i].impact == from_2[i].impact && "same point, to the bit");
+		assert(from_1[i].separation == from_2[i].separation && "same gap");
+		V sum;
+		add(sum, from_1[i].normal, from_2[i].normal);
+		assert(length_squared(sum) == T {} && "and exactly opposite normals");
+	}
+	printf("  both_sides_agree[%s] ok (%d points each way)\n", what, n1);
+}
+
+static void test_both_sides_see_the_same_manifold() {
+	if (max_manifold_points == 1) { printf("  both_sides_see_the_same_manifold skipped (parity build)\n"); return; }
+	world w;  // solids need distinct solve ids, which is what orders the pair
+
+	// Two faces. Even here the sides disagreed: each clipped its own face as the
+	// reference, so the points landed under different feature ids.
+	auto lower = make_box(0.5, 0.1, 0.5, v(0, 0.1, 0));
+	auto upper = make_box(0.1, 0.1, 0.1, v(0, 0.3, 0));
+	w.sim.add_solid(lower);
+	w.sim.add_solid(upper);
+	assert_both_sides_agree("box under box", upper.get(), lower.get(), v(0, 1, 0), 4);
+
+	// THE case from the bug: the capsule brings two witnesses and the slab the reference
+	// face, whichever of them is asking.
+	auto rod = std::make_shared<solid<T>>();
+	rod->add_shape(std::make_shared<shape<T>>(capsule<T>(v(-0.09, 0, 0), v(0.18, 0, 0), (T)0.01)));
+	rod->set_mass((T)1);
+	rod->set_position(v(0, 0, 0));
+	auto slab = make_box(0.5, 0.1, 0.5, v(0, 0.11, 0));
+	w.sim.add_solid(rod);
+	w.sim.add_solid(slab);
+	assert_both_sides_agree("rod under slab", rod.get(), slab.get(), v(0, -1, 0), 2);
+
+	// And a traceable, which used to be reachable only as the partner — a box on level
+	// geometry is a corpse on a map.
+	auto ground = std::make_shared<solid<T>>();
+	ground->add_shape(std::make_shared<shape<T>>(std::make_unique<plane_traceable>()));
+	ground->set_infinite_mass();
+	ground->set_position(v(0, 0, 0));
+	auto crate = make_box(0.1, 0.1, 0.1, v(0, 0.1, 0));
+	w.sim.add_solid(ground);
+	w.sim.add_solid(crate);
+	assert_both_sides_agree("box on level geometry", crate.get(), ground.get(), v(0, 1, 0), 4);
+}
+
+// One manifold per pair per tick, held by BOTH sides: the second body to discover the
+// contact mirrors the first's points rather than clipping its own.
+static void test_the_two_slots_hold_one_manifold() {
+	if (max_manifold_points == 1) { printf("  the_two_slots_hold_one_manifold skipped (parity build)\n"); return; }
+	world w;
+	auto lower = w.drop(make_box(0.1, 0.1, 0.1, v(0, 0.1, 0)));
+	auto upper = w.drop(make_box(0.1, 0.1, 0.1, v(0, 0.3, 0)));
+	for (auto & b : { lower, upper }) {
+		b->set_collision_scope(1);
+		b->set_collide_with_scope(1);
+		b->set_stay_active(true);  // keep both caches refreshing so there is something to compare
+	}
+	int checked = 0;
+	std::vector<uint32_t> ids, last_ids;
+	int id_changes = 0;
+	for (int i = 0; i < 240; ++i) {
+		w.sim.update((T)(1.0 / 60.0));
+		if (i < 60)
+			continue;  // let them land first
+		const auto * mine = (const typename solid<T>::touch *)nullptr;
+		const auto * theirs = (const typename solid<T>::touch *)nullptr;
+		for (int k = 0; k < lower->get_touch_count(); ++k)
+			if (lower->get_touch(k).partner == upper.get()) mine = &lower->get_touch(k);
+		for (int k = 0; k < upper->get_touch_count(); ++k)
+			if (upper->get_touch(k).partner == lower.get()) theirs = &upper->get_touch(k);
+		if (!mine || !theirs)
+			continue;
+		assert(mine->point_count == theirs->point_count && "one manifold, both sides");
+		ids.clear();
+		for (int q = 0; q < mine->point_count; ++q) {
+			assert(mine->points[q].id == theirs->points[q].id && "point for point, in the same order");
+			assert(mine->points[q].impact == theirs->points[q].impact);
+			V sum;
+			add(sum, mine->points[q].normal, theirs->points[q].normal);
+			assert(length_squared(sum) == T {} && "each side stores it pointing at itself");
+			ids.push_back(mine->points[q].id);
+		}
+		// And the same manifold TICK TO TICK, which is the warm-start contract. Both
+		// bodies are awake, so the side that clips alternates with update()'s traversal
+		// flip — and without slack in clip_manifold's reference tie the ids swapped with
+		// it every tick.
+		if (!last_ids.empty() && ids != last_ids)
+			++id_changes;
+		last_ids = ids;
+		++checked;
+	}
+	assert(checked > 100 && "the pair was actually in contact for the run");
+	assert(id_changes == 0 && "and the same manifold tick after tick, whoever clipped it");
+	printf("  the_two_slots_hold_one_manifold ok (%d ticks compared, ids never moved)\n", checked);
+}
+
 // --- the shapes a manifold cannot help ------------------------------------
 
 // A capsule lying on its side has a genuine two-point manifold — the endpoints of its
@@ -467,6 +616,8 @@ int main() {
 	test_feature_ids_are_stable_and_warm_start();
 	test_a_box_on_static_geometry_settles_flat();
 	test_a_dynamic_stack_is_a_known_limitation();
+	test_both_sides_see_the_same_manifold();
+	test_the_two_slots_hold_one_manifold();
 	test_a_lying_capsule_has_two_points();
 	test_a_dropped_rod_comes_to_rest();
 	test_rolling_resistance_stops_a_sphere();

@@ -1564,10 +1564,13 @@ inline int clip_manifold(contact_point<T> * out, int max_out,
 
 	// Reference is whichever face is more nearly perpendicular to the contact normal —
 	// clipping against the flatter of the two is what keeps an edge-on incident face
-	// from collapsing the manifold to a point. Ties go to s1 so the choice is stable.
+	// from collapsing the manifold to a point. The tie needs SLACK: two faces resting
+	// against each other agree to ~1e-9, so a bare `>` picks its winner from the last
+	// bits of the contact normal and the feature ids move every tick. Inside the slack
+	// either face will do, so s1 takes it.
 	const T align_a = dot(fa.normal, neg_n);
 	const T align_b = dot(fb.normal, n);
-	const bool ref_is_partner = align_b > align_a;
+	const bool ref_is_partner = align_b > align_a + tr::from_milli(1);
 	const manifold_face<T> & ref = ref_is_partner ? fb : fa;
 	const manifold_face<T> & inc = ref_is_partner ? fa : fb;
 
@@ -1624,8 +1627,12 @@ inline int clip_manifold(contact_point<T> * out, int max_out,
 // sits on the real surface when it rests. A body on one of the pre-expanded sized hulls
 // is a player or a door — sweep_slide, positioned geometrically, and never a candidate
 // for a manifold in the first place.
+//
+// `n` runs from the geometry toward the mover; `depth` only sets how far clear of the
+// surface the probes start.
 template <typename T>
-inline int manifold_for_traceable(contact_point<T> * out, int max_out, const collision<T> & col,
+inline int manifold_for_traceable(contact_point<T> * out, int max_out,
+                                  const vec3<T> & n, T depth,
                                   const shape<T> * mover_shape, const mat3<T> & mover_R,
                                   const vec3<T> & mover_base, int mover_shape_index,
                                   traceable<T> * geom, const vec3<T> & geom_position,
@@ -1634,7 +1641,6 @@ inline int manifold_for_traceable(contact_point<T> * out, int max_out, const col
 	using tr = scalar_traits<T>;
 	if (!geom || max_out <= 0 || max_manifold_points <= 1)
 		return 0;
-	const vec3<T> & n = col.normal;
 	if (length_squared(n) <= T {})
 		return 0;
 	vec3<T> neg_n;
@@ -1651,8 +1657,8 @@ inline int manifold_for_traceable(contact_point<T> * out, int max_out, const col
 	// Start each probe clear of the surface even when the body has sunk into it, and
 	// give it enough length to reach anything within the contact margin.
 	T lift = keep_gap + epsilon;
-	if (col.depth > T {})
-		lift = lift + col.depth;
+	if (depth > T {})
+		lift = lift + depth;
 	const T span = lift + keep_gap;
 	if (span <= T {})
 		return 0;
@@ -1762,14 +1768,85 @@ inline int witnesses_against_face(contact_point<T> * out, int max_out,
 	return kept;
 }
 
+// A manifold seen from the other side of its pair: the same points, normals reversed.
+template <typename T>
+inline void flip_manifold_normals(contact_point<T> * pts, int count) {
+	for (int i = 0; i < count; ++i)
+		neg(pts[i].normal);
+}
+
+// One shape pair of an already-canonicalized solid pair. `n` runs from b toward a, and
+// every point returned carries that direction.
+//
+// Which shape is the REFERENCE follows from what the shapes are — a traceable can only
+// be probed, a capsule can only offer witnesses — so each case is written once and the
+// roles are swapped into it. That is what makes the result a function of the pair.
+template <typename T>
+inline int manifold_for_shape_pair(contact_point<T> * out, int max_out, T depth,
+                                   const shape<T> * sa, const mat3<T> & Ra, const vec3<T> & base_a, int index_a,
+                                   const shape<T> * sb, const mat3<T> & Rb, const vec3<T> & base_b, int index_b,
+                                   const vec3<T> & n, const vec3<T> & origin, T margin, T epsilon) {
+	const shape_type ta = sa->get_type();
+	const shape_type tb = sb->get_type();
+	const T keep_gap = margin + epsilon;
+	vec3<T> neg_n;
+	neg(neg_n, n);
+
+	// The probe hands back the surface normal it hit, which runs out of the geometry
+	// toward the mover: already b -> a when the geometry is b, a -> b when it is a.
+	if (tb == shape_type::traceable) {
+		if (!is_polytope_shape(ta))
+			return 0;
+		vec3<T> geom_origin;
+		add(geom_origin, origin, base_b);
+		return manifold_for_traceable(out, max_out, n, depth, sa, Ra, base_a, index_a,
+		                              sb->get_traceable(), geom_origin, Rb, index_b,
+		                              origin, margin, epsilon);
+	}
+	if (ta == shape_type::traceable) {
+		if (!is_polytope_shape(tb))
+			return 0;
+		vec3<T> geom_origin;
+		add(geom_origin, origin, base_a);
+		const int got = manifold_for_traceable(out, max_out, neg_n, depth, sb, Rb, base_b, index_b,
+		                                       sa->get_traceable(), geom_origin, Ra, index_a,
+		                                       origin, margin, epsilon);
+		flip_manifold_normals(out, got);
+		return got;
+	}
+
+	// clip_manifold breaks its reference tie toward its first argument, canonical here.
+	if (is_polytope_shape(ta) && is_polytope_shape(tb))
+		return clip_manifold(out, max_out, sa, Ra, base_a, index_a, sb, Rb, base_b, index_b,
+		                     n, origin, keep_gap, epsilon);
+
+	// A capsule has witnesses and no polygon, so the polytope brings the reference face
+	// whichever side of the pair each is on.
+	if (ta == shape_type::capsule && is_polytope_shape(tb))
+		return witnesses_against_face(out, max_out, sa, Ra, base_a, index_a,
+		                              sb, Rb, base_b, index_b, n, origin, keep_gap, epsilon);
+	if (tb == shape_type::capsule && is_polytope_shape(ta)) {
+		const int got = witnesses_against_face(out, max_out, sb, Rb, base_b, index_b,
+		                                       sa, Ra, base_a, index_a, neg_n, origin, keep_gap, epsilon);
+		flip_manifold_normals(out, got);
+		return got;
+	}
+	return 0;  // no face anywhere: one point is honest, and the caller already has it
+}
+
 // The manifold between two solids, given the single contact the existing narrowphase
-// already found. Walks every polytope shape pair of the two compound solids, clips each,
-// and reduces the UNION — a compound body resting on two distinct shapes of one partner
-// has to keep points from both, so reducing per shape pair and concatenating would not
-// do. Returns 0 when it has nothing better to offer than the one contact it was given:
-// a sphere, a capsule stood on its end, a traceable, an empty clip. Those are not
-// failures — see the rolling-resistance and capsule paths, which handle the shapes a
-// manifold genuinely cannot help.
+// already found. Walks every shape pair of the two compound solids, clips each, and
+// reduces the UNION — a compound body resting on two distinct shapes of one partner has
+// to keep points from both, so reducing per shape pair and concatenating would not do.
+// Returns 0 when it has nothing better to offer than the one contact it was given: a
+// sphere, a capsule stood on its end, an empty clip. Those are not failures — see the
+// rolling-resistance and capsule paths, which handle the shapes a manifold genuinely
+// cannot help.
+//
+// THE PAIR DECIDES, NOT THE CALLER: the two solids are ordered by their stable solve
+// ids and everything downstream is written in terms of that order, so both bodies of a
+// contact get one answer rather than two. A caller whose own solid sorts second gets the
+// same points back with the normals reversed, which is what its touch slot stores.
 template <typename T>
 inline int manifold_for_solids(contact_point<T> * out, int max_out, const collision<T> & col,
                                solid<T> * s1, solid<T> * s2, T margin, T epsilon) {
@@ -1779,8 +1856,7 @@ inline int manifold_for_solids(contact_point<T> * out, int max_out, const collis
 	// caller's single-contact path reproduces the pre-manifold behaviour exactly.
 	if (max_manifold_points <= 1)
 		return 0;
-	const vec3<T> & n = col.normal;
-	if (length_squared(n) <= T {})
+	if (length_squared(col.normal) <= T {})
 		return 0;
 	// KNOWN LIMITATION, measured and deliberate: a stack of DYNAMIC bodies resting on
 	// each other walks itself apart over ten to twenty seconds where a single-point
@@ -1807,68 +1883,54 @@ inline int manifold_for_solids(contact_point<T> * out, int max_out, const collis
 	// that is a phase of its own. tests/test_manifold.cpp reports the stack rather than
 	// asserting on it, so the day it is fixed the number moves in plain sight.
 
-	const auto & shapes1 = s1->get_shapes();
-	const auto & shapes2 = s2->get_shapes();
-	const int n1 = static_cast<int>(shapes1.size());
-	const int n2 = static_cast<int>(shapes2.size());
-	if (n1 == 0 || n2 == 0)
+	const bool flip = s2->get_solve_id() < s1->get_solve_id();
+	solid<T> * a = flip ? s2 : s1;
+	solid<T> * b = flip ? s1 : s2;
+	vec3<T> n;  // b -> a for everything below, whichever of them the caller is
+	if (flip)
+		neg(n, col.normal);
+	else
+		n.set(col.normal);
+
+	const auto & shapes_a = a->get_shapes();
+	const auto & shapes_b = b->get_shapes();
+	const int na = static_cast<int>(shapes_a.size());
+	const int nb = static_cast<int>(shapes_b.size());
+	if (na == 0 || nb == 0)
 		return 0;
 
-	// Everything is built relative to the mover's position so support magnitudes stay
+	// Everything is built relative to a's position so support magnitudes stay
 	// shape-local; world coordinates here would put a fixed16 dot product out of range
 	// the moment the body is any distance from the origin.
-	const vec3<T> & origin = s1->get_position();
+	const vec3<T> & origin = a->get_position();
 	vec3<T> rel;
-	sub(rel, s2->get_position(), origin);
-	const T keep_gap = margin + epsilon;
+	sub(rel, b->get_position(), origin);
 
 	constexpr int scratch_cap = max_manifold_points * 4;
 	contact_point<T> scratch[scratch_cap];
 	contact_point<T> pts[max_manifold_points];  // per shape pair; hoisted, not rebuilt per j
 	int nscratch = 0;
 
-	for (int i = 0; i < n1 && nscratch < scratch_cap; ++i) {
-		const shape<T> * sh1 = shapes1[i].get();
-		// A polytope clips face to face; a capsule on its side brings two witnesses and
-		// is tested against the partner's face. Anything else (a sphere, a traceable
-		// mover) has no manifold to give.
-		const bool mover_has_face = is_polytope_shape(sh1->get_type());
-		if (!mover_has_face && sh1->get_type() != shape_type::capsule)
-			continue;
-		mat3<T> R1;
-		mul(R1, s1->get_orientation(), sh1->get_local_rotation());
-		vec3<T> base1;
-		mul(base1, s1->get_orientation(), sh1->get_local_position());
-		for (int j = 0; j < n2 && nscratch < scratch_cap; ++j) {
-			const shape<T> * sh2 = shapes2[j].get();
-			if (sh2->get_type() == shape_type::traceable) {
-				mat3<T> Rg;
-				mul(Rg, s2->get_orientation(), sh2->get_local_rotation());
-				vec3<T> geom_origin, roff;
-				mul(roff, s2->get_orientation(), sh2->get_local_position());
-				add(geom_origin, s2->get_position(), roff);
-				const int got = manifold_for_traceable(pts, max_manifold_points, col,
-				                                       sh1, R1, base1, i,
-				                                       sh2->get_traceable(), geom_origin, Rg, j,
-				                                       origin, margin, epsilon);
-				for (int k = 0; k < got && nscratch < scratch_cap; ++k)
-					scratch[nscratch++] = pts[k];
+	for (int i = 0; i < na && nscratch < scratch_cap; ++i) {
+		const shape<T> * sa = shapes_a[i].get();
+		if (sa->get_type() == shape_type::sphere)
+			continue;  // one point however it is asked; nothing to clip
+		mat3<T> Ra;
+		mul(Ra, a->get_orientation(), sa->get_local_rotation());
+		vec3<T> base_a;
+		mul(base_a, a->get_orientation(), sa->get_local_position());
+		for (int j = 0; j < nb && nscratch < scratch_cap; ++j) {
+			const shape<T> * sb = shapes_b[j].get();
+			if (sb->get_type() == shape_type::sphere)
 				continue;
-			}
-			if (!is_polytope_shape(sh2->get_type()))
-				continue;
-			mat3<T> R2;
-			mul(R2, s2->get_orientation(), sh2->get_local_rotation());
-			vec3<T> base2;
-			mul(base2, s2->get_orientation(), sh2->get_local_position());
-			add(base2, rel);
-			const int got = mover_has_face
-			    ? clip_manifold(pts, max_manifold_points,
-			                    sh1, R1, base1, i, sh2, R2, base2, j,
-			                    n, origin, keep_gap, epsilon)
-			    : witnesses_against_face(pts, max_manifold_points,
-			                             sh1, R1, base1, i, sh2, R2, base2, j,
-			                             n, origin, keep_gap, epsilon);
+			mat3<T> Rb;
+			mul(Rb, b->get_orientation(), sb->get_local_rotation());
+			vec3<T> base_b;
+			mul(base_b, b->get_orientation(), sb->get_local_position());
+			add(base_b, rel);
+			const int got = manifold_for_shape_pair(pts, max_manifold_points, col.depth,
+			                                        sa, Ra, base_a, i, sb, Rb, base_b, j,
+			                                        n, origin, margin, epsilon);
 			for (int k = 0; k < got && nscratch < scratch_cap; ++k)
 				scratch[nscratch++] = pts[k];
 		}
@@ -1879,6 +1941,8 @@ inline int manifold_for_solids(contact_point<T> * out, int max_out, const collis
 	const int kept = reduce_manifold(scratch, nscratch, cap);
 	for (int i = 0; i < kept; ++i)
 		out[i] = scratch[i];
+	if (flip)
+		flip_manifold_normals(out, kept);
 	return kept;
 }
 
