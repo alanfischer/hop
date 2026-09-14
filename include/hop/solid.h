@@ -46,25 +46,44 @@ public:
 	using ptr = std::shared_ptr<solid<T>>;
 	using tr = scalar_traits<T>;
 
-	// A single persistent contact slot. Populated by the simulator's TOI loop
-	// (one slot per partner this solid has hit recently) and consumed by the
-	// post-integration contact solver, which iterates Gauss–Seidel sweeps over
-	// every active body's slots. accum_n / accum_t carry the previous tick's
-	// accumulated impulses for warm-starting; impact_speed captures the
-	// approach velocity at TOI for restitution. last_tick is the refresh
-	// marker — slots whose last_tick falls behind the current tick are
-	// considered stale and dropped by the solver.
+	// A single persistent contact slot: one per PARTNER this solid has hit recently,
+	// holding a MANIFOLD of up to max_manifold_points contact points against it.
+	// Populated by the simulator's discovery pass and consumed by the post-integration
+	// contact solver, which iterates Gauss–Seidel sweeps over every active body's
+	// points. last_tick is the refresh marker — slots whose last_tick falls behind the
+	// current tick are considered stale and dropped by the solver.
+	//
+	// One slot per partner is load-bearing well beyond the solver (stale-partner
+	// compaction, the sustained-contact test that gates callbacks, the support test in
+	// try_deactivate, the pair dedup and the gravity-aligned eviction heuristic), so a
+	// manifold lives INSIDE a slot as sub-points rather than as slots of its own. The
+	// slot keeps a representative normal/impact/lever — the deepest point's — for
+	// those consumers.
 	struct touch {
+		// One contact point of the manifold. Each carries its own normal and its own
+		// signed gap, which is the entire reason the manifold exists: it is what tells
+		// a tilted box that one corner is 3 mm deep and the opposite one 8 mm clear,
+		// and what levels it instead of rocking it.
+		//
+		// `id` is the feature ID the narrowphase packs from the contacting features.
+		// It is the warm-start key: next tick's freshly-clipped point with the same ID
+		// inherits this one's accum_n / accum_t. Nothing geometric persists.
+		struct point {
+			vec3<T> impact;           // world contact point on the surface (lever-arm origin for angular surface velocity)
+			vec3<T> lever;            // contact point relative to THIS solid's center at discovery (impact − swept center). Sweep-independent body-frame offset; the angular solver anchors it at the current center so a fast oblique impact doesn't fabricate a tangential lever arm (which would spin a frictionless sphere)
+			vec3<T> normal;           // points from partner toward this solid (the separating direction for self)
+			vec3<T> accum_t;          // accumulated friction impulse (this-side convention: the impulse applied to self)
+			T       accum_n {};       // accumulated normal impulse magnitude (>= 0)
+			T       separation {};    // signed gap along normal at discovery: 0 touching, <0 penetrating (speculative target)
+			uint32_t id = 0;          // feature ID; the warm-start key across ticks
+		};
 		solid<T> * partner = nullptr;
-		vec3<T>    normal;            // points from partner toward this solid (the separating direction for self)
-		vec3<T>    impact;            // world contact point on the surface (lever-arm origin for angular surface velocity)
-		vec3<T>    lever;             // contact point relative to THIS solid's center at discovery (impact − swept center). Sweep-independent body-frame offset; the angular solver anchors it at the current center so a fast oblique impact doesn't fabricate a tangential lever arm (which would spin a frictionless sphere)
-		T          accum_n {};        // accumulated normal impulse magnitude (>= 0)
-		vec3<T>    accum_t;           // accumulated friction impulse (this-side convention: the impulse applied to self)
-		T          impact_speed {};   // approach speed at TOI; drives restitution target
-		T          separation {};     // signed gap along normal at discovery: 0 touching, <0 penetrating (speculative target)
+		vec3<T>    normal;            // representative (the deepest point's); points from partner toward this solid. The ONE thing the manifold still summarises per partner, because the cache-eviction score needs a single direction to rank slots by
+		T          impact_speed {};   // approach speed at TOI; wake / callback gating
 		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
 		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
+		point      points[max_manifold_points];
+		int        point_count = 0;
 	};
 	static constexpr int max_touches = 12;
 
@@ -110,6 +129,7 @@ public:
 		restitution_combine_ = restitution_combine::average;
 		coefficient_of_static_friction_ = tr::half();
 		coefficient_of_dynamic_friction_ = tr::half();
+		coefficient_of_rolling_friction_ = T {};  // opt-in: see set_coefficient_of_rolling_friction
 		coefficient_of_effective_drag_ = T {};
 		local_bound_.reset();
 		world_bound_.reset();
@@ -294,6 +314,15 @@ public:
 	T get_coefficient_of_static_friction() const { return coefficient_of_static_friction_; }
 	void set_coefficient_of_dynamic_friction(T c) { coefficient_of_dynamic_friction_ = c; }
 	T get_coefficient_of_dynamic_friction() const { return coefficient_of_dynamic_friction_; }
+	// Resistance to SPIN at a contact, for the shapes a manifold cannot help. A sphere
+	// resting on a floor touches at exactly one point and always will; no clipping
+	// scheme changes that, and that single point hands out a corner-lever impulse every
+	// tick just as a tilted box's corner used to. This is the standard treatment and the
+	// only thing that stops a ball rolling forever on flat ground: a torque opposing the
+	// relative spin at the contact, bounded by mu_roll*N*r and able only to REMOVE spin,
+	// never reverse it. Zero by default, so nothing existing changes.
+	void set_coefficient_of_rolling_friction(T c) { coefficient_of_rolling_friction_ = c; }
+	T get_coefficient_of_rolling_friction() const { return coefficient_of_rolling_friction_; }
 	void set_coefficient_of_effective_drag(T c) { coefficient_of_effective_drag_ = c; }
 	T get_coefficient_of_effective_drag() const { return coefficient_of_effective_drag_; }
 
@@ -378,6 +407,14 @@ public:
 		// "resting" pile carry phantom kinetic energy and (b) inject it back the
 		// instant a neighbour wakes the body. Zero it so sleep means rest.
 		velocity_.reset();
+		// The same, for spin. The sleep test tolerates ω up to deactivate_speed_, so a
+		// body that settles while still turning slightly freezes that turn and reads as
+		// moving forever after — and until contact manifolds landed, nothing resting
+		// ever slept, so the residual had no way to show. A body only spins dynamically
+		// if it has inertia; the kinematic carry ω a game scripts is written every tick
+		// and simply reasserted, so clearing it here costs it nothing.
+		if (rotates_dynamically())
+			angular_velocity_.reset();
 		ext_dv_.reset();
 		ext_dv_unearned_ = tr::one();
 	}
@@ -455,6 +492,7 @@ private:
 	restitution_combine restitution_combine_ = restitution_combine::average;
 	T coefficient_of_static_friction_ {};
 	T coefficient_of_dynamic_friction_ {};
+	T coefficient_of_rolling_friction_ {};
 	int collision_scope_ = -1;
 	int collide_with_scope_ = -1;
 	int trigger_scope_ = 0;

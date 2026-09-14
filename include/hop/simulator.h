@@ -553,20 +553,22 @@ private:
 	// restitution reference in solve_contacts.
 	void accumulate_ext_dv(solid<T> * s, const vec3<T> & new_v);
 
-	// Insert or refresh a slot in s's persistent touch cache. Existing slots
-	// keep their accum_n / accum_t for warm-starting; impact_speed grows
-	// monotonically within a tick so the strongest impact drives restitution.
-	// When the cache is full and the partner is new, evict the slot
-	// contributing least to gravity-aligned support (smallest dot(n, -g)),
-	// tie-breaking by oldest last_tick.
-	typename solid<T>::touch * add_or_refresh_touch(solid<T> * s,
-	                                                solid<T> * partner,
-	                                                const vec3<T> & normal,
-	                                                const vec3<T> & impact,
-	                                                const vec3<T> & swept_center,
-	                                                T impact_speed,
-	                                                T separation,
-	                                                int tick);
+	// Insert or refresh a partner's slot in s's persistent touch cache, storing this
+	// tick's freshly-generated MANIFOLD (`pts`, `count` points) in it. Points are
+	// matched to last tick's by feature ID and inherit their accum_n / accum_t for
+	// warm-starting; an ID that is new starts at zero. Nothing geometric is carried
+	// across — the manifold is regenerated every tick, so there is no cached point to
+	// go stale under rotation. impact_speed grows monotonically within a tick so the
+	// strongest impact drives wake/callback logic. When the cache is full and the
+	// partner is new, evict the slot contributing least to gravity-aligned support
+	// (smallest dot(n, -g)), tie-breaking by oldest last_tick.
+	typename solid<T>::touch * add_or_refresh_manifold(solid<T> * s,
+	                                                   solid<T> * partner,
+	                                                   const contact_point<T> * pts,
+	                                                   int count,
+	                                                   const vec3<T> & swept_center,
+	                                                   T impact_speed,
+	                                                   int tick);
 	// Find an existing cache slot for (s, partner) or nullptr.
 	typename solid<T>::touch * find_touch(solid<T> * s, solid<T> * partner);
 
@@ -647,6 +649,7 @@ private:
 		T cor {};                    // combined restitution
 		T mu_s {};                   // combined static friction (cone limit while sticking)
 		T mu_d {};                   // combined dynamic friction (cone limit while sliding)
+		T mu_roll {};                // combined rolling friction; 0 (the default) skips the rolling pass entirely
 		T inv_ma {};
 		T inv_mb {};
 		T inv_m_sum {};              // inv_ma + inv_mb, precomputed once at build
@@ -668,8 +671,12 @@ private:
 		vec3<T> r_a, r_b;            // contact point − body position (impact lever arm)
 		T eff_n {};                  // effective normal mass: inv_m_sum (+ angular terms when has_angular)
 		vec3<T> ang_n_a, ang_n_b;    // precomputed I⁻¹(r×n) per body: the normal-sweep angular response, scaled by λ each visit
-		typename solid<T>::touch * slot_a = nullptr;   // writeback target (may be null if a never observed b)
-		typename solid<T>::touch * slot_b = nullptr;
+		// Writeback targets: the MANIFOLD POINT each side holds for this contact, not
+		// the slot. A resting box under four rows warm-starts four independent
+		// accumulators, which is what keeps them from trading impulses and buzzing.
+		// Either may be null if that side never observed the partner.
+		typename solid<T>::touch::point * slot_a = nullptr;
+		typename solid<T>::touch::point * slot_b = nullptr;
 	};
 	std::vector<contact_pair> contact_pairs_;
 	struct solver_body {
@@ -1165,7 +1172,16 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 					solid_ptr->ext_dv_unearned_ = one - consumed;
 					first_contact = false;
 				}
-				add_or_refresh_touch(solid_ptr, hit_solid, pair_normal, c.impact, c.point, impact_speed, separation, current_tick_);
+				// The swept path resolves one contact at a time by construction — it
+				// snaps to the earliest TOI and slides — so its manifold is the one point
+				// it just stopped against. A sweep_slide body positions itself
+				// geometrically and never had a settling problem to fix.
+				contact_point<T> cp;
+				cp.impact.set(c.impact);
+				cp.normal.set(pair_normal);
+				cp.separation = separation;
+				cp.id = 0;  // the swept path has one contact per partner; no feature to name
+				add_or_refresh_manifold(solid_ptr, hit_solid, &cp, 1, c.point, impact_speed, current_tick_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly. On the
 				// approach the pair actually had: this tick's own gravity increment is
@@ -1273,12 +1289,20 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 					// 0.001 is the same contact, but the gap test alone calls it thin air
 					// and the body never sleeps. Proximity touches carry no impulse, so
 					// this admits nothing the gap test was written to exclude.
-					if (solid_ptr->touches_[k].last_tick == current_tick_ &&
-					    (solid_ptr->touches_[k].separation <= spec_slop_ ||
-					     solid_ptr->touches_[k].accum_n > T {})) {
-						supported = true;
-						break;
+					const auto & slot = solid_ptr->touches_[k];
+					if (slot.last_tick != current_tick_)
+						continue;
+					// A body is supported if ANY point of a fresh slot is load-bearing.
+					// One corner of a manifold under load holds the body up just as a
+					// single contact used to.
+					for (int q = 0; q < slot.point_count; ++q) {
+						if (slot.points[q].separation <= spec_slop_ || slot.points[q].accum_n > T {}) {
+							supported = true;
+							break;
+						}
 					}
+					if (supported)
+						break;
 				}
 				if (!supported && !solid_ptr->constraints_.empty()) {
 					supported = true; // existing code below will check if they are loaded
@@ -1413,6 +1437,58 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 	const int bits = solid_ptr->collide_with_scope_;
 	collision<T> col;
+	// This tick's manifold against the partner currently being tested. Regenerated per
+	// partner (nothing here persists across ticks — see add_or_refresh_manifold).
+	contact_point<T> manifold[max_manifold_points];
+	int manifold_count = 0;
+
+	// Turn the narrowphase's report of `col` against `partner` into manifold points.
+	// The signed gap along the normal is recovered per point: shapes were inflated by
+	// spec_margin_, so an overlap of the inflated shapes (time == 0) means the true
+	// surfaces are within the margin and the real gap is (margin - inflated_depth) — 0
+	// when touching, negative when truly penetrating, positive within the shell. A
+	// contact reached only by sweeping this tick (time > 0) is a fast approach; its gap
+	// is the closing distance still to cover, and a swept hit is one TOI and therefore
+	// one point (see the manifold contract in traceable.h).
+	auto build_manifold = [&](solid<T> * partner) {
+		// Attempted for every contact, swept or resting, rather than only for a
+		// reported overlap: whether a traceable answers a near-resting query as an
+		// overlap or as a short sweep is its own business (they differ), and gating on
+		// that silently left one of them on a single point forever.
+		//
+		// What IS worth gating on is travel. A contact the body has to cross real
+		// distance to reach cannot have a witness within the contact margin, so the
+		// generator would build support faces — and, against a traceable, fire a probe
+		// per face corner — only to discard every one of them. Rejecting on the distance
+		// first costs three multiplies and a dot.
+		manifold_count = 0;
+		bool worth_clipping = true;
+		if (col.depth <= zero && col.time > zero) {
+			vec3<T> travel;
+			mul(travel, delta, col.time);
+			const T reach = spec_margin_ + epsilon_;
+			worth_clipping = length_squared(travel) <= reach * reach;
+		}
+		if (worth_clipping)
+			manifold_count = hop::manifold_for_solids(manifold, max_manifold_points, col,
+			                                          solid_ptr, partner, spec_margin_, epsilon_);
+		if (manifold_count == 0) {
+			// Swept contact, or a pair the manifold generator declines: the single point
+			// the trace reported.
+			manifold[0].impact.set(col.impact);
+			manifold[0].normal.set(col.normal);
+			manifold[0].id = 0;  // one contact against this partner; nothing to distinguish
+			if (col.time <= zero) {
+				manifold[0].separation = spec_margin_ - col.depth;
+			} else {
+				vec3<T> to_contact;
+				sub(to_contact, col.point, old_pos);
+				T gap = -dot(to_contact, col.normal);
+				manifold[0].separation = gap < zero ? zero : gap;
+			}
+			manifold_count = 1;
+		}
+	};
 
 	// Record one discovered contact, or hand it to the manager's custom response.
 	// Shared by the broad-phase loop and the manager-geometry query so the signed-gap
@@ -1435,24 +1511,6 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	auto record_contact = [&](solid<T> * partner) {
 		const vec3<T> & n = col.normal;
 		const bool partner_is_world = (partner == &static_world_);
-
-		// Signed gap along the normal at the body's current (start) position. Shapes
-		// were inflated by spec_margin_, so an overlap of the inflated shapes
-		// (col.time == 0) means the true surfaces are within the margin: the real gap
-		// is (margin - inflated_depth) — 0 when touching, negative when truly
-		// penetrating, positive within the shell. A contact reached only by sweeping
-		// this tick (col.time > 0) is a fast approach; its gap is the closing distance
-		// still to cover.
-		T separation;
-		if (col.time <= zero) {
-			separation = spec_margin_ - col.depth;
-		} else {
-			vec3<T> to_contact;
-			sub(to_contact, col.point, old_pos);
-			separation = -dot(to_contact, n);
-			if (separation < zero)
-				separation = zero;
-		}
 
 		// Relative velocity at contact (self - partner), for callback + wake logic.
 		if (col.collider)
@@ -1491,7 +1549,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 		// ext_dv_unearned_ stays 1 on this path: it discovers contacts without moving, so
 		// none of the tick's external increment has been earned by travel.
-		add_or_refresh_touch(solid_ptr, partner, n, col.impact, col.point, impact_speed, separation, current_tick_);
+		add_or_refresh_manifold(solid_ptr, partner, manifold, manifold_count, col.point, impact_speed, current_tick_);
 
 		// Wake a real sleeping partner so it participates in the solve (the world
 		// anchor never sleeps).
@@ -1528,6 +1586,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		if (col.time >= one && col.depth <= zero)
 			continue; // not within the inflated shell and not swept into this tick
 
+		build_manifold(s2);
 		record_contact(s2);
 	}
 
@@ -1546,7 +1605,10 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		manager_->trace_solid(col, solid_ptr, path, bits, spec_margin_);
 		if (col.time < one || col.depth > zero) {
 			// No owning solid: resolve against the immovable world anchor. If the
-			// manager attached a real collider, prefer it as the partner.
+			// manager attached a real collider, prefer it as the partner. The manager
+			// interface returns a single merged contact by design (see manager.h), so
+			// this partner is always a one-point manifold.
+			build_manifold(nullptr);
 			record_contact(col.collider ? col.collider : &static_world_);
 		}
 	}
@@ -1599,7 +1661,9 @@ template <typename T> void simulator<T>::correct_positions() {
 	// in Pass A) whose stale correction would otherwise corrupt the re-derivation.
 	for (auto & p : contact_pairs_) {
 		p.a->pos_correction_.reset();
+		p.a->rot_correction_.reset();
 		p.b->pos_correction_.reset();
+		p.b->rot_correction_.reset();
 	}
 	for (auto & r : joint_rows_) {
 		r.a->pos_correction_.reset();
@@ -1620,15 +1684,40 @@ template <typename T> void simulator<T>::correct_positions() {
 			// never folds pos_correction_ — it placed itself in Pass A — so giving it a
 			// share would silently drop that correction). Zero their inverse mass so a
 			// speculative body takes the whole correction against such a partner.
-			T inv_a = (p.a->active_ && p.a->uses_speculative_solve()) ? p.inv_ma : zero;
-			T inv_b = (p.b->active_ && p.b->uses_speculative_solve()) ? p.inv_mb : zero;
+			const bool a_free = p.a->active_ && p.a->uses_speculative_solve();
+			const bool b_free = p.b->active_ && p.b->uses_speculative_solve();
+			T inv_a = a_free ? p.inv_ma : zero;
+			T inv_b = b_free ? p.inv_mb : zero;
 			T inv_sum = inv_a + inv_b;
 			if (inv_sum <= zero)
 				continue;
-			// Current separation = the gap at discovery plus how far the running
-			// corrections have already separated this pair along the normal.
+			// A manifold's points sit at the CORNERS of a face, and a corner that is
+			// 3 mm deep while the opposite one is 8 mm clear is asking to be TURNED out
+			// of the surface, not shoved. Correcting it by translation alone lifts the
+			// clear corner with it, so the body never levels — it rides up bodily,
+			// re-penetrates on the next tick, and the velocity solve is left fighting a
+			// position pass that keeps recreating the tilt. Sandwich such a body between
+			// two others and the fight compounds into a rocking that grows until the
+			// stack falls through itself. (The joint rows below have had the angular
+			// half from the start, and for the same reason.)
+			const bool spin_a = a_free && p.a_rotates;
+			const bool spin_b = b_free && p.b_rotates;
+			const bool angular = spin_a || spin_b;
+			// Where the contact has been pushed to so far this pass. For the small angles
+			// at stake, R(d)*r ~ r + d x r.
 			vec3<T> rel;
 			sub(rel, p.b->pos_correction_, p.a->pos_correction_);
+			if (angular) {
+				vec3<T> twist;
+				if (spin_b) {
+					cross(twist, p.b->rot_correction_, p.r_b);
+					add(rel, twist);
+				}
+				if (spin_a) {
+					cross(twist, p.a->rot_correction_, p.r_a);
+					sub(rel, twist);
+				}
+			}
 			T cur_sep = p.separation + dot(rel, p.normal);
 			// Only penetration beyond the slop band is corrected.
 			T pen = -cur_sep - spec_slop_;
@@ -1638,17 +1727,65 @@ template <typename T> void simulator<T>::correct_positions() {
 			if (corr <= zero)
 				continue;
 			corrected = true;
-			// p.normal points from a toward b: push b along +normal and a along
-			// -normal, each by its share of the inverse mass.
+			if (!angular) {
+				// p.normal points from a toward b: push b along +normal and a along
+				// -normal, each by its share of the inverse mass. Bit-identical to the
+				// translation-only pass for every non-rotating body.
+				if (inv_b > zero) {
+					vec3<T> d;
+					mul(d, p.normal, corr * (inv_b / inv_sum));
+					add(p.b->pos_correction_, d);
+				}
+				if (inv_a > zero) {
+					vec3<T> d;
+					mul(d, p.normal, corr * (inv_a / inv_sum));
+					sub(p.a->pos_correction_, d);
+				}
+				continue;
+			}
+			// Angular: a pseudo-impulse along the normal at the contact's lever arms,
+			// read as displacement. The effective mass is the same one the velocity
+			// sweep uses — the response of the contact to an impulse IS its response to a
+			// push — minus the linear share of any end that cannot move.
+			T eff = p.eff_n - p.inv_m_sum + inv_sum;
+			if (!spin_a && p.a_rotates) {
+				vec3<T> rxn, t;
+				cross(rxn, p.r_a, p.normal);
+				apply_inv_inertia_world(p.a, rxn, t);
+				eff -= dot(rxn, t);
+			}
+			if (!spin_b && p.b_rotates) {
+				vec3<T> rxn, t;
+				cross(rxn, p.r_b, p.normal);
+				apply_inv_inertia_world(p.b, rxn, t);
+				eff -= dot(rxn, t);
+			}
+			if (eff <= zero)
+				continue;
+			const T lambda = corr / eff;
 			if (inv_b > zero) {
 				vec3<T> d;
-				mul(d, p.normal, corr * (inv_b / inv_sum));
+				mul(d, p.normal, lambda * inv_b);
 				add(p.b->pos_correction_, d);
 			}
 			if (inv_a > zero) {
 				vec3<T> d;
-				mul(d, p.normal, corr * (inv_a / inv_sum));
+				mul(d, p.normal, lambda * inv_a);
 				sub(p.a->pos_correction_, d);
+			}
+			if (spin_b) {
+				vec3<T> imp, rxj, dw;
+				mul(imp, p.normal, lambda);
+				cross(rxj, p.r_b, imp);
+				apply_inv_inertia_world(p.b, rxj, dw);
+				add(p.b->rot_correction_, dw);
+			}
+			if (spin_a) {
+				vec3<T> imp, rxj, dw;
+				mul(imp, p.normal, lambda);
+				cross(rxj, p.r_a, imp);
+				apply_inv_inertia_world(p.a, rxj, dw);
+				sub(p.a->rot_correction_, dw);
 			}
 		}
 		// Rigid joints, in the same sweep and against the same running corrections, so a
@@ -2001,81 +2138,98 @@ typename solid<T>::touch * simulator<T>::find_touch(solid<T> * s, solid<T> * par
 }
 
 template <typename T>
-typename solid<T>::touch * simulator<T>::add_or_refresh_touch(
-    solid<T> * s, solid<T> * partner, const vec3<T> & normal, const vec3<T> & impact, const vec3<T> & swept_center, T impact_speed, T separation, int tick) {
+typename solid<T>::touch * simulator<T>::add_or_refresh_manifold(
+    solid<T> * s, solid<T> * partner, const contact_point<T> * pts, int count,
+    const vec3<T> & swept_center, T impact_speed, int tick) {
 	const T zero_val {};
+	if (count > max_manifold_points)
+		count = max_manifold_points;
 
-	// Body-frame contact offset: the contact point relative to s's center at the
-	// swept TOI (swept_center). Since impact == swept_center + support_offset, this
-	// is exactly that offset, free of the sweep translation that contaminates
-	// (impact − current_position). The angular solver re-anchors it at the current
-	// center so a fast tangential approach can't fabricate a torque-inducing arm.
-	vec3<T> lever;
-	sub(lever, impact, swept_center);
+	// Locate the partner's slot, or make one.
+	typename solid<T>::touch * found = find_touch(s, partner);
+	bool fresh_slot = false;
+	if (!found) {
+		if (s->touch_count_ < solid<T>::max_touches) {
+			found = &s->touches_[s->touch_count_++];
+		} else {
+			// Cache full: evict the slot contributing least to gravity-aligned support
+			// (smallest dot(normal, -gravity)), tie-broken by oldest last_tick. For
+			// zero-gravity scenes every score is zero so eviction falls back to age.
+			int evict = 0;
+			T best_score {};
+			bool have_score = false;
+			for (int i = 0; i < solid<T>::max_touches; ++i) {
+				T score = -dot(s->touches_[i].normal, gravity_);
+				if (!have_score || score < best_score ||
+				    (score == best_score && s->touches_[i].last_tick < s->touches_[evict].last_tick)) {
+					evict = i;
+					best_score = score;
+					have_score = true;
+				}
+			}
+			found = &s->touches_[evict];
+		}
+		fresh_slot = true;
+		// A slot claimed by eviction carries the previous partner's dedup marker; left
+		// alone it can read as "already built this tick" and silently drop the new
+		// partner's pairs from the solve.
+		found->pair_built_tick = -1;
+	}
+	auto & slot = *found;
 
-	// Refresh-in-place if this partner already has a slot. Sub-step iterations
-	// within the same tick (same partner hit twice) take the larger impact
-	// speed for restitution. Stale slots whose last refresh predates the
-	// previous tick are wiped — the accumulated impulse no longer corresponds
-	// to a continuous contact, so warm-starting from it would be unsound.
-	for (int i = 0; i < s->touch_count_; ++i) {
-		auto & slot = s->touches_[i];
-		if (slot.partner == partner) {
-			if (slot.last_tick != tick && slot.last_tick != tick - 1) {
-				slot.accum_n = zero_val;
-				slot.accum_t.reset();
+	// A slot whose last refresh predates the previous tick describes a contact that has
+	// since been broken, so its accumulated impulses no longer correspond to anything
+	// continuous — warm-starting from them would be unsound. Carrying is also skipped
+	// for a slot we just claimed for a different partner.
+	const bool carry = !fresh_slot && (slot.last_tick == tick || slot.last_tick == tick - 1);
+	const int prev_count = carry ? slot.point_count : 0;
+
+	// Build the new point set into scratch first: matching reads the old points while
+	// we write the new ones, and in-place would clobber a source it has yet to read.
+	typename solid<T>::touch::point next[max_manifold_points];
+	for (int i = 0; i < count; ++i) {
+		auto & np = next[i];
+		np.impact.set(pts[i].impact);
+		np.normal.set(pts[i].normal);
+		np.separation = pts[i].separation;
+		np.id = pts[i].id;
+		// Body-frame contact offset: the contact point relative to s's center at the
+		// swept TOI. Since impact == swept_center + support_offset, this is exactly that
+		// offset, free of the sweep translation that contaminates (impact - current
+		// position). The angular solver re-anchors it at the current center so a fast
+		// tangential approach can't fabricate a torque-inducing arm.
+		sub(np.lever, pts[i].impact, swept_center);
+		// Warm start: inherit last tick's accumulators from the point with the same
+		// feature ID. This is the ONLY thing that persists across ticks; the geometry
+		// is regenerated. A new ID starts cold, which is correct — it is a contact that
+		// did not exist last tick.
+		np.accum_n = zero_val;
+		np.accum_t.reset();
+		for (int j = 0; j < prev_count; ++j) {
+			if (slot.points[j].id == np.id) {
+				np.accum_n = slot.points[j].accum_n;
+				np.accum_t.set(slot.points[j].accum_t);
+				break;
 			}
-			slot.normal.set(normal);
-			slot.impact.set(impact);
-			slot.lever.set(lever);
-			if (slot.last_tick != tick || impact_speed > slot.impact_speed) {
-				slot.impact_speed = impact_speed;
-			}
-			slot.separation = separation;
-			slot.last_tick = tick;
-			return &slot;
 		}
 	}
+	for (int i = 0; i < count; ++i)
+		slot.points[i] = next[i];
+	slot.point_count = count;
 
-	// New partner: fill an empty slot if available.
-	if (s->touch_count_ < solid<T>::max_touches) {
-		auto & slot = s->touches_[s->touch_count_++];
-		slot.partner = partner;
-		slot.normal.set(normal);
-		slot.impact.set(impact);
-		slot.lever.set(lever);
-		slot.accum_n = zero_val;
-		slot.accum_t.reset();
-		slot.impact_speed = impact_speed;
-		slot.separation = separation;
-		slot.last_tick = tick;
-		return &slot;
+	// The representative the cache-eviction score ranks slots by: the deepest point's
+	// normal, i.e. the one with the smallest gap.
+	int rep = 0;
+	for (int i = 1; i < count; ++i) {
+		if (slot.points[i].separation < slot.points[rep].separation)
+			rep = i;
 	}
+	if (count > 0)
+		slot.normal.set(slot.points[rep].normal);
 
-	// Cache full: evict the slot contributing least to gravity-aligned support
-	// (smallest dot(normal, -gravity)), tie-broken by oldest last_tick. For
-	// zero-gravity scenes every score is zero so eviction falls back to age.
-	int evict = 0;
-	T best_score {};
-	bool have_score = false;
-	for (int i = 0; i < solid<T>::max_touches; ++i) {
-		T score = -dot(s->touches_[i].normal, gravity_);
-		if (!have_score || score < best_score ||
-		    (score == best_score && s->touches_[i].last_tick < s->touches_[evict].last_tick)) {
-			evict = i;
-			best_score = score;
-			have_score = true;
-		}
-	}
-	auto & slot = s->touches_[evict];
 	slot.partner = partner;
-	slot.normal.set(normal);
-	slot.impact.set(impact);
-	slot.lever.set(lever);
-	slot.accum_n = zero_val;
-	slot.accum_t.reset();
-	slot.impact_speed = impact_speed;
-	slot.separation = separation;
+	if (fresh_slot || slot.last_tick != tick || impact_speed > slot.impact_speed)
+		slot.impact_speed = impact_speed;
 	slot.last_tick = tick;
 	return &slot;
 }
@@ -2132,10 +2286,18 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 			r.r_b.reset();
 			r.anchor_b = c->end_point_;
 		}
-		r.a_rotates = a->rotates_dynamically();
-		r.b_rotates = b && b->rotates_dynamically();
-		r.inv_ma = a->inv_mass_;
-		r.inv_mb = b ? b->inv_mass_ : zero;
+		// A SLEEPING endpoint is an anchor, not a free body: zero inverse mass, no spin
+		// response. correct_positions and the shock phase already read it that way, and
+		// the velocity sweep must agree or it hands a body it has decided is at rest a
+		// fresh impulse every tick — which, before resting bodies could sleep at all,
+		// was unreachable, and the moment they could showed up as corpses lying still
+		// with bones turning at 2.5 rad/s inside them.
+		const bool a_free = a->active_;
+		const bool b_free = b && b->active_;
+		r.a_rotates = a_free && a->rotates_dynamically();
+		r.b_rotates = b_free && b->rotates_dynamically();
+		r.inv_ma = a_free ? a->inv_mass_ : zero;
+		r.inv_mb = b_free ? b->inv_mass_ : zero;
 		if (r.inv_ma + r.inv_mb <= zero && !r.a_rotates && !r.b_rotates)
 			continue;  // two anchors pinned to each other
 
@@ -2414,168 +2576,210 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			}
 			auto * other_slot = find_touch(partner, s);
 
-			contact_pair p;
-			p.a = a;
-			p.b = b;
-			p.index_a = a->solver_body_index_;
-			p.index_b = b->solver_body_index_;
-			// pair.normal: points from a's free side toward b (i.e., the
-			// direction that pushes b away from a when we apply +λ to b's
-			// velocity along it).
-			//
-			// slot.normal (this side, "self") points from partner toward
-			// self. If self == a, slot.normal points from b toward a — the
-			// opposite of pair.normal. If self == b, slot.normal points
-			// from a toward b — same direction.
-			if (slot_is_a) {
-				neg(p.normal, slot.normal);
-			} else {
-				p.normal.set(slot.normal);
-			}
-			p.accum_n = slot.accum_n;
-			if (slot_is_a) {
-				neg(p.accum_t, slot.accum_t);
-			} else {
-				p.accum_t.set(slot.accum_t);
-			}
-			p.impact_speed = slot.impact_speed;
-			p.separation = slot.separation;  // carried from the iterating side's slot (same as normal/impact)
-			// Combine the two bodies' coefficients of restitution. When the
-			// bodies' modes differ the higher-precedence one governs (larger
-			// enumerator: average < minimum < multiply < maximum). See the
-			// restitution_combine precedence contract in solid.h — notably a
-			// `minimum` body is NOT immune to a `maximum` partner.
-			const T ca = a->coefficient_of_restitution_;
-			const T cb = b->coefficient_of_restitution_;
-			switch (a->restitution_combine_ > b->restitution_combine_ ? a->restitution_combine_ : b->restitution_combine_) {
-			case restitution_combine::minimum: p.cor = ca < cb ? ca : cb; break;
-			case restitution_combine::maximum: p.cor = ca > cb ? ca : cb; break;
-			case restitution_combine::multiply: p.cor = ca * cb; break;
-			case restitution_combine::average:
-			default: p.cor = (ca + cb) * tr::half(); break;
-			}
-			p.mu_s = (a->coefficient_of_static_friction_ + b->coefficient_of_static_friction_) * tr::half();
-			p.mu_d = (a->coefficient_of_dynamic_friction_ + b->coefficient_of_dynamic_friction_) * tr::half();
-			p.inv_ma = a->inv_mass_;
-			p.inv_mb = b->inv_mass_;
-			p.inv_m_sum = p.inv_ma + p.inv_mb;
-			p.slot_a = slot_is_a ? &slot : other_slot;
-			p.slot_b = slot_is_a ? other_slot : &slot;
+			// Build the pair from whichever side has the RICHER manifold. Both bodies
+			// discover the same contact independently and they need not agree on how
+			// many points it has — a capsule resting on level geometry clips to two
+			// points from its own side while the geometry's side of the same contact is
+			// a single one, and a body whose partner cannot produce a manifold at all
+			// is the ordinary case. Taking whichever side the iteration reached first
+			// then alternates the row count with update()'s per-tick order flip, and a
+			// contact that is two rows on one tick and one row on the next cannot hold
+			// anything still: the rod it was meant to settle spun at 2.5 rad/s instead.
+			// Deferring needs the partner to actually be coming: it must be awake, so
+			// its own slots are walked, or the pair would never be built at all.
+			if (other_slot && other_slot->last_tick == current_tick_ &&
+			    other_slot->pair_built_tick != current_tick_ &&
+			    other_slot->point_count > slot.point_count && partner->active_)
+				continue;
 
-			// Phase 9: angular impulse response. Active only when a body in the pair
-			// spins dynamically (inv_inertia != 0). The non-angular case keeps eff_n ==
-			// inv_m_sum and takes the v_bias path below, bit-identical to pre-Phase-9. On
-			// the angular path the lever arms drive Δω and the effective normal mass
-			// picks up the angular term k_n = inv_m_sum + n·((Iₐ⁻¹(rₐ×n))×rₐ) +
-			// n·((I_b⁻¹(r_b×n))×r_b) (precomputed: orientation is fixed during the solve).
-			p.a_rotates = a->rotates_dynamically();
-			p.b_rotates = b->rotates_dynamically();
-			const vec3<T> no_spin {};
-			p.a_kinematic_carry = !p.a_rotates && !(a->angular_velocity_ == no_spin);
-			p.b_kinematic_carry = !p.b_rotates && !(b->angular_velocity_ == no_spin);
-			p.has_angular = p.a_rotates || p.b_rotates;
-			p.eff_n = p.inv_m_sum;
-			if (p.has_angular) {
-				// Each body's lever arm is ITS OWN body-frame contact offset (slot.lever:
-				// impact − swept center), radial for a sphere, so a pure normal impulse
-				// produces no torque. Two reasons this matters:
-				//  1) slot.lever is sweep-free — using slot.impact (the swept-TOI world
-				//     point) against the current center would inject the frame's motion
-				//     into the arm and spin even a frictionless sphere on oblique impact.
-				//  2) Taking each arm from its own slot (not one shared world point) keeps
-				//     both radial under pile separation/penetration, where the centers are
-				//     not exactly a diameter apart and a shared anchor would fabricate a
-				//     tangential moment on the partner.
-				// The partner's twin slot is fresh whenever it is a dynamic body (it
-				// discovers the same contact in its own pass); the world-anchor fallback
-				// only runs for a static/asleep partner, whose inv_inertia is zero so the
-				// arm is unused. For a resting contact the sweep is ~0 — unchanged there.
-				// `s` (the iterating side) owns `slot`; bind its arm and the partner's so
-				// the two assignments below don't restate the a/b canonicalization.
-				vec3<T> & self_r    = slot_is_a ? p.r_a : p.r_b;
-				vec3<T> & partner_r = slot_is_a ? p.r_b : p.r_a;
-				self_r.set(slot.lever);
-				if (other_slot && other_slot->last_tick == current_tick_) {
-					partner_r.set(other_slot->lever);
-				} else {
-					vec3<T> world_contact;
-					add(world_contact, s->position_, slot.lever);
-					sub(partner_r, world_contact, partner->position_);
-					// That point is only a contact point if it lies ON the partner.
-					// support() cannot recover the tangential position of a FACE contact
-					// and collapses it to the face CENTRE, so when the iterating side was
-					// contacted on a face this is that side's own centre — the world origin
-					// for a floor centred there — and the arm it implies torques the partner
-					// about a point metres outside itself. A speculative contact sits
-					// legitimately off the surface by up to the margin and the frame's
-					// approach, so the test is the partner's own bounding sphere rather than
-					// its box: loose enough for a real contact, and 25x clear of a face
-					// centre. Falling back to the radial arm gives the contact straight
-					// along the normal, which is what a face contact under the partner would
-					// have produced and what every rounded partner already gets.
-					// Only worth checking when the arm is actually read: a partner with no
-					// inertia never spins, so its arm is unused whatever we put in it.
-					if (partner->rotates_dynamically()) {
-						aa_box<T> partner_bound;
-						partner->get_bound_about_position(partner_bound);
-						vec3<T> reach;
-						for (int axis = 0; axis < 3; ++axis) {
-							const T lo = tr::abs(partner_bound.mins[axis]);
-							const T hi = tr::abs(partner_bound.maxs[axis]);
-							reach[axis] = (lo > hi ? lo : hi) + spec_margin_ + epsilon_;
+			// One row per MANIFOLD POINT, sharing a, b and this slot's partner-level
+			// data, each with its own normal, lever arms, separation and accumulators.
+			// The Gauss-Seidel sweep needs no structural change for this: four rows
+			// under a box level it because each row sees its own gap, and that is the
+			// entire fix.
+			for (int q = 0; q < slot.point_count; ++q) {
+				auto & pt = slot.points[q];
+				// The partner's own view of this same point, matched by world position —
+				// the two sides generate their manifolds independently and need not order
+				// or ID them alike, but they witness the same contacts. Used for the
+				// partner's lever arm and for impulse writeback. Degenerates to "the only
+				// point" when either side reports one, which is every pre-manifold path.
+				typename solid<T>::touch::point * other_pt = nullptr;
+				if (other_slot && other_slot->point_count > 0) {
+					T best {};
+					for (int j = 0; j < other_slot->point_count; ++j) {
+						const T d2 = length_squared(other_slot->points[j].impact, pt.impact);
+						if (!other_pt || d2 < best) {
+							other_pt = &other_slot->points[j];
+							best = d2;
 						}
-						if (length_squared(partner_r) > length_squared(reach))
-							support(partner_r, partner_bound, slot.normal);
 					}
 				}
-				// Normal effective mass, plus the per-body angular impulse-response
-				// vectors I⁻¹(rₐ×n) / I⁻¹(r_b×n). A normal impulse is always along n, so
-				// I⁻¹(r×(λn)) = λ·I⁻¹(r×n): caching these here — orientation and lever
-				// arms are fixed for the whole solve — turns each GS normal apply from a
-				// cross + mat3×vec3 per body into one scaled add (the hot-loop win). This
-				// inlines angular_eff_mass(p, n): same terms in the same order (a then b),
-				// reusing r×n instead of recomputing it in apply_pair_impulse every visit.
-				if (p.a_rotates) {
-					vec3<T> rxn;
-					cross(rxn, p.r_a, p.normal);
-					apply_inv_inertia_world(a, rxn, p.ang_n_a);
-					p.eff_n += dot(rxn, p.ang_n_a);
-				}
-				if (p.b_rotates) {
-					vec3<T> rxn;
-					cross(rxn, p.r_b, p.normal);
-					apply_inv_inertia_world(b, rxn, p.ang_n_b);
-					p.eff_n += dot(rxn, p.ang_n_b);
-				}
-			}
 
-			// Angular surface-velocity bias for kinematic carry (Phase 6). The solver
-			// drives the relative *surface* velocity (v + ω×r) to its targets, so a
-			// spinning kinematic platform drags the riders touching it through the
-			// existing non-penetration / friction constraints — no dedicated resolution
-			// code. ω is zero on every non-spinning body, so the bias is an exact no-op
-			// in translation-only scenes. Only the non-angular path reads it — the
-			// angular path recomputes ω×r live at the lever arm (it must, since ω evolves
-			// during the solve), so v_bias is not built for those pairs.
-			p.v_bias.reset();
-			// !has_angular ⇒ neither body rotates dynamically, so a/b_kinematic_carry
-			// here mean exactly "a/b has a nonzero (kinematic) ω" — the pairs that need
-			// the bias. The angular path carries kinematic spin via ω×r instead.
-			if (!p.has_angular && (p.a_kinematic_carry || p.b_kinematic_carry)) {
-				// This carry path keeps the legacy (slot.impact − position) arm rather
-				// than the sweep-free slot.lever the angular path uses: here the arm only
-				// feeds a kinematic surface-velocity bias (fixed ω, no impulse), so the
-				// sweep contamination is a negligible velocity error, not a fabricated
-				// torque. Left as-is to avoid shifting the kinematic-carry baselines.
-				vec3<T> ra, rb, term_a, term_b;
-				sub(ra, slot.impact, a->position_);
-				sub(rb, slot.impact, b->position_);
-				cross(term_a, a->angular_velocity_, ra);
-				cross(term_b, b->angular_velocity_, rb);
-				sub(p.v_bias, term_b, term_a);  // ω_b×r_b − ω_a×r_a
-			}
+				contact_pair p;
+				p.a = a;
+				p.b = b;
+				p.index_a = a->solver_body_index_;
+				p.index_b = b->solver_body_index_;
+				// pair.normal: points from a's free side toward b (i.e., the
+				// direction that pushes b away from a when we apply +λ to b's
+				// velocity along it).
+				//
+				// slot.normal (this side, "self") points from partner toward
+				// self. If self == a, slot.normal points from b toward a — the
+				// opposite of pair.normal. If self == b, slot.normal points
+				// from a toward b — same direction.
+				if (slot_is_a) {
+					neg(p.normal, pt.normal);
+				} else {
+					p.normal.set(pt.normal);
+				}
+				p.accum_n = pt.accum_n;
+				if (slot_is_a) {
+					neg(p.accum_t, pt.accum_t);
+				} else {
+					p.accum_t.set(pt.accum_t);
+				}
+				p.impact_speed = slot.impact_speed;  // per-partner: wake / callback gating only
+				p.separation = pt.separation;  // carried from the iterating side's point (same as normal/impact)
+				// Combine the two bodies' coefficients of restitution. When the
+				// bodies' modes differ the higher-precedence one governs (larger
+				// enumerator: average < minimum < multiply < maximum). See the
+				// restitution_combine precedence contract in solid.h — notably a
+				// `minimum` body is NOT immune to a `maximum` partner.
+				const T ca = a->coefficient_of_restitution_;
+				const T cb = b->coefficient_of_restitution_;
+				switch (a->restitution_combine_ > b->restitution_combine_ ? a->restitution_combine_ : b->restitution_combine_) {
+				case restitution_combine::minimum: p.cor = ca < cb ? ca : cb; break;
+				case restitution_combine::maximum: p.cor = ca > cb ? ca : cb; break;
+				case restitution_combine::multiply: p.cor = ca * cb; break;
+				case restitution_combine::average:
+				default: p.cor = (ca + cb) * tr::half(); break;
+				}
+				p.mu_s = (a->coefficient_of_static_friction_ + b->coefficient_of_static_friction_) * tr::half();
+				p.mu_d = (a->coefficient_of_dynamic_friction_ + b->coefficient_of_dynamic_friction_) * tr::half();
+				p.mu_roll = (a->coefficient_of_rolling_friction_ + b->coefficient_of_rolling_friction_) * tr::half();
+				p.inv_ma = a->inv_mass_;
+				p.inv_mb = b->inv_mass_;
+				p.inv_m_sum = p.inv_ma + p.inv_mb;
+				p.slot_a = slot_is_a ? &pt : other_pt;
+				p.slot_b = slot_is_a ? other_pt : &pt;
 
-			contact_pairs_.push_back(p);
+				// Phase 9: angular impulse response. Active only when a body in the pair
+				// spins dynamically (inv_inertia != 0). The non-angular case keeps eff_n ==
+				// inv_m_sum and takes the v_bias path below, bit-identical to pre-Phase-9. On
+				// the angular path the lever arms drive Δω and the effective normal mass
+				// picks up the angular term k_n = inv_m_sum + n·((Iₐ⁻¹(rₐ×n))×rₐ) +
+				// n·((I_b⁻¹(r_b×n))×r_b) (precomputed: orientation is fixed during the solve).
+				p.a_rotates = a->rotates_dynamically();
+				p.b_rotates = b->rotates_dynamically();
+				const vec3<T> no_spin {};
+				p.a_kinematic_carry = !p.a_rotates && !(a->angular_velocity_ == no_spin);
+				p.b_kinematic_carry = !p.b_rotates && !(b->angular_velocity_ == no_spin);
+				p.has_angular = p.a_rotates || p.b_rotates;
+				p.eff_n = p.inv_m_sum;
+				if (p.has_angular) {
+					// Each body's lever arm is ITS OWN body-frame contact offset (slot.lever:
+					// impact − swept center), radial for a sphere, so a pure normal impulse
+					// produces no torque. Two reasons this matters:
+					//  1) slot.lever is sweep-free — using slot.impact (the swept-TOI world
+					//     point) against the current center would inject the frame's motion
+					//     into the arm and spin even a frictionless sphere on oblique impact.
+					//  2) Taking each arm from its own slot (not one shared world point) keeps
+					//     both radial under pile separation/penetration, where the centers are
+					//     not exactly a diameter apart and a shared anchor would fabricate a
+					//     tangential moment on the partner.
+					// The partner's twin slot is fresh whenever it is a dynamic body (it
+					// discovers the same contact in its own pass); the world-anchor fallback
+					// only runs for a static/asleep partner, whose inv_inertia is zero so the
+					// arm is unused. For a resting contact the sweep is ~0 — unchanged there.
+					// `s` (the iterating side) owns `slot`; bind its arm and the partner's so
+					// the two assignments below don't restate the a/b canonicalization.
+					vec3<T> & self_r    = slot_is_a ? p.r_a : p.r_b;
+					vec3<T> & partner_r = slot_is_a ? p.r_b : p.r_a;
+					self_r.set(pt.lever);
+					if (other_pt && other_slot->last_tick == current_tick_) {
+						partner_r.set(other_pt->lever);
+					} else {
+						vec3<T> world_contact;
+						add(world_contact, s->position_, pt.lever);
+						sub(partner_r, world_contact, partner->position_);
+						// That point is only a contact point if it lies ON the partner.
+						// support() cannot recover the tangential position of a FACE contact
+						// and collapses it to the face CENTRE, so when the iterating side was
+						// contacted on a face this is that side's own centre — the world origin
+						// for a floor centred there — and the arm it implies torques the partner
+						// about a point metres outside itself. A speculative contact sits
+						// legitimately off the surface by up to the margin and the frame's
+						// approach, so the test is the partner's own bounding sphere rather than
+						// its box: loose enough for a real contact, and 25x clear of a face
+						// centre. Falling back to the radial arm gives the contact straight
+						// along the normal, which is what a face contact under the partner would
+						// have produced and what every rounded partner already gets.
+						// Only worth checking when the arm is actually read: a partner with no
+						// inertia never spins, so its arm is unused whatever we put in it.
+						if (partner->rotates_dynamically()) {
+							aa_box<T> partner_bound;
+							partner->get_bound_about_position(partner_bound);
+							vec3<T> reach;
+							for (int axis = 0; axis < 3; ++axis) {
+								const T lo = tr::abs(partner_bound.mins[axis]);
+								const T hi = tr::abs(partner_bound.maxs[axis]);
+								reach[axis] = (lo > hi ? lo : hi) + spec_margin_ + epsilon_;
+							}
+							if (length_squared(partner_r) > length_squared(reach))
+								support(partner_r, partner_bound, pt.normal);
+						}
+					}
+					// Normal effective mass, plus the per-body angular impulse-response
+					// vectors I⁻¹(rₐ×n) / I⁻¹(r_b×n). A normal impulse is always along n, so
+					// I⁻¹(r×(λn)) = λ·I⁻¹(r×n): caching these here — orientation and lever
+					// arms are fixed for the whole solve — turns each GS normal apply from a
+					// cross + mat3×vec3 per body into one scaled add (the hot-loop win). This
+					// inlines angular_eff_mass(p, n): same terms in the same order (a then b),
+					// reusing r×n instead of recomputing it in apply_pair_impulse every visit.
+					if (p.a_rotates) {
+						vec3<T> rxn;
+						cross(rxn, p.r_a, p.normal);
+						apply_inv_inertia_world(a, rxn, p.ang_n_a);
+						p.eff_n += dot(rxn, p.ang_n_a);
+					}
+					if (p.b_rotates) {
+						vec3<T> rxn;
+						cross(rxn, p.r_b, p.normal);
+						apply_inv_inertia_world(b, rxn, p.ang_n_b);
+						p.eff_n += dot(rxn, p.ang_n_b);
+					}
+				}
+
+				// Angular surface-velocity bias for kinematic carry (Phase 6). The solver
+				// drives the relative *surface* velocity (v + ω×r) to its targets, so a
+				// spinning kinematic platform drags the riders touching it through the
+				// existing non-penetration / friction constraints — no dedicated resolution
+				// code. ω is zero on every non-spinning body, so the bias is an exact no-op
+				// in translation-only scenes. Only the non-angular path reads it — the
+				// angular path recomputes ω×r live at the lever arm (it must, since ω evolves
+				// during the solve), so v_bias is not built for those pairs.
+				p.v_bias.reset();
+				// !has_angular ⇒ neither body rotates dynamically, so a/b_kinematic_carry
+				// here mean exactly "a/b has a nonzero (kinematic) ω" — the pairs that need
+				// the bias. The angular path carries kinematic spin via ω×r instead.
+				if (!p.has_angular && (p.a_kinematic_carry || p.b_kinematic_carry)) {
+					// This carry path keeps the legacy (slot.impact − position) arm rather
+					// than the sweep-free slot.lever the angular path uses: here the arm only
+					// feeds a kinematic surface-velocity bias (fixed ω, no impulse), so the
+					// sweep contamination is a negligible velocity error, not a fabricated
+					// torque. Left as-is to avoid shifting the kinematic-carry baselines.
+					vec3<T> ra, rb, term_a, term_b;
+					sub(ra, pt.impact, a->position_);
+					sub(rb, pt.impact, b->position_);
+					cross(term_a, a->angular_velocity_, ra);
+					cross(term_b, b->angular_velocity_, rb);
+					sub(p.v_bias, term_b, term_a);  // ω_b×r_b − ω_a×r_a
+				}
+
+				contact_pairs_.push_back(p);
+			}
 			slot.pair_built_tick = current_tick_;
 			if (other_slot)
 				other_slot->pair_built_tick = current_tick_;
@@ -2908,6 +3112,68 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		}
 	}
 
+	// --- 4a. Rolling resistance ---
+	// For the shapes a manifold cannot help. A sphere touches a floor at one point, so
+	// does a capsule stood on its end and a box balanced on a corner it genuinely is
+	// balanced on; clipping returns one point because there IS one point. Nothing in the
+	// contact constraints resists spin about such a contact, which is why a ball rolls
+	// forever on flat ground and why a one-point body is handed fresh spin every tick.
+	//
+	// The mechanism is deliberately NOT a manifold: a torque opposing the relative spin
+	// at the contact, bounded by mu_roll*N*r, applied equal and opposite so it adds no
+	// linear momentum. Applied ONCE per tick from the converged normal impulse rather
+	// than inside the Gauss-Seidel sweep, because accum_n is the tick's total normal
+	// impulse and mu_roll*accum_n*r is therefore exactly the tick's torque budget —
+	// spending it per iteration would spend it solver_iterations times over. And the
+	// impulse is clamped to what would stop the spin dead, so it can only ever remove
+	// spin, never reverse it into a body that starts rolling the other way.
+	for (auto & p : contact_pairs_) {
+		if (p.mu_roll <= zero_val || p.accum_n <= zero_val || !p.has_angular)
+			continue;
+		solver_body & sa = solver_bodies_[p.index_a];
+		solver_body & sb = solver_bodies_[p.index_b];
+		vec3<T> wrel;
+		sub(wrel, sb.angular_velocity, sa.angular_velocity);
+		vec3<T> axis(wrel);
+		if (!normalize_carefully(axis, epsilon_))
+			continue;
+		// The angular mass the pair presents about that axis, and the lever the contact
+		// acts at — for a sphere its radius, which is what makes the bound the textbook
+		// mu_roll*N*r.
+		T spin = zero_val;
+		T radius = zero_val;
+		if (p.a_rotates) {
+			vec3<T> t;
+			apply_inv_inertia_world(p.a, axis, t);
+			spin += dot(axis, t);
+			const T la = length(p.r_a);
+			if (la > radius) radius = la;
+		}
+		if (p.b_rotates) {
+			vec3<T> t;
+			apply_inv_inertia_world(p.b, axis, t);
+			spin += dot(axis, t);
+			const T lb = length(p.r_b);
+			if (lb > radius) radius = lb;
+		}
+		if (spin <= zero_val || radius <= zero_val)
+			continue;
+		const T stop = length(wrel) / spin;             // the impulse that kills the spin exactly
+		T lambda = p.mu_roll * p.accum_n * radius;      // ...and the budget it may spend
+		if (lambda > stop)
+			lambda = stop;
+		vec3<T> imp, dw;
+		mul(imp, axis, lambda);
+		if (p.a_rotates) {
+			apply_inv_inertia_world(p.a, imp, dw);
+			add(sa.angular_velocity, dw);
+		}
+		if (p.b_rotates) {
+			apply_inv_inertia_world(p.b, imp, dw);
+			sub(sb.angular_velocity, dw);
+		}
+	}
+
 	// --- 4b. Shock propagation ---
 	// Plain Gauss–Seidel transmits one layer of support per sweep, so an N-deep
 	// pile needs ~N sweeps before the bottom contacts carry the weight above them.
@@ -3030,8 +3296,17 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// linear knob. No-op for the non-rotating default (inv_inertia == 0).
 		if (do_cap_w && s->rotates_dynamically())
 			cap_vec3(state.angular_velocity, max_angular_velocity_component_);
+		// Wake on spin as well as translation. A contact can torque a sleeping body
+		// without shifting it — a ball landing on the end of a resting plank — and
+		// without this it would keep the spin, be committed with it below, and neither
+		// notice nor shed it.
+		const bool spun = s->rotates_dynamically() &&
+		    (tr::abs(state.angular_velocity.x) > deactivate_speed_ ||
+		     tr::abs(state.angular_velocity.y) > deactivate_speed_ ||
+		     tr::abs(state.angular_velocity.z) > deactivate_speed_);
 		if (!s->active_ &&
-		    (tr::abs(state.velocity.x) > deactivate_speed_ ||
+		    (spun ||
+		     tr::abs(state.velocity.x) > deactivate_speed_ ||
 		     tr::abs(state.velocity.y) > deactivate_speed_ ||
 		     tr::abs(state.velocity.z) > deactivate_speed_)) {
 			s->activate();
