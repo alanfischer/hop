@@ -82,6 +82,7 @@ public:
 		T          impact_speed {};   // approach speed at TOI; wake / callback gating
 		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
 		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
+		int        manifold_tick = -1; // bumped to current_tick when these points were CLIPPED, not fallen back to the trace's single contact; the partner mirrors them rather than clipping its own
 		point      points[max_manifold_points];
 		int        point_count = 0;
 	};
@@ -357,6 +358,10 @@ public:
 		activate();
 	}
 	const std::vector<typename shape<T>::ptr> & get_shapes() const { return shapes_; }
+
+	// The pair-ordering key (see solve_id_); the manifold generator orders its two
+	// solids by it so the manifold is a function of the pair, not of who asked.
+	std::size_t get_solve_id() const { return solve_id_; }
 
 	const aa_box<T> & get_local_bound() const { return local_bound_; }
 	const aa_box<T> & get_world_bound() const { return world_bound_; }
