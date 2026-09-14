@@ -17,34 +17,48 @@
 // nonzero stretch to produce force at all, so a chain hung off one SAGS by construction,
 // and raising k to hide the sag makes an explicitly-integrated chain ring and then leave.
 //
-// ── TABLE 2: the corpse does NOT sleep, and the joints are not why ──────────
+// ── TABLE 2: the box sleeps now; the corpse still does not, and why ─────────
 //
 // Sleep was meant to be the affordability argument: a wizard corpse lies on the floor for
 // sixty seconds, and eight of them at 21 bodies apiece only fit in hop's budget if they go
-// quiet. The joint half of that works — a rigid pin at rest carries ~zero positional error,
-// so constraint::is_loaded reads false and a pinned body deactivates normally, which
-// test_rigid_joint_sleeps holds to. What stops the corpse is underneath the joints:
+// quiet. For most of this file's life the thing stopping that was underneath the joints:
 //
 //   AN ORIENTED BOX RESTING ON A FLOOR SPINS FOREVER.
 //
-// The control at the bottom of Table 2 is one box, no joints, no ragdoll. Dropped exactly
-// axis-aligned it settles and sleeps. Tilted by 0.05 rad — three degrees — it turns at
-// several rad/s for as long as you run it, and no amount of damping touches it, because the
-// spin is not accumulating: it is handed out fresh every tick.
+// The control at the bottom of Table 2 is one box, no joints, no ragdoll. Dropped tilted by
+// 0.05 rad — three degrees — it used to turn at several rad/s for as long as you ran it,
+// and no amount of damping touched it, because the spin was not accumulating: it was handed
+// out fresh every tick. hop resolved a pair at ONE point, and support() on a tilted box
+// returns a CORNER, so a box lying almost flat was held up at a corner and one tick of
+// gravity's impulse at that lever was worth ~4 rad/s on a 0.35 kg bone. It tipped, caught
+// the next corner, and rocked there permanently. The smaller the body the worse it was
+// (|w| roughly 1/size), and a corpse's extremities are its smallest bodies.
 //
-// It is arithmetic, not a solver bug. hop resolves a pair at ONE point, and support() on a
-// tilted box returns a CORNER — the face centre it collapses to for an axis-aligned box is
-// exactly why that case is the one that works. So a box lying almost flat is held up at a
-// corner, and one tick of gravity's impulse at that lever is worth ~4 rad/s on a 0.35 kg
-// bone. It tips, catches the next corner, and rocks there permanently, where a real contact
-// manifold would put two or four points under it and hold it still. The smaller the body
-// the worse it is (|w| roughly 1/size), and a corpse's extremities are its smallest bodies.
+// CONTACT MANIFOLDS fixed that, and the control table is where to read it: every row is now
+// 0.0000 and every box sleeps, tilted or not. A box resting on a face is resolved at three
+// or four points, each with its own gap, and four rows under a box level it where one row
+// could only rock it.
 //
-// This is the same failure as bug 2 in plans/rotating_gibs.md — "a capsule resting on a
-// floor creates spin from nothing" — which was recorded as capsule-only with boxes immune.
-// Boxes are immune only while they are axis-aligned. Fixing it properly is contact
-// manifolds, which is a phase of its own and not this one. Until then the game stops a
-// settled corpse itself rather than waiting for hop to sleep it.
+// What still keeps this corpse awake is the JOINTS, and it is worth being precise about
+// which half. Run the per-bone state and the bones still turning are the ones touching
+// NOTHING — dangling limbs held only by pins:
+//
+//   - On a pin-only corpse, two coincident ball-sockets leave the bone between them free to
+//     swivel about the axis through both anchors. Nothing is in contact with it, nothing
+//     damps it, and it keeps whatever spin it landed with forever. The neck does this at a
+//     perfectly steady 12.5 rad/s. That is not a bug — it is what a frictionless
+//     ball-socket chain does — which is one more reason a corpse wants limits.
+//   - On a limited corpse it is quieter (~1 rad/s) but does not stop, because a limb pinned
+//     under the torso against the floor sits OUTSIDE its cone and physically cannot get
+//     back in. The velocity-level recovery fires every tick, gets refused by the contact in
+//     the way, and fires again. Phase 13 recorded this ("a settled corpse carries real
+//     residual violation and always will"); manifolds do not touch it.
+//
+// So Table 3's asleep column reads 0/N — whole-corpse sleep needs all 21 — while ms/tick
+// REST has fallen BELOW ms/tick fall, which is the number that actually proves the phase:
+// most bones now sleep and stop being solved. Whole-corpse sleep is a joint problem, and
+// the game accordingly keeps its own displacement estimator as the fallback for the corpses
+// that never satisfy hop.
 //
 // ── TABLE 4: the corpse keeps its shape ─────────────────────────────────────
 //
@@ -66,8 +80,14 @@
 // to two extra angular rows per joint is not free until it has been measured. hop's whole-frame budget in Wizard Wars is
 // ~6.5 ms, and a corpse is supposed to be a rounding error in it. If eight corpses are not,
 // the fallback (see plans/one_corpse_ragdoll.md) is to merge hitboxes per limb segment down
-// to ~11 bodies, which is a change to the game's builder and not to hop. Read the resting
-// column knowing nothing sleeps yet — see Table 2 — so it is the honest worst case.
+// to ~11 bodies, which is a change to the game's builder and not to hop.
+//
+// The column to read is ms/tick REST against ms/tick FALL. Resting used to be the EXPENSIVE
+// state — 1.7x the cost of falling — because resting was the state hop could not leave: the
+// corner-lever spin kept every body awake and every contact being solved forever. With
+// manifolds the inversion is the proof: resting is now CHEAPER than falling, because most
+// bones genuinely sleep and stop being solved at all. Contact rows went up ~4x on the way
+// down and the falling column barely moved, which is the trade the phase was after.
 
 #include <chrono>
 #include <cmath>
@@ -317,7 +337,7 @@ bool sane(const ragdoll & r) {
 
 // The control for Table 2: one box, no joints, no ragdoll. Returns the mean |ω| over the
 // second half of a ten-second run, long after it has landed.
-float resting_box_spin(T half, T tilt) {
+float resting_box_spin(T half, T tilt, bool * slept_out = nullptr) {
 	simulator<T> sim;
 	sim.set_gravity(vec3<T>(0.0f, -20.0f, 0.0f));
 	add_floor(sim);
@@ -349,6 +369,8 @@ float resting_box_spin(T half, T tilt) {
 			++n;
 		}
 	}
+	if (slept_out)
+		*slept_out = !b->active();
 	return static_cast<float>(sum / n);
 }
 
@@ -413,16 +435,30 @@ int main() {
 	if (slept_at >= 0) {
 		printf("  whole corpse asleep at tick %d (%.1f s)\n", slept_at, slept_at * 0.016f);
 	} else {
-		printf("  corpse still awake after 600 ticks (9.6 s) — it lingers for 60.\n");
-		printf("  Control — one box on a floor, no joints anywhere:\n");
-		printf("    %10s  %10s  %12s\n", "half (m)", "tilt (rad)", "mean |w|");
-		for (T half : { 0.04f, 0.16f, 0.64f }) {
-			for (T tilt : { 0.0f, 0.05f }) {
-				printf("    %10.3f  %10.2f  %12.4f\n", half, tilt, resting_box_spin(half, tilt));
+		printf("  corpse still awake after 600 ticks (9.6 s) — see this file's header: what is\n");
+		printf("  left turning is dangling limbs on frictionless pins, not anything in contact.\n");
+	}
+	printf("  Control — one box on a floor, no joints anywhere:\n");
+	printf("    %10s  %10s  %12s  %7s\n", "half (m)", "tilt (rad)", "mean |w|", "asleep");
+	for (T half : { 0.04f, 0.16f, 0.64f }) {
+		for (T tilt : { 0.0f, 0.05f }) {
+			bool slept = false;
+			const float spin = resting_box_spin(half, tilt, &slept);
+			printf("    %10.3f  %10.2f  %12.4f  %7s\n", half, tilt, spin, slept ? "yes" : "NO");
+			// THE headline of the phase. A tilted box used to turn at 5 rad/s forever;
+			// with a manifold under it there is nothing for gravity to lever against and
+			// it comes to rest like the axis-aligned one always did. A regression here
+			// means the clip stopped producing more than one point.
+			if (spin > 0.01f) {
+				printf("    FAIL: a resting box spins at %.4f rad/s (half %.2f, tilt %.2f)\n",
+				       spin, half, tilt);
+				ok = false;
+			}
+			if (!slept) {
+				printf("    FAIL: a resting box never sleeps (half %.2f, tilt %.2f)\n", half, tilt);
+				ok = false;
 			}
 		}
-		printf("  A tilted box spins on its own. The joints hold it (Table 1); they cannot\n");
-		printf("  hold it still. See this file's header — it needs a contact manifold.\n");
 	}
 
 	// ── TABLE 4: the corpse keeps its shape, and stops ──────────────────────
@@ -567,8 +603,8 @@ int main() {
 	// ── TABLE 3: what it costs ──────────────────────────────────────────────
 	printf("\nTable 3: cost, %d bodies and %d joints per corpse.\n",
 	       kBoneCount, kBoneCount - 1);
-	printf("  %8s  %8s  %9s  %12s  %12s  %8s\n",
-	       "corpses", "bodies", "joints", "ms/tick fall", "ms/tick rest", "asleep");
+	printf("  %8s  %8s  %9s  %12s  %12s  %8s  %7s\n",
+	       "corpses", "bodies", "joints", "ms/tick fall", "ms/tick rest", "asleep", "bones");
 	for (int pass = 0; pass < 2; ++pass) {
 		const bool limited = pass == 1;
 		for (int corpses : { 1, 2, 4, 8 }) {
@@ -591,8 +627,32 @@ int main() {
 			int asleep = 0;
 			for (auto & d : dolls)
 				asleep += all_asleep(d) ? 1 : 0;
-			printf("  %8d  %8d  %9s  %12.3f  %12.3f  %6d/%d\n", corpses, corpses * kBoneCount,
-			       limited ? "limited" : "pins", falling, resting, asleep, corpses);
+			int sleeping_bones = 0, total_bones = 0;
+			for (auto & d : dolls)
+				for (auto & bn : d.bones) {
+					total_bones += 1;
+					sleeping_bones += bn->active() ? 0 : 1;
+				}
+			printf("  %8d  %8d  %9s  %12.3f  %12.3f  %6d/%d  %5d/%d\n", corpses, corpses * kBoneCount,
+			       limited ? "limited" : "pins", falling, resting, asleep, corpses,
+			       sleeping_bones, total_bones);
+			// Before manifolds, resting cost 1.7x what FALLING did: a resting body never
+			// stopped being solved, because it never stopped moving. Now it is roughly
+			// level with falling or below it. The bar is loose because these are
+			// wall-clock numbers on a shared machine and they wander; the sleeping-bone
+			// count beside them is the measurement that does not.
+			if (resting > falling * 1.3) {
+				printf("  FAIL: resting (%.3f ms) still costs %.1fx falling (%.3f ms)\n",
+				       resting, resting / falling, falling);
+				ok = false;
+			}
+			// Whole corpses do not sleep — Table 2's header says why, and it is the
+			// joints — but most of their BONES must, or the manifold is not doing its
+			// job. Before the phase this was 0 of 168, every run.
+			if (sleeping_bones * 3 < total_bones) {
+				printf("  FAIL: only %d of %d bones asleep at rest\n", sleeping_bones, total_bones);
+				ok = false;
+			}
 			// Eight corpses is the worst case the game can produce at once. Awake, because
 			// nothing sleeps yet, this is the number that has to fit.
 			if (corpses == 8 && resting > 6.5) {

@@ -31,6 +31,18 @@ add_executable(test_simulator test_simulator.cpp)
 target_link_libraries(test_simulator PRIVATE hop)
 add_test(NAME test_simulator COMMAND test_simulator)
 
+# Contact manifolds, compiled twice: once at the shipping max_manifold_points and once
+# at 1. The parity build is the proof that the storage change is pure plumbing — at one
+# point per partner the engine has to behave exactly as it did before the phase.
+add_executable(test_manifold test_manifold.cpp)
+target_link_libraries(test_manifold PRIVATE hop)
+add_test(NAME test_manifold COMMAND test_manifold)
+
+add_executable(test_manifold_single test_manifold.cpp)
+target_link_libraries(test_manifold_single PRIVATE hop)
+target_compile_definitions(test_manifold_single PRIVATE HOP_MAX_MANIFOLD_POINTS=1)
+add_test(NAME test_manifold_single COMMAND test_manifold_single)
+
 add_executable(test_collision test_collision.cpp)
 target_link_libraries(test_collision PRIVATE hop)
 add_test(NAME test_collision COMMAND test_collision)

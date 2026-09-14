@@ -469,10 +469,12 @@ int main(int argc, char **argv) {
 				DrawCubeWiresV((Vector3){ 0, 0, 0 }, size, (Color){ 200, 200, 205, 190 });
 				rlPopMatrix();
 
-				// And the contact witness it reported, straight below the centre.
+				// And the contact patch it reported. Every point of every manifold, not
+				// one witness per partner — seeing the whole patch is the point of it.
 				for (int t = 0; t < g.solid->get_touch_count(); ++t) {
 					const auto &tc = g.solid->get_touch(t);
-					DrawSphere(rl(tc.impact), 0.012f, (Color){ 230, 60, 60, 255 });
+					for (int q = 0; q < tc.point_count; ++q)
+						DrawSphere(rl(tc.points[q].impact), 0.012f, (Color){ 230, 60, 60, 255 });
 				}
 			}
 		}
