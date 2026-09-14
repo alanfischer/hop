@@ -875,6 +875,20 @@ template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr,
 	mul(dwt, dt);
 	add(wb, dwt);
 
+	// Angular damping, the caller's own "shed this tumble" rate (see
+	// set_coefficient_of_angular_damping). It scales ω, so the body frame is as good as
+	// the world one, and it is applied after the projection above rather than folded
+	// into it: that projection restores an energy invariant exactly, and this removes
+	// energy on purpose. Writing angular_velocity_ below is a plain member write, so a
+	// body damped down to a standstill still accumulates deactivation ticks.
+	if (solid_ptr->coefficient_of_angular_damping_ > T {}) {
+		const T fade = tr::one() - solid_ptr->coefficient_of_angular_damping_ * dt;
+		if (fade > T {})
+			mul(wb, fade);
+		else
+			wb.reset();
+	}
+
 	vec3<T> w;
 	mul(w, R, wb);
 	if (max_angular_velocity_component_ > T {})
