@@ -375,6 +375,34 @@ public:
 	// default and speculative pipelines.
 	void try_deactivate(solid<T> * solid_ptr, const vec3<T> & new_pos, T dt);
 
+	// The one "is this body at rest?" test, asked by both the sleep decision
+	// (try_deactivate) and the solver's wake decision (solve_contacts). The two used
+	// to phrase it differently — sleep bounded length(ω), wake bounded each axis of ω
+	// against the same number — so ω = (0.15, 0.15, 0.15) was still to one and moving
+	// to the other, and a body could fall asleep holding a spin nothing would wake it
+	// to shed.
+	//
+	// disp is the body's translation over one tick, so a caller holding a velocity
+	// passes v · dt. deactivate_speed_ is a speed, so the displacement it permits
+	// scales with dt. Comparing a raw displacement against deactivate_speed_ directly
+	// (as the sleep test once did) made the effective velocity threshold 1/dt times
+	// too large — at dt = 16 ms a body drifting at ~12 m/s still counted as "still"
+	// and could be frozen in mid-air the instant it brushed a neighbour (the classic
+	// "ball hanging in the air").
+	bool at_rest(const solid<T> * s, const vec3<T> & disp, const vec3<T> & w, T dt) const {
+		const T deactivate_disp = deactivate_speed_ * dt;
+		if (tr::abs(disp.x) >= deactivate_disp || tr::abs(disp.y) >= deactivate_disp ||
+		    tr::abs(disp.z) >= deactivate_disp)
+			return false;
+		// Spin is judged by magnitude: three axes at 0.15 rad/s is one body turning at
+		// 0.26 rad/s, and no per-axis reading of it says so. A dynamically-spinning
+		// body (Phase 8) must not sleep while it is still turning, even if its center
+		// isn't translating — otherwise a freely spinning solid would freeze
+		// mid-rotation. Kinematic-carry bodies (inv_inertia == 0, game-driven) are
+		// unaffected: their ω never keeps them awake here.
+		return !s->rotates_dynamically() || length(w) < deactivate_speed_;
+	}
+
 	// Find solids in box. collide_with_bits filters the result to solids whose
 	// collision_scope shares a bit with it (the same test trace_segment applies); -1,
 	// the default, reports every overlap. Filtering inside the broad phase rather than
@@ -1263,24 +1291,12 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 // Deactivation/sleep decision, shared by update_solid and commit_solid.
 template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, const vec3<T> & new_pos, T dt) {
 	if (deactivate_count_ > 0 && solid_ptr->deactivate_count_ >= 0) {
-		// deactivate_speed_ is a speed, so the per-tick displacement it permits
-		// scales with dt: |Δx| < deactivate_speed_ · dt. Comparing the raw
-		// displacement against deactivate_speed_ directly (as this once did) made
-		// the effective velocity threshold 1/dt times too large — at dt = 16 ms a
-		// body drifting at ~12 m/s still counted as "still" and could be frozen
-		// in mid-air the instant it brushed a neighbour (the classic "ball hanging
-		// in the air"). Gating on true speed lets only genuinely slow bodies sleep.
-		T deactivate_disp = deactivate_speed_ * dt;
-		// A dynamically-spinning body (Phase 8) must not sleep while it is still
-		// turning, even if its center isn't translating — otherwise a freely spinning
-		// solid would freeze mid-rotation. Kinematic-carry bodies (inv_inertia == 0,
-		// game-driven) are unaffected: their ω never keeps them awake here.
-		bool angular_still = !solid_ptr->rotates_dynamically() ||
-		                     length(solid_ptr->angular_velocity_) < deactivate_speed_;
-		if (angular_still &&
-		    tr::abs(new_pos.x - solid_ptr->position_.x) < deactivate_disp &&
-		    tr::abs(new_pos.y - solid_ptr->position_.y) < deactivate_disp &&
-		    tr::abs(new_pos.z - solid_ptr->position_.z) < deactivate_disp) {
+		// The motion this tick is what the rest test judges, not velocity_: the
+		// swept-collision snap can leave a residual velocity in a body whose
+		// position never drifts.
+		vec3<T> disp;
+		sub(disp, new_pos, solid_ptr->position_);
+		if (at_rest(solid_ptr, disp, solid_ptr->angular_velocity_, dt)) {
 
 			// If gravity is non-zero, we only increment the deactivation count if
 			// we are actually supported by something (contact or constraint).
@@ -3329,7 +3345,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// first means the wake threshold reads the final (capped) velocity.
 	const bool do_cap = max_velocity_component_ > zero_val;
 	const bool do_cap_w = max_angular_velocity_component_ > zero_val;
-	auto finalize = [this, do_cap, do_cap_w](solid<T> * s, int index, T inv_m) {
+	auto finalize = [this, do_cap, do_cap_w, dt](solid<T> * s, int index, T inv_m) {
 		if (inv_m <= T{})
 			return;
 		solver_body & state = solver_bodies_[index];
@@ -3347,17 +3363,13 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// Wake on spin as well as translation. A contact can torque a sleeping body
 		// without shifting it — a ball landing on the end of a resting plank — and
 		// without this it would keep the spin, be committed with it below, and neither
-		// notice nor shed it.
-		const bool spun = s->rotates_dynamically() &&
-		    (tr::abs(state.angular_velocity.x) > deactivate_speed_ ||
-		     tr::abs(state.angular_velocity.y) > deactivate_speed_ ||
-		     tr::abs(state.angular_velocity.z) > deactivate_speed_);
-		if (!s->active_ &&
-		    (spun ||
-		     tr::abs(state.velocity.x) > deactivate_speed_ ||
-		     tr::abs(state.velocity.y) > deactivate_speed_ ||
-		     tr::abs(state.velocity.z) > deactivate_speed_)) {
-			s->activate();
+		// notice nor shed it. Asked through at_rest so waking and sleeping read the
+		// same bound, spin included.
+		if (!s->active_) {
+			vec3<T> disp;
+			mul(disp, state.velocity, dt);
+			if (!at_rest(s, disp, state.angular_velocity, dt))
+				s->activate();
 		}
 	};
 	for (auto & p : contact_pairs_) {

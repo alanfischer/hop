@@ -269,6 +269,48 @@ template <typename T> static void test_resting_body_sleeps(const char * label, f
 	printf("  resting_body_sleeps[%s gap=%.4f]: OK\n", label, start_gap);
 }
 
+// Sleeping and waking must agree on what "at rest" means. They used to disagree about
+// spin — the sleep test bounded length(w), the solver's wake test bounded each axis of w
+// against the same number — so w = (0.15, 0.15, 0.15) rad/s, one body turning at 0.26
+// rad/s, was moving to the sleep test and still to the wake test. A body handed that spin
+// by the solver stayed asleep holding it, with nothing left to wake it and shed it. One
+// simulator::at_rest now answers for both; this pins the disagreement case.
+template <typename T> static void test_at_rest_is_one_shape(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  at_rest_is_one_shape[%s]: ", label);
+
+	auto sim = std::make_shared<simulator<T>>();
+	const T dt = tr::from_milli(16);
+	const T speed = sim->get_deactivate_speed();
+	const vec3<T> still {};
+
+	auto spinner = std::make_shared<solid<T>>();
+	spinner->set_mass(tr::one());
+	spinner->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one())); // finite inertia: it spins
+	auto slider = std::make_shared<solid<T>>();
+	slider->set_mass(tr::one()); // no inertia: kinematic carry, w must not matter
+
+	// Three axes at 3/4 of the bound each — under it per axis, over it as a magnitude.
+	const T per_axis = (speed * tr::from_milli(750)) / tr::one();
+	const vec3<T> diagonal_spin { per_axis, per_axis, per_axis };
+	assert(!sim->at_rest(spinner.get(), still, diagonal_spin, dt));
+	assert(sim->at_rest(slider.get(), still, diagonal_spin, dt));
+
+	// Half the bound on one axis is genuinely still, whoever is asking.
+	const vec3<T> slow_spin { speed / tr::from_int(2), T {}, T {} };
+	assert(sim->at_rest(spinner.get(), still, slow_spin, dt));
+
+	// The linear half reads the same whether the caller holds a tick's displacement
+	// (try_deactivate) or a velocity it scales by dt (solve_contacts).
+	vec3<T> disp;
+	mul(disp, vec3<T> { speed / tr::from_int(2), T {}, T {} }, dt);
+	assert(sim->at_rest(slider.get(), disp, still, dt));
+	mul(disp, vec3<T> { speed * tr::from_int(2), T {}, T {} }, dt);
+	assert(!sim->at_rest(slider.get(), disp, still, dt));
+
+	printf("OK\n");
+}
+
 // Injects the same z=0 floor but CLAIMS every contact via collision_response.
 // Verifies the speculative pipeline calls the hook and that a claimed contact is
 // excluded from the solver: with no impulse applied, nothing stops the body.
@@ -1669,6 +1711,7 @@ int main() {
 	test_bouncy_ball_settles<float>("float");
 	test_resting_body_sleeps<float>("float", 0.001f);
 	test_resting_body_sleeps<float>("float", 0.005f);
+	test_at_rest_is_one_shape<float>("float");
 	test_speculative_manager_response<float>("float");
 	test_mixed_modes_push<float>("float");
 	test_angular_carry<float>("float");
@@ -1720,6 +1763,7 @@ int main() {
 	test_speculative_manager_floor<fixed16>("fixed16");
 	test_bouncy_ball_settles<fixed16>("fixed16");
 	test_resting_body_sleeps<fixed16>("fixed16", 0.005f);
+	test_at_rest_is_one_shape<fixed16>("fixed16");
 	test_speculative_manager_response<fixed16>("fixed16");
 	test_mixed_modes_push<fixed16>("fixed16");
 	test_angular_carry<fixed16>("fixed16");
