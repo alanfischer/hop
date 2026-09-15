@@ -187,10 +187,12 @@ static void test_reduction_is_deterministic() {
 struct world {
 	simulator<T> sim;
 	std::shared_ptr<solid<T>> floor;
-	world() {
+	// The floor is a parameter so the same world can be stood on a box solid or on
+	// traceable geometry (see make_traceable_floor) with nothing else differing.
+	explicit world(std::shared_ptr<solid<T>> on = make_floor()) {
 		sim.set_gravity(v(0, -20, 0));
 		sim.set_default_contact_mode(contact_mode::speculative);
-		floor = make_floor();
+		floor = std::move(on);
 		sim.add_solid(floor);
 		floor->set_collision_scope(1);
 		floor->set_collide_with_scope(0);
@@ -370,9 +372,77 @@ public:
 		add(result.point, seg.origin, travel);
 		result.impact.set(result.point);
 	}
-	void trace_solid(collision<T> &, solid<T> *, const vec3<T> &, const mat3<T> &,
-	                 const segment<T> &, T) override {}
+	// The solid half of the contract, so a body can be SIMULATED against this floor and
+	// not only probed against it. Level and unrotated like trace_segment above, and
+	// shape-agnostic: the mover's lowest point is its support point, whatever it is of.
+	void trace_solid(collision<T> & result, solid<T> * s, const vec3<T> & position, const mat3<T> &,
+	                 const segment<T> & seg, T margin) override {
+		const mat3<T> & R = s->get_orientation();
+		mat3<T> Rt;
+		transpose(Rt, R);
+		V down;
+		mul(down, Rt, v(0, -1, 0));
+		V lowest;
+		bool have = false;
+		for (auto & sh : s->get_shapes()) {
+			V local_sup, sup;
+			support_in_solid(local_sup, *sh, down);
+			mul(sup, R, local_sup);
+			if (!have || sup.y < lowest.y) {
+				lowest = sup;
+				have = true;
+			}
+		}
+		if (!have)
+			return;
+		auto witness = [&](const V & mover_origin) {
+			result.impact.set(mover_origin.x + lowest.x, position.y, mover_origin.z + lowest.z);
+		};
+		const T gap = seg.origin.y + lowest.y - position.y;
+		if (gap <= margin) {
+			if (result.time > T {}) {
+				result.time = T {};
+				result.point.set(seg.origin);
+				result.normal = v(0, 1, 0);
+				result.depth = margin - gap;
+				witness(seg.origin);
+			}
+			return;
+		}
+		if (seg.direction.y >= T {})
+			return;
+		const T t = (margin - gap) / seg.direction.y;
+		if (t >= T {} && t <= tr::one() && t < result.time) {
+			result.time = t;
+			mul(result.point, seg.direction, t);
+			add(result.point, seg.origin);
+			result.normal = v(0, 1, 0);
+			witness(result.point);
+		}
+	}
 };
+
+// The other floor `world` can be built on: the same level surface as a TRACEABLE, which
+// is a corpse on a BSP hull rather than on a collision shape. Passed to world's
+// constructor so everything else about the two — gravity, contact mode, scopes — is the
+// same object and not a copy of it, which is what makes the floor the only variable.
+static std::shared_ptr<solid<T>> make_traceable_floor() {
+	auto s = std::make_shared<solid<T>>();
+	s->add_shape(std::make_shared<shape<T>>(std::make_unique<plane_traceable>()));
+	s->set_infinite_mass();
+	s->set_coefficient_of_gravity(T {});
+	s->set_position(v(0, 0, 0));
+	return s;
+}
+
+static std::shared_ptr<solid<T>> make_rod(V at) {
+	auto rod = std::make_shared<solid<T>>();
+	rod->add_shape(std::make_shared<shape<T>>(capsule<T>(v(-0.09, 0, 0), v(0.18, 0, 0), (T)0.01)));
+	rod->set_mass((T)1);
+	rod->set_inertia(v((T)0.002, (T)0.004, (T)0.004));
+	rod->set_position(at);
+	return rod;
+}
 
 // Each body used to ask for the manifold with ITSELF as the mover, which reached a
 // different branch and got a different answer: a rod under a slab clipped two points
@@ -422,10 +492,7 @@ static void test_both_sides_see_the_same_manifold() {
 
 	// THE case from the bug: the capsule brings two witnesses and the slab the reference
 	// face, whichever of them is asking.
-	auto rod = std::make_shared<solid<T>>();
-	rod->add_shape(std::make_shared<shape<T>>(capsule<T>(v(-0.09, 0, 0), v(0.18, 0, 0), (T)0.01)));
-	rod->set_mass((T)1);
-	rod->set_position(v(0, 0, 0));
+	auto rod = make_rod(v(0, 0, 0));
 	auto slab = make_box(0.5, 0.1, 0.5, v(0, 0.11, 0));
 	w.sim.add_solid(rod);
 	w.sim.add_solid(slab);
@@ -441,6 +508,23 @@ static void test_both_sides_see_the_same_manifold() {
 	w.sim.add_solid(ground);
 	w.sim.add_solid(crate);
 	assert_both_sides_agree("box on level geometry", crate.get(), ground.get(), v(0, 1, 0), 4);
+}
+
+// A rod lying on TRACEABLE geometry is held at both ends, exactly as it is on a box.
+// The witness machinery behind both is the same call — build_contact_witnesses, which
+// answers for a capsule as readily as for a box — so a capsule on a map floor has no
+// business getting a different answer from a capsule on a crate.
+static void test_a_lying_capsule_on_traceable_geometry_has_two_points() {
+	if (max_manifold_points == 1) { printf("  a_lying_capsule_on_traceable_geometry_has_two_points skipped (parity build)\n"); return; }
+	world w;  // solids need distinct solve ids, which is what orders the pair
+	auto ground = std::make_shared<solid<T>>();
+	ground->add_shape(std::make_shared<shape<T>>(std::make_unique<plane_traceable>()));
+	ground->set_infinite_mass();
+	ground->set_position(v(0, 0, 0));
+	auto rod = make_rod(v(0, 0.01, 0));
+	w.sim.add_solid(ground);
+	w.sim.add_solid(rod);
+	assert_both_sides_agree("rod on level geometry", rod.get(), ground.get(), v(0, 1, 0), 2);
 }
 
 // One manifold per pair per tick, held by BOTH sides: the second body to discover the
@@ -501,11 +585,7 @@ static void test_the_two_slots_hold_one_manifold() {
 static void test_a_lying_capsule_has_two_points() {
 	if (max_manifold_points == 1) { printf("  a_lying_capsule_has_two_points skipped (parity build)\n"); return; }
 	auto floor = make_floor();
-	auto rod = std::make_shared<solid<T>>();
-	rod->add_shape(std::make_shared<shape<T>>(capsule<T>(v(-0.09, 0, 0), v(0.18, 0, 0), (T)0.01)));
-	rod->set_mass((T)1);
-	rod->set_inertia(v((T)0.002, (T)0.004, (T)0.004));
-	rod->set_position(v(0, 0.01, 0));
+	auto rod = make_rod(v(0, 0.01, 0));
 	contact_point<T> pts[max_manifold_points];
 	int n = manifold_of(pts, rod.get(), floor.get());
 	assert(n == 2 && "a rod lying down touches at both ends");
@@ -525,33 +605,35 @@ static void test_a_lying_capsule_has_two_points() {
 // And it has to SETTLE, which is the thing bug 2 of plans/rotating_gibs.md says it never
 // does: "a capsule resting on a floor creates spin from nothing". Before manifolds a rod
 // dropped on a floor held 19-22 rad/s indefinitely whatever attitude it landed in.
-static void test_a_dropped_rod_comes_to_rest() {
+//
+// Run on BOTH floors. A box solid and a traceable are the same surface as far as a rod
+// lying on it is concerned, and they reach the manifold by different routes — clipping
+// against a face, and probing the geometry — so a rod that settles on one and not the
+// other has found a difference in the route, which is what map geometry used to be.
+static void test_a_dropped_rod_comes_to_rest_on(const char * floor, std::shared_ptr<solid<T>> (*make)()) {
 	for (double tilt_deg : { 0.0, 20.0, 60.0, 85.0 }) {
-		world w;
-		auto rod = std::make_shared<solid<T>>();
-		rod->add_shape(std::make_shared<shape<T>>(capsule<T>(v(-0.09, 0, 0), v(0.18, 0, 0), (T)0.01)));
-		rod->set_mass((T)1);
-		rod->set_inertia(v((T)0.002, (T)0.004, (T)0.004));
+		world w(make());  // a fresh floor per drop: a solid belongs to one simulator
+		auto rod = make_rod(v(0, 0.35, 0));
 		if (tilt_deg != 0) {
 			mat3<T> m;
 			set_mat3_from_axis_angle(m, v(0, 0, 1), (T)(tilt_deg * 3.14159265358979 / 180.0));
 			rod->set_orientation(m);
 		}
-		rod->set_position(v(0, 0.35, 0));
 		w.drop(rod);
 		for (int i = 0; i < 900; ++i)
 			w.sim.update((T)(1.0 / 60.0));
 		const double spin = std::sqrt((double)length_squared(rod->get_angular_velocity()));
 		if (max_manifold_points == 1) {
-			printf("  a_dropped_rod_comes_to_rest: single-point build still turns at %.1f rad/s (tilt %.0f)\n",
-			       spin, tilt_deg);
+			printf("  a_dropped_rod_comes_to_rest[%s]: single-point build still turns at %.1f rad/s (tilt %.0f)\n",
+			       floor, spin, tilt_deg);
 			continue;
 		}
+		assert(rod->get_position().y > 0.0 && "it stayed on top of the floor");
 		assert(!rod->active() && "a rod dropped on a floor comes to rest");
 		assert(spin == 0.0 && "dead still, whatever attitude it landed in");
 	}
 	if (max_manifold_points > 1)
-		printf("  a_dropped_rod_comes_to_rest ok (asleep and |w| 0 at every tilt)\n");
+		printf("  a_dropped_rod_comes_to_rest[%s] ok (asleep and |w| 0 at every tilt)\n", floor);
 }
 
 // A sphere touches a floor at exactly one point however it is clipped, so it gets a
@@ -619,7 +701,9 @@ int main() {
 	test_both_sides_see_the_same_manifold();
 	test_the_two_slots_hold_one_manifold();
 	test_a_lying_capsule_has_two_points();
-	test_a_dropped_rod_comes_to_rest();
+	test_a_dropped_rod_comes_to_rest_on("box floor", make_floor);
+	test_a_dropped_rod_comes_to_rest_on("map geometry", make_traceable_floor);
+	test_a_lying_capsule_on_traceable_geometry_has_two_points();
 	test_rolling_resistance_stops_a_sphere();
 	test_parity_at_one_point();
 	printf("test_manifold: all passed\n");
