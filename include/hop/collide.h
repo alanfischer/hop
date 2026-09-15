@@ -1794,9 +1794,10 @@ inline int manifold_for_shape_pair(contact_point<T> * out, int max_out, T depth,
 
 	// The probe hands back the surface normal it hit, which runs out of the geometry
 	// toward the mover: already b -> a when the geometry is b, a -> b when it is a.
+	// No type test on the mover: build_contact_witnesses is total over the shapes, and
+	// manifold_for_traceable declines on fewer than two of them. A second copy of "which
+	// shapes have witnesses" is what kept capsules off map geometry in the first place.
 	if (tb == shape_type::traceable) {
-		if (!is_polytope_shape(ta))
-			return 0;
 		vec3<T> geom_origin;
 		add(geom_origin, origin, base_b);
 		return manifold_for_traceable(out, max_out, n, depth, sa, Ra, base_a, index_a,
@@ -1804,8 +1805,6 @@ inline int manifold_for_shape_pair(contact_point<T> * out, int max_out, T depth,
 		                              origin, margin, epsilon);
 	}
 	if (ta == shape_type::traceable) {
-		if (!is_polytope_shape(tb))
-			return 0;
 		vec3<T> geom_origin;
 		add(geom_origin, origin, base_a);
 		const int got = manifold_for_traceable(out, max_out, neg_n, depth, sb, Rb, base_b, index_b,
