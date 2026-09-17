@@ -770,6 +770,9 @@ private:
 		limit_row swing;
 		limit_row twist;
 		T limit_relax {};
+		// Held out of its cone by something that will not move: the stop stands, the
+		// wind-back stops. See constraint::set_settle_ticks.
+		bool limit_settled = false;
 	};
 	std::vector<joint_row> joint_rows_;
 	// Shock-propagation scratch, all reused per tick (no steady-state alloc — the
@@ -2451,7 +2454,11 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 				out.on = true;
 				out.axis = axis;
 				out.eff_spin = tr::one() / spin;
-				const T viol = (angle > span) ? angle - span : zero;
+				// Past the span the row is a stop whatever happens below — it never lets
+				// the joint open further. The recovery is the other half, and a SETTLED
+				// limit gives it up: it is held out of its cone by something the solver
+				// cannot move, and shoving at it every tick only keeps the pair awake.
+				const T viol = (r.limit_settled || angle <= span) ? zero : angle - span;
 				out.recover = viol * inv_dt * c->limit_bias_;
 				if (out.recover > max_recover)
 					out.recover = max_recover;
@@ -2462,6 +2469,23 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 				if (out.soft > tr::one())
 					out.soft = tr::one();
 			};
+			// One number for the whole joint: how far outside its cone it actually sits.
+			// The settle rule watches this for progress, so it has to be measured before
+			// the rows below decide what to do about it.
+			T worst_violation {};
+			if (c->swing_span_ >= zero) {
+				const T over = swing - c->swing_span_;
+				if (over > worst_violation)
+					worst_violation = over;
+			}
+			if (c->twist_span_ >= zero) {
+				const T over = tr::abs(twist) - c->twist_span_;
+				if (over > worst_violation)
+					worst_violation = over;
+			}
+			c->note_limit_violation(worst_violation);
+			r.limit_settled = c->limit_settled();
+
 			arm(swing_axis, swing, c->swing_span_, r.swing);
 			// Twist is signed, and its violation axis is +X when the joint has wound one
 			// way and -X when it has wound the other — so both directions are the same

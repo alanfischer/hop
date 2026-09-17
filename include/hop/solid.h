@@ -400,6 +400,9 @@ public:
 		if (!active_) {
 			active_ = true;
 			for (auto * c : constraints_) {
+				// Whatever woke this body may have changed what its constraints are up
+				// against, so one that had settled gets to try again.
+				c->clear_settle();
 				if (c->start_solid_.get() != this && c->start_solid_)
 					c->start_solid_->activate();
 				else if (c->end_solid_.get() != this && c->end_solid_)

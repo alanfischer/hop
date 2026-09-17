@@ -142,6 +142,8 @@ public:
 		limit_bias_ = tr::from_milli(300);        // Godot's CONE_TWIST_JOINT_BIAS default
 		limit_softness_ = tr::from_milli(800);    // ...SOFTNESS
 		limit_relaxation_ = tr::one();            // ...RELAXATION
+		settle_ticks_ = 30;                       // half a second at 60 Hz
+		limit_watch_.clear();
 		local_anchor_a_.reset();
 		local_anchor_b_.reset();
 		end_point_.reset();
@@ -286,6 +288,35 @@ public:
 	void set_limit_relaxation(T r) { limit_relaxation_ = r; }
 	T get_limit_relaxation() const { return limit_relaxation_; }
 
+	// How many consecutive ticks a limit may fail to make any progress on its violation
+	// before the solver calls it SETTLED: its way back into its cone is BLOCKED — by a
+	// floor, by the pile the corpse landed in, by the weight of the chain hanging off it —
+	// and no amount of pushing is going to move it. Before this it did not stop trying: it
+	// shoved at up to the recovery cap every tick for as long as the joint existed, which
+	// is what made a landed ragdoll shiver where it lay and never sleep.
+	//
+	// A settled limit keeps its stop — it still refuses to let the joint open any further.
+	// What it gives up is the RECOVERY and its claim on the sleep test, which is exactly
+	// how hop already treats a body resting on a floor: held, but not working.
+	//
+	// Zero disables the rule, which is what hop did before this existed.
+	void set_settle_ticks(int t) { settle_ticks_ = t > 0 ? t : 0; }
+	int get_settle_ticks() const { return settle_ticks_; }
+	bool limit_settled() const { return limit_watch_.settled; }
+
+	// Settling is a property of a pair that has stopped moving, so anything that gets the
+	// pair moving again re-opens the question — solid::activate calls this when a body wakes.
+	void clear_settle() { limit_watch_.clear(); }
+
+	// Bookkeeping for the rule above, called once per tick by the solver with the violation
+	// it just measured (zero when the joint is inside its cone, slop included). The question
+	// is asked once per WINDOW rather than once per tick, because a limit that is losing does
+	// not sit still while it loses — it oscillates, and a tick-by-tick "is that better than
+	// last tick?" reads every upswing as a fresh start and never concludes anything.
+	void note_limit_violation(T violation) {
+		limit_watch_.note(violation, settle_ticks_, tr::from_milli(2));  // ~0.1 degree
+	}
+
 	bool is_active() const { return simulator_ != nullptr; }
 
 	// Current swing and twist of this joint, in radians, measured between the two rest
@@ -337,15 +368,21 @@ public:
 				return true;
 			// A joint RESTING on its limit is a body resting on a floor: held, but not
 			// working, and it must be allowed to sleep. So an engaged limit counts as
-			// load only while it is still being VIOLATED by more than a degree — get
-			// this backwards and every corpse with an arm against its stop stays awake
-			// for its whole lifetime. The slop is an angle, not `tolerance`, which is a
-			// distance; a degree is far below what anyone can see and far above what
-			// the position pass leaves behind.
+			// load only while it is still being VIOLATED by more than a degree — get this
+			// backwards and every corpse with an arm against its stop stays awake for its
+			// whole lifetime. The slop is an angle, not `tolerance`, which is a distance;
+			// a degree is far below what anyone can see and far above what the position
+			// pass leaves behind.
 			if (!has_limits())
 				return false;
 			T swing {}, twist {};
 			if (!measure_limits(swing, twist, tolerance))
+				return false;
+			// A limit nothing can win is furniture too: it is held out of its cone by
+			// something the solver cannot move, so it is no more "working" than a crate
+			// resting on a floor is. Reporting it as load forever is what kept every
+			// bone of a landed corpse awake for the corpse's whole lifetime.
+			if (limit_settled())
 				return false;
 			const T slop = tr::from_milli(17);  // ~1 degree
 			if (swing_span_ >= T {} && swing > swing_span_ + slop)
@@ -394,6 +431,41 @@ private:
 	T limit_bias_ {};
 	T limit_softness_ {};
 	T limit_relaxation_ {};
+	int settle_ticks_ = 0;
+	// One window's worth of "is this error going anywhere?", kept per error kind.
+	struct progress_watch {
+		bool settled = false;
+		int count = 0;
+		T window_error {};
+
+		void clear() {
+			settled = false;
+			count = 0;
+			window_error = T {};
+		}
+
+		void note(T error, int window, T progress) {
+			if (error <= T {}) {   // no error at all: nothing to be stuck on
+				clear();
+				return;
+			}
+			if (window <= 0) {     // rule off
+				settled = false;
+				return;
+			}
+			if (count == 0) {
+				window_error = error;
+				count = 1;
+				return;
+			}
+			if (++count < window)
+				return;
+			settled = !(error < window_error - progress);
+			window_error = error;
+			count = 1;
+		}
+	};
+	progress_watch limit_watch_;
 
 	simulator<T> * simulator_ = nullptr;
 
