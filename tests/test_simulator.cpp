@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 #include <hop/hop.h>
 
 using namespace hop;
@@ -1460,6 +1461,8 @@ template <typename T> struct limit_arm_result {
 	float worst_pin = 0.0f;
 	float final_x = 0.0f;
 	float final_y = 0.0f;
+	float late_spin = 0.0f;   // mean |w| over the last quarter of the run
+	bool asleep = false;
 };
 
 template <typename T>
@@ -1504,6 +1507,8 @@ static limit_arm_result<T> run_limit_arm(T swing_span, T twist_span, int ticks) 
 
 	const T eps = tr::from_milli(1);
 	limit_arm_result<T> out;
+	const int late_from = ticks - ticks / 4;
+	int late_ticks = 0;
 	for (int i = 0; i < ticks; ++i) {
 		sim.update(tr::from_milli(16));
 		T swing {}, twist {};
@@ -1517,8 +1522,15 @@ static limit_arm_result<T> run_limit_arm(T swing_span, T twist_span, int ticks) 
 			if (sw > out.worst_swing) out.worst_swing = sw;
 			if (pin > out.worst_pin) out.worst_pin = pin;
 		}
+		if (i >= late_from) {
+			out.late_spin += std::sqrt(tr::to_float(length_squared(arm->get_angular_velocity())));
+			++late_ticks;
+		}
 		out.settled_swing = tr::to_float(swing);
 	}
+	if (late_ticks > 0)
+		out.late_spin /= static_cast<float>(late_ticks);
+	out.asleep = !arm->active();
 	out.final_x = tr::to_float(arm->get_position().x);
 	out.final_y = tr::to_float(arm->get_position().y);
 	return out;
@@ -1693,6 +1705,104 @@ template <typename T> static void test_joint_on_its_limit_sleeps(const char * la
 	printf("OK\n");
 }
 
+// A limit whose way
+// back into its cone is BLOCKED — which is where a corpse spends its whole life. The joint's
+// rest frame is tipped 60 degrees into the floor,
+// so the only pose that satisfies the cone is one the ground will not allow — which is a
+// wizard's spine, built standing and asked to lie down. The limit cannot win, and before the
+// standoff rule it did not stop trying: it shoved against the floor at up to the recovery
+// cap every tick for as long as the corpse existed, and nothing in the pair ever slept.
+template <typename T> static void test_blocked_limit_gives_up(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  blocked_limit_gives_up[%s]: ", label);
+	const T z {};
+
+	struct outcome {
+		float late_spin = 0.0f;
+		bool asleep = false;
+		bool standoff = false;
+		bool loaded = true;
+		float swing = 0.0f;
+	};
+	auto run = [&](int standoff_ticks) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
+		auto ground = std::make_shared<solid<T>>();
+		ground->set_infinite_mass();
+		ground->set_coefficient_of_gravity(z);
+		ground->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_int(20), -tr::one(), -tr::from_int(20)),
+		              vec3<T>(tr::from_int(20), z, tr::from_int(20)))));
+		sim.add_solid(ground);
+
+		const T half_len = tr::from_milli(150);
+		const T half_thick = tr::from_milli(60);
+		auto make = [&](T x) {
+			auto s = std::make_shared<solid<T>>();
+			s->set_mass(tr::from_int(2));
+			s->set_inertia(vec3<T>(tr::from_milli(5), tr::from_milli(20), tr::from_milli(20)));
+			s->add_shape(std::make_shared<shape<T>>(
+			    aa_box<T>(vec3<T>(-half_len, -half_thick, -half_thick),
+			              vec3<T>(half_len, half_thick, half_thick))));
+			s->set_position(vec3<T>(x, half_thick, z));
+			sim.add_solid(s);
+			s->set_contact_mode(contact_mode::speculative);
+			return s;
+		};
+		auto parent = make(z);
+		auto child = make(half_len + half_len);
+
+		auto c = std::make_shared<constraint<T>>(parent, child);
+		c->set_type(constraint<T>::type::rigid);
+		c->set_rest_length(z);
+		c->set_local_anchor_a(vec3<T>(half_len, z, z));
+		c->set_local_anchor_b(vec3<T>(-half_len, z, z));
+		c->set_swing_span(tr::from_milli(87));   // 5 degrees
+		c->set_twist_span(tr::from_milli(87));
+		c->set_settle_ticks(standoff_ticks);
+		quat<T> frame;  // the cone, aimed 60 degrees into the ground
+		set_quat_from_axis_angle(frame, vec3<T>(z, z, tr::one()), -tr::from_milli(1047));
+		c->set_frame_a(frame);
+		sim.add_constraint(c);
+
+		outcome out;
+		int late_ticks = 0;
+		for (int i = 0; i < 900; ++i) {
+			sim.update(tr::from_milli(16));
+			if (i >= 675) {
+				out.late_spin += std::sqrt(tr::to_float(length_squared(child->get_angular_velocity())));
+				++late_ticks;
+			}
+		}
+		if (late_ticks > 0)
+			out.late_spin /= static_cast<float>(late_ticks);
+		T swing {}, twist {};
+		c->measure_limits(swing, twist, tr::from_milli(1));
+		out.swing = tr::to_float(swing);
+		out.asleep = !child->active() && !parent->active();
+		out.standoff = c->limit_settled();
+		out.loaded = c->is_loaded(tr::from_milli(1));
+		return out;
+	};
+
+	auto forever = run(0);   // the rule off: hop's behaviour before this existed
+	auto gives_up = run(30);
+	printf("pushing_forever(spin=%.3f asleep=%d) gives_up(spin=%.4f asleep=%d standoff=%d loaded=%d swing=%.0f deg) ",
+	       forever.late_spin, forever.asleep ? 1 : 0, gives_up.late_spin,
+	       gives_up.asleep ? 1 : 0, gives_up.standoff ? 1 : 0, gives_up.loaded ? 1 : 0,
+	       gives_up.swing * 57.2958f);
+	// The contrast is the point: the same rig, the same blocked limit, and only the rule
+	// differs. Without it the pair never stops working and never sleeps.
+	assert(forever.late_spin > 0.5f);
+	assert(!forever.asleep);
+	assert(gives_up.standoff);
+	assert(gives_up.late_spin < 0.05f);   // against ~1 rad/s (5.4 in fixed16) of shoving
+	assert(gives_up.asleep);
+	assert(!gives_up.loaded);   // furniture, not work — this is what lets it sleep
+	printf("OK\n");
+}
+
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -1733,6 +1843,7 @@ int main() {
 	test_twist_limit_holds<float>("float");
 	test_limit_is_unilateral<float>("float");
 	test_joint_on_its_limit_sleeps<float>("float");
+	test_blocked_limit_gives_up<float>("float");
 	test_fast_spinner_no_tunnel<float>("float");
 	test_angular_substep_ccd<float>("float");
 	test_dual_instantiation<float>();
@@ -1781,6 +1892,7 @@ int main() {
 	// correctness-of-the-port question, not a shipping one — instantiated, not tuned on.
 	test_cone_limit_holds<fixed16>("fixed16");
 	test_twist_limit_holds<fixed16>("fixed16");
+	test_blocked_limit_gives_up<fixed16>("fixed16");
 	test_fast_spinner_no_tunnel<fixed16>("fixed16");
 	test_angular_substep_ccd<fixed16>("fixed16");
 
