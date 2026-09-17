@@ -696,6 +696,11 @@ private:
 		// surface velocity, or the carry is lost once the rider gains dynamic spin.
 		bool a_kinematic_carry = false;
 		bool b_kinematic_carry = false;
+		// Rows this contact was split into: the authoritative slot's point_count, the
+		// same for every row of one manifold. Read by the shock phase — see the walk
+		// for why it wants single-point contacts. Capped at max_manifold_points (8),
+		// and placed here so it lands in the flags' existing padding.
+		uint8_t manifold_rows = 1;
 		vec3<T> r_a, r_b;            // contact point − body position (impact lever arm)
 		T eff_n {};                  // effective normal mass: inv_m_sum (+ angular terms when has_angular)
 		vec3<T> ang_n_a, ang_n_b;    // precomputed I⁻¹(r×n) per body: the normal-sweep angular response, scaled by λ each visit
@@ -705,11 +710,6 @@ private:
 		// Either may be null if that side never observed the partner.
 		typename solid<T>::touch::point * slot_a = nullptr;
 		typename solid<T>::touch::point * slot_b = nullptr;
-		// How many rows this contact was split into — the authoritative slot's
-		// point_count, the same for every row of one manifold. Read by the
-		// shock-propagation phase, which is a single-load-path assumption and must
-		// not run on a contact that is already spread across several rows.
-		int manifold_rows = 1;
 	};
 	std::vector<contact_pair> contact_pairs_;
 	struct solver_body {
@@ -772,10 +772,12 @@ private:
 		T limit_relax {};
 	};
 	std::vector<joint_row> joint_rows_;
-	// Shock-propagation scratch, all reused per tick (no steady-state alloc):
-	// shock_order_ is pair indices sorted support-end-first; shock_key_[k] is pair
-	// k's gravity-depth sort key; shock_lo_[k] is its deeper (anchor) body. Depths
-	// are computed once per tick since positions don't move during the solve.
+	// Shock-propagation scratch, all reused per tick (no steady-state alloc — the
+	// order is cleared and refilled, so it keeps its capacity): shock_order_ is the
+	// eligible pair indices (single-point contacts) sorted support-end-first;
+	// shock_key_[k] is pair k's gravity-depth sort key; shock_lo_[k] is its deeper
+	// (anchor) body. Both are indexed by pair and only filled for eligible pairs.
+	// Depths are computed once per tick since positions don't move during the solve.
 	std::vector<int> shock_order_;
 	std::vector<T> shock_key_;
 	std::vector<solid<T> *> shock_lo_;
@@ -2685,7 +2687,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 					mate_pt = &mate_slot->points[0];
 
 				contact_pair p;
-				p.manifold_rows = src.point_count;
+				p.manifold_rows = static_cast<uint8_t>(src.point_count);
 				p.a = a;
 				p.b = b;
 				p.index_a = a->solver_body_index_;
@@ -3254,8 +3256,9 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// chain and, as each body's support-from-below is resolved, freeze it into a
 	// rigid anchor (effective inverse mass 0) so the body above solves against firm
 	// ground and its reaction can't shove the support back down. Normal-only —
-	// friction and restitution are already handled by the GS loop above, and
-	// single-point contacts only (see the skip in the walk).
+	// friction and restitution are already handled by the GS loop above. Single-point
+	// contacts only: a manifold is one load path already spread, and freezing an anchor
+	// under it over-drives every row (see the order build below).
 	// Speculative path only; needs a gravity direction to define "down" (a zero-g
 	// gas has no stacking chain to propagate, so skip it).
 	const bool have_gravity =
@@ -3272,24 +3275,37 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// scales every depth equally, leaving the ordering unchanged. Positions are
 		// frozen during the velocity solve, so each pair's depth key and deeper-body
 		// ("lo") are computed once here and reused by both the sort and every pass.
-		shock_order_.resize(npairs);
+		// Single-point contacts only, and decided here rather than per visit: it is a
+		// property of the contact, fixed for the tick. Against a frozen anchor a row
+		// drives the free body as if the whole weight bore on it ALONE — right for one
+		// point carrying one load path, N times over-driven for a manifold, where the
+		// rows sit at different lever arms so the excess lands as torque and walks a box
+		// stack apart faster than no shock phase at all. A manifold wants none of it
+		// either: spreading one contact's load across the surface is what this phase
+		// exists to arrange, and a manifold arrives with that already done. Leaving those
+		// rows out of the order keeps them out of the sort and out of every pass — in an
+		// all-boxes scene that is the entire array.
+		shock_order_.clear();
 		shock_key_.resize(npairs);
 		shock_lo_.resize(npairs);
 		for (int k = 0; k < npairs; ++k) {
 			const contact_pair & p = contact_pairs_[k];
+			if (p.manifold_rows > 1)
+				continue;
 			T da = dot(p.a->position_, gravity_);
 			T db = dot(p.b->position_, gravity_);
-			shock_order_[k] = k;
+			shock_order_.push_back(k);
 			shock_key_[k] = tr::max_val(da, db);
 			shock_lo_[k] = da >= db ? p.a : p.b;
 		}
+		const int nshock = static_cast<int>(shock_order_.size());
 		// Order contacts support-end-first: descending depth, so a body's contacts
 		// from below are visited before the contacts it supports from above.
 		// stable_sort keeps the canonical pair order for equal depths, so the sweep
 		// stays deterministic (fixed-point included).
 		std::stable_sort(shock_order_.begin(), shock_order_.end(),
 		                 [this](int i, int j) { return shock_key_[i] > shock_key_[j]; });
-		for (int pass = 0; pass < spec_shock_iters_; ++pass) {
+		for (int pass = 0; pass < spec_shock_iters_ && nshock > 0; ++pass) {
 			// Re-seed the freeze state each pass: only the standing anchors start
 			// frozen; the support-end-first walk re-freezes the rest against the
 			// updated velocities.
@@ -3297,19 +3313,9 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				p.a->solve_frozen_ = pre_frozen(p.a, p.inv_ma);
 				p.b->solve_frozen_ = pre_frozen(p.b, p.inv_mb);
 			}
-			for (int oi = 0; oi < npairs; ++oi) {
+			for (int oi = 0; oi < nshock; ++oi) {
 				int idx = shock_order_[oi];
 				contact_pair & p = contact_pairs_[idx];
-				// Single-point contacts only. A frozen anchor makes a row solve as if
-				// the free body's whole weight bore on it alone — right for one point
-				// carrying one load path, N times over-driven for a manifold, where the
-				// excess lands as torque (the rows sit at different lever arms) and
-				// walks a box stack apart faster than no shock phase at all. A manifold
-				// needs none of it: spreading one contact's load across the surface is
-				// what shock propagation exists to arrange, and it arrives with that
-				// already done.
-				if (p.manifold_rows > 1)
-					continue;
 				// The deeper (more-anchored) body has had its support-from-below
 				// resolved by now — earlier in the walk — so freeze it: it anchors
 				// this contact and everything above it. Frozen bodies contribute zero

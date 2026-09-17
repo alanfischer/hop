@@ -289,17 +289,24 @@ static void test_feature_ids_are_stable_and_warm_start() {
 // above, and the load ROLLS down it about alternating edges — so the contact never slips
 // and friction has nothing to oppose. Nothing in WizardWars is exposed to it: a ragdoll's
 // bones and a gib carry collision_mask = WORLD and rest only on static geometry.
-static void test_a_dynamic_stack_is_a_known_limitation() {
-	world w;
+// A stack of n 0.2 m boxes, resting on the floor and on each other, settled for 20 s.
+// Shared by the two stack tests, which differ only in how deep they go.
+static std::vector<std::shared_ptr<solid<T>>> settle_a_stack(world & w, int n) {
 	std::vector<std::shared_ptr<solid<T>>> boxes;
-	for (int i = 0; i < 5; ++i)
-		boxes.push_back(w.drop(make_box(0.1, 0.1, 0.1, v(0, 0.1 + i * 0.2, 0))));
-	for (auto & b : boxes) {
+	for (int i = 0; i < n; ++i) {
+		auto b = w.drop(make_box(0.1, 0.1, 0.1, v(0, 0.1 + i * 0.2, 0)));
 		b->set_collision_scope(1);
 		b->set_collide_with_scope(1);
+		boxes.push_back(b);
 	}
 	for (int i = 0; i < 1200; ++i)
 		w.sim.update((T)(1.0 / 60.0));
+	return boxes;
+}
+
+static void test_a_dynamic_stack_is_a_known_limitation() {
+	world w;
+	const auto boxes = settle_a_stack(w, 5);
 	double worst = 0.0;
 	for (int i = 0; i < 5; ++i)
 		worst = std::max(worst, std::fabs((double)boxes[i]->get_position().y - (0.1 + i * 0.2)));
@@ -314,30 +321,18 @@ static void test_a_dynamic_stack_is_a_known_limitation() {
 
 // Two dynamic boxes, one on the other, at the SHIPPING solver settings. This is the
 // shallow end of the stack limitation above, and it is the case shock propagation used to
-// knock over: with the shock phase running on the manifold's four rows the top box was off
-// by a fifth of a metre after 20 s (it toppled); with the phase left to the single-point
-// contacts it is meant for, the pair drifts a couple of millimetres and stays a stack.
+// knock over: with the phase running on the manifold's four rows the top box was off by a
+// fifth of a metre after 20 s (it toppled); left to the single-point contacts the phase is
+// meant for, it drifts a millimetre or so and stays a stack. The bottom box is not the
+// story — it rests on static geometry, which test_a_box_on_static_geometry_settles_flat
+// covers far more thoroughly.
 static void test_two_dynamic_boxes_survive_the_shock_phase() {
 	world w;
-	std::vector<std::shared_ptr<solid<T>>> boxes;
-	for (int i = 0; i < 2; ++i)
-		boxes.push_back(w.drop(make_box(0.1, 0.1, 0.1, v(0, 0.1 + i * 0.2, 0))));
-	for (auto & b : boxes) {
-		b->set_collision_scope(1);
-		b->set_collide_with_scope(1);
-	}
 	assert(w.sim.get_shock_iterations() > 0 && "the phase this guards is on by default");
-	for (int i = 0; i < 1200; ++i)
-		w.sim.update((T)(1.0 / 60.0));
-	double worst = 0.0;
-	for (int i = 0; i < 2; ++i)
-		worst = std::max(worst, std::fabs((double)boxes[i]->get_position().y - (0.1 + i * 0.2)));
-	if (max_manifold_points == 1) {
-		printf("  two_dynamic_boxes_survive_the_shock_phase: single-point build, %.4f m off\n", worst);
-		return;
-	}
-	assert(worst < 0.01 && "two boxes are still a stack after 20 s");
-	printf("  two_dynamic_boxes_survive_the_shock_phase ok (%.4f m off after 20 s)\n", worst);
+	const auto boxes = settle_a_stack(w, 2);
+	const double off = std::fabs((double)boxes[1]->get_position().y - 0.3);
+	assert(off < 0.01 && "the top box is still on the bottom one after 20 s");
+	printf("  two_dynamic_boxes_survive_the_shock_phase ok (top box %.4f m off after 20 s)\n", off);
 }
 
 // A body resting on STATIC geometry — the case the phase exists for, and the one that has
