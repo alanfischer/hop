@@ -312,6 +312,34 @@ static void test_a_dynamic_stack_is_a_known_limitation() {
 		assert((double)boxes[i]->get_position().y > 0.09 && "nothing fell through the floor");
 }
 
+// Two dynamic boxes, one on the other, at the SHIPPING solver settings. This is the
+// shallow end of the stack limitation above, and it is the case shock propagation used to
+// knock over: with the shock phase running on the manifold's four rows the top box was off
+// by a fifth of a metre after 20 s (it toppled); with the phase left to the single-point
+// contacts it is meant for, the pair drifts a couple of millimetres and stays a stack.
+static void test_two_dynamic_boxes_survive_the_shock_phase() {
+	world w;
+	std::vector<std::shared_ptr<solid<T>>> boxes;
+	for (int i = 0; i < 2; ++i)
+		boxes.push_back(w.drop(make_box(0.1, 0.1, 0.1, v(0, 0.1 + i * 0.2, 0))));
+	for (auto & b : boxes) {
+		b->set_collision_scope(1);
+		b->set_collide_with_scope(1);
+	}
+	assert(w.sim.get_shock_iterations() > 0 && "the phase this guards is on by default");
+	for (int i = 0; i < 1200; ++i)
+		w.sim.update((T)(1.0 / 60.0));
+	double worst = 0.0;
+	for (int i = 0; i < 2; ++i)
+		worst = std::max(worst, std::fabs((double)boxes[i]->get_position().y - (0.1 + i * 0.2)));
+	if (max_manifold_points == 1) {
+		printf("  two_dynamic_boxes_survive_the_shock_phase: single-point build, %.4f m off\n", worst);
+		return;
+	}
+	assert(worst < 0.01 && "two boxes are still a stack after 20 s");
+	printf("  two_dynamic_boxes_survive_the_shock_phase ok (%.4f m off after 20 s)\n", worst);
+}
+
 // A body resting on STATIC geometry — the case the phase exists for, and the one that has
 // to be right. Four rows under it, settled flat, asleep, and no sign of the slop-band
 // tilt the dynamic stack above suffers from.
@@ -697,6 +725,7 @@ int main() {
 	test_a_tilted_box_sleeps();
 	test_feature_ids_are_stable_and_warm_start();
 	test_a_box_on_static_geometry_settles_flat();
+	test_two_dynamic_boxes_survive_the_shock_phase();
 	test_a_dynamic_stack_is_a_known_limitation();
 	test_both_sides_see_the_same_manifold();
 	test_the_two_slots_hold_one_manifold();

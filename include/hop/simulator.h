@@ -705,6 +705,11 @@ private:
 		// Either may be null if that side never observed the partner.
 		typename solid<T>::touch::point * slot_a = nullptr;
 		typename solid<T>::touch::point * slot_b = nullptr;
+		// How many rows this contact was split into — the authoritative slot's
+		// point_count, the same for every row of one manifold. Read by the
+		// shock-propagation phase, which is a single-load-path assumption and must
+		// not run on a contact that is already spread across several rows.
+		int manifold_rows = 1;
 	};
 	std::vector<contact_pair> contact_pairs_;
 	struct solver_body {
@@ -2680,6 +2685,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 					mate_pt = &mate_slot->points[0];
 
 				contact_pair p;
+				p.manifold_rows = src.point_count;
 				p.a = a;
 				p.b = b;
 				p.index_a = a->solver_body_index_;
@@ -3248,7 +3254,8 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// chain and, as each body's support-from-below is resolved, freeze it into a
 	// rigid anchor (effective inverse mass 0) so the body above solves against firm
 	// ground and its reaction can't shove the support back down. Normal-only —
-	// friction and restitution are already handled by the GS loop above.
+	// friction and restitution are already handled by the GS loop above, and
+	// single-point contacts only (see the skip in the walk).
 	// Speculative path only; needs a gravity direction to define "down" (a zero-g
 	// gas has no stacking chain to propagate, so skip it).
 	const bool have_gravity =
@@ -3293,6 +3300,16 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			for (int oi = 0; oi < npairs; ++oi) {
 				int idx = shock_order_[oi];
 				contact_pair & p = contact_pairs_[idx];
+				// Single-point contacts only. A frozen anchor makes a row solve as if
+				// the free body's whole weight bore on it alone — right for one point
+				// carrying one load path, N times over-driven for a manifold, where the
+				// excess lands as torque (the rows sit at different lever arms) and
+				// walks a box stack apart faster than no shock phase at all. A manifold
+				// needs none of it: spreading one contact's load across the surface is
+				// what shock propagation exists to arrange, and it arrives with that
+				// already done.
+				if (p.manifold_rows > 1)
+					continue;
 				// The deeper (more-anchored) body has had its support-from-below
 				// resolved by now — earlier in the walk — so freeze it: it anchors
 				// this contact and everything above it. Frozen bodies contribute zero
