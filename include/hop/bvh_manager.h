@@ -127,27 +127,39 @@ public:
 		ticks_since_dynamic_rebuild_ = 0;
 		refits_since_dynamic_rebuild_ = 0;
 
-		rebuild_iteration_order();
+		// Not built from this tree any more (see rebuild_iteration_order) — but an
+		// add or a remove is what usually brings us here, so keep it in step.
+		if (order_dirty_)
+			rebuild_iteration_order();
 	}
 
-	// Rebuild the simulator's spatial-locality update order from the current
-	// BVH leaves plus the bookkeeping vectors. Invariant the simulator relies
-	// on: the order must contain *every* solid this manager owns exactly once,
-	// so its size equals dynamic_solids_.size() + static_solids_.size(). The
-	// dynamic BVH only holds solids with shapes, so shape-less dynamics (e.g. a
-	// body added to the space before its collision shape arrives) are appended
-	// explicitly — otherwise they'd be silently dropped from the order. Assumes
-	// dynamic_bvh_ topology is current (post build or refit); cheap, so it's
-	// safe to call after a refit-only tick.
+	// Rebuild the simulator's update order: dynamics in insertion order, statics
+	// after them. Invariant the simulator relies on: the order must contain
+	// *every* solid this manager owns exactly once, so its size equals
+	// dynamic_solids_.size() + static_solids_.size().
+	//
+	// CANONICAL, and that is the whole point. Both vectors are insertion-ordered
+	// (remove_solid erases, which preserves the relative order of the rest), so
+	// this order is the solids' solve_id_ order — a pure function of WHICH
+	// solids exist, never of when this manager last touched its trees.
+	//
+	// It used to be the dynamic BVH's DFS leaf order, for cache locality on the
+	// update pass. That made the order a function of the tree's TOPOLOGY, which
+	// is rebuilt on an add/remove or every dynamic_rebuild_period ticks and only
+	// refit in between — so the same solids in the same places iterated in a
+	// different order depending on when they were added relative to the last
+	// rebuild. A Gauss-Seidel solve is order-dependent, so that is a different
+	// simulation: two peers running one jointed ragdoll from byte-identical
+	// inputs came out 0.3m apart in a single tick, because one built its bones
+	// inside a physics tick (rebuild, then throw) and the other between two
+	// (throw, then rebuild). Order is the one thing a solver must not take from
+	// history. The BVH still accelerates every broad-phase query — it just no
+	// longer decides who is solved first.
 	void rebuild_iteration_order() {
-		// Dynamics in BVH-DFS order; statics tail (their order is irrelevant
-		// since walls don't move and their per-tick work is trivial).
 		iteration_order_.clear();
 		iteration_order_.reserve(dynamic_solids_.size() + static_solids_.size());
-		dynamic_bvh_.collect_leaves(iteration_order_);
 		for (auto * s : dynamic_solids_)
-			if (s->get_shapes().empty())
-				iteration_order_.push_back(s);
+			iteration_order_.push_back(s);
 		for (auto * s : static_solids_)
 			iteration_order_.push_back(s);
 		order_dirty_ = false;
@@ -253,17 +265,17 @@ public:
 	void pre_update(T dt) override {
 		if (static_cast<int>(dynamic_solids_.size()) < linear_scan_threshold)
 			return;
+		// The order follows adds and removes and nothing else now, so it is
+		// refreshed on its own dirty flag rather than off the back of a rebuild
+		// (see rebuild_iteration_order).
+		if (order_dirty_)
+			rebuild_iteration_order();
 		if (dynamic_dirty_ || ++ticks_since_dynamic_rebuild_ >= dynamic_rebuild_period) {
-			rebuild_dynamic();  // also refreshes iteration_order_
+			rebuild_dynamic();
 			ticks_since_dynamic_rebuild_ = 0;
 		} else {
 			dynamic_bvh_.refit([](solid<T> * s) { return s->get_world_bound(); });
 			dynamic_moved_ = false;
-			// A refit preserves topology, so the BVH leaves are unchanged — but
-			// a static add/remove (which doesn't dirty the dynamic BVH) can still
-			// have invalidated the order's tail. Refresh it without a full rebuild.
-			if (order_dirty_)
-				rebuild_iteration_order();
 		}
 	}
 	void post_update(T dt) override {}
