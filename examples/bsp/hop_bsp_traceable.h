@@ -607,53 +607,45 @@ inline hull_trace hull_sweep_off_surface(const hull &h, const double start[3],
 // Shrunk by STUCK_SLOP for the same reason hull_push_out is (see there): a candidate that
 // lands ON a floor is a place the mover can be, and rejecting it leaves only candidates that
 // exit the model completely.
+// `strict` measures the geometry as it really is and confirms the far end is open air.
+// Without it this is the older, looser form -- the hull shrunk by STUCK_SLOP and no
+// confirmation -- which hull_push_out still falls back on; see there for why both exist.
 inline double hull_inside_distance(const hull &h, int root, const double p[3],
-                                   const double dir[3], double limit, int blocking) {
+                                   const double dir[3], double limit, int blocking,
+                                   bool strict = true) {
 	const double away[3] = {
 		p[0] + dir[0] * limit, p[1] + dir[1] * limit, p[2] + dir[2] * limit
 	};
-	// Unbiased, deliberately. The stuck band exists so a mover resting exactly ON a
-	// surface is not called buried, and hull_push_out has already applied it to decide
-	// whether to probe at all -- so by here the point is genuinely at least STUCK_SLOP
-	// deep. Carrying the band into the PROBE instead shrinks every brush by the slop,
-	// which leaves a phantom shell of free space just inside every face, and the probe
-	// then reports an exit a fraction of a unit away in a direction that does not leave
-	// the solid at all.
-	//
-	// Measured on the wall-on-floor fixture, which is the shape that bites: a trace point
-	// at the seam where the wall's expanded solid begins exactly where the floor's ends
-	// sat 28 units inside the wall, and the band offered a 0.03-unit "exit" straight DOWN
-	// into the floor. Being the shortest, it won -- and the push-out came back pointing
-	// into the floor the mover was standing on, which is the golem-cockpit dead end
-	// test_push_out_picks_a_direction_that_exits describes.
+	if (!strict) {
+		hull_trace loose = hull_sweep_stuck_band(h, p, away, ~blocking & CONTENTS_BITS);
+		if (!loose.hit) return -1.0;
+		return limit * loose.fraction + DIST_EPSILON;
+	}
+
 	hull_trace tr = hull_sweep(h, p, away, ~blocking & CONTENTS_BITS);
 	if (!tr.hit) return -1.0;  // nothing but solid this way, as far as the budget reaches
 	// The crosspoint sits DIST_EPSILON on the near side of the plane it stopped at, which
 	// here is the inside, so the free space starts that much further out.
-	//
 	const double d_true = limit * tr.fraction + DIST_EPSILON;
 
 	// Confirm it really is open air there. The sweep can stop at a plane the point is
-	// already sitting ON: a contents descent sends distance zero to the FRONT child, so
-	// at a brush seam the floor's expanded top plane reads as empty at exactly its own
-	// height, and a probe heading DOWN off that seam looks like it reaches free space a
-	// hundredth of a unit away when it is in fact going deeper into the floor. Being the
-	// shortest, that phantom then wins the search.
-	//
-	// hull_push_out's contract is that every candidate is "a direction we have just traced
-	// to open air". This is what makes that true rather than nearly true, at one contents
-	// descent per axis on a path that only runs when something is genuinely embedded.
+	// already sitting ON: a contents descent sends distance zero to the FRONT child, so at
+	// a brush seam the floor's expanded top plane reads as empty at exactly its own height,
+	// and a probe heading DOWN off that seam looks like it reaches free space a hundredth
+	// of a unit away when it is in fact going deeper into the floor. Being the shortest,
+	// that phantom then wins the search -- which is how the push-out came to point into the
+	// floor a mover was standing on.
 	const double at[3] = {
 		p[0] + dir[0] * d_true, p[1] + dir[1] * d_true, p[2] + dir[2] * d_true
 	};
 	if ((blocking & blocking_bit(hull_point_contents(h, root, at))) != 0)
 		return -1.0;
 
-	// Less the band, which is where it belongs: the geometry is probed as it really is,
-	// and the mover is left STUCK_SLOP inside rather than resolved to exactly zero overlap
-	// -- deliberately, so a body resting on a surface does not flip between stuck and free
-	// (see STUCK_SLOP, and test_solid_starting_stuck_reports_overlap, which pins the
-	// reported depth at the true penetration less the band).
+	// Less the band: the geometry is probed as it really is, and the mover is left
+	// STUCK_SLOP inside rather than resolved to exactly zero overlap -- deliberately, so a
+	// body resting on a surface does not flip between stuck and free (see STUCK_SLOP, and
+	// test_solid_starting_stuck_reports_overlap, which pins the reported depth at the true
+	// penetration less the band).
 	const double d = d_true - STUCK_SLOP;
 	return d > 0.0 ? d : 0.0;
 }
@@ -709,8 +701,9 @@ inline bool hull_push_out(const hull &h, int root, const double p[3], int blocki
 	double best = 0.0;
 	double best_dir[3] = { 0, 0, 0 };
 	bool found = false;
+	bool strict = true;
 	auto consider = [&](const double dir[3], double limit) {
-		const double d = hull_inside_distance(h, root, p, dir, limit, blocking);
+		const double d = hull_inside_distance(h, root, p, dir, limit, blocking, strict);
 		if (d < 0.0) return;
 		for (int i = 0; i < 3; ++i) {
 			const double mag = dir[i] < 0 ? -dir[i] : dir[i];
@@ -729,6 +722,18 @@ inline bool hull_push_out(const hull &h, int root, const double p[3], int blocki
 		{ 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
 	};
 	for (int i = 0; i < 6; ++i) consider(AXES[i], extent[i / 2]);
+
+	// Nothing survived the strict probe. Fall back to the looser one, which is what this
+	// did before the strict pass existed, and only then to the leaf plane below. The order
+	// is what makes this no worse than it was: a verified exit beats an unverified one,
+	// an unverified one beats the nearest face of the LEAF -- which for a mover wedged
+	// where a wall meets a floor is the seam at distance nothing, so it pushes them UP
+	// rather than out. The only cases that change are the ones where the old answer failed
+	// its own verification.
+	if (!found) {
+		strict = false;
+		for (int i = 0; i < 6; ++i) consider(AXES[i], extent[i / 2]);
+	}
 
 	if (found) {
 		normal[0] = best_dir[0];

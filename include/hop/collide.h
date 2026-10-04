@@ -52,13 +52,20 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 		if (diy < depth) { depth = diy; face_normal.set(neg_y); }
 		if (day < depth) { depth = day; face_normal.set(pos_y); }
 
-		// Starting inside is an overlap whatever the direction, including heading out
-		// through this very face. Which is the caller's business, not the shape's: a
-		// trace carries the normal and depth needed to decide, and the one place that
-		// policy belongs is the query layer that has a flag for it (Godot's
-		// hit_from_inside, filtered in HopDirectSpaceState::_intersect_ray). Deciding
-		// it per shape is what left box and sphere answering one way, convex another,
-		// and the BSP and plane traceables a third.
+		// An overlapping mover that is already heading OUT through the face nearest it
+		// is not reported. This looks like an inconsistency next to convex_solid, which
+		// reports regardless, and it is load-bearing: test_solid reaches here for the
+		// box-vs-box pair (via the Minkowski sum below), so a body separating from a
+		// surface it overlaps would otherwise be handed to the solver as
+		// penetration-at-frame-start and pushed along the contact normal while it was
+		// already leaving. Removing it on consistency grounds wedged riders into the
+		// walls of ww_golem's rotating cockpit and lifted them.
+		//
+		// A ZERO-length segment skips the test, so it costs point queries nothing --
+		// which is the only thing intersect_point ever needed from this branch.
+		if (length_squared(seg.direction) > T {} && dot(seg.direction, face_normal) >= T {})
+			return;
+
 		c.time = T {};
 		c.depth = depth;
 		c.normal.set(face_normal);
@@ -71,6 +78,7 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 
 template <typename T>
 void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sph, T epsilon) {
+	using tr = scalar_traits<T>;
 	if (test_inside(sph, seg.origin)) {
 		vec3<T> n;
 		n.set(seg.origin);
@@ -81,12 +89,17 @@ void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sp
 			normalize(n, seg.direction);
 			neg(n);
 		}
-		// Direction does not gate the overlap -- see trace_aa_box.
-		c.time = T {};
-		c.depth = sph.radius - dist;
-		c.point.set(seg.origin);
-		c.normal.set(n);
-		c.started_inside = true;
+		// Separating movers are not reported -- see trace_aa_box. A zero-length segment
+		// has dot() == 0 and so still reports, which is what a point query needs.
+		if (dot(n, seg.direction) <= epsilon) {
+			c.time = T {};
+			c.depth = sph.radius - dist;
+			c.point.set(seg.origin);
+			c.normal.set(n);
+			c.started_inside = true;
+		} else {
+			c.time = tr::one();
+		}
 	} else {
 		c.time = find_intersection(seg, sph, c.point, c.normal);
 	}
