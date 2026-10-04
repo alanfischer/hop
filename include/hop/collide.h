@@ -52,13 +52,18 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 		if (diy < depth) { depth = diy; face_normal.set(neg_y); }
 		if (day < depth) { depth = day; face_normal.set(pos_y); }
 
-		if (length_squared(seg.direction) > T {} && dot(seg.direction, face_normal) >= T {})
-			return;
-
+		// Starting inside is an overlap whatever the direction, including heading out
+		// through this very face. Which is the caller's business, not the shape's: a
+		// trace carries the normal and depth needed to decide, and the one place that
+		// policy belongs is the query layer that has a flag for it (Godot's
+		// hit_from_inside, filtered in HopDirectSpaceState::_intersect_ray). Deciding
+		// it per shape is what left box and sphere answering one way, convex another,
+		// and the BSP and plane traceables a third.
 		c.time = T {};
 		c.depth = depth;
 		c.normal.set(face_normal);
 		c.point.set(seg.origin);
+		c.started_inside = true;
 	} else {
 		c.time = find_intersection(seg, box, c.point, c.normal);
 	}
@@ -66,8 +71,6 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 
 template <typename T>
 void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sph, T epsilon) {
-	using tr = scalar_traits<T>;
-	const T one = tr::one();
 	if (test_inside(sph, seg.origin)) {
 		vec3<T> n;
 		n.set(seg.origin);
@@ -78,14 +81,12 @@ void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sp
 			normalize(n, seg.direction);
 			neg(n);
 		}
-		if (dot(n, seg.direction) <= epsilon) {
-			c.time = T {};
-			c.depth = sph.radius - dist;
-			c.point.set(seg.origin);
-			c.normal.set(n);
-		} else {
-			c.time = one;
-		}
+		// Direction does not gate the overlap -- see trace_aa_box.
+		c.time = T {};
+		c.depth = sph.radius - dist;
+		c.point.set(seg.origin);
+		c.normal.set(n);
+		c.started_inside = true;
 	} else {
 		c.time = find_intersection(seg, sph, c.point, c.normal);
 	}
@@ -273,6 +274,7 @@ void trace_convex_solid(collision<T> & c, const segment<T> & seg, const convex_s
 		c.depth = -closest_dist;
 		c.point.set(seg.origin);
 		c.normal.set(cs.planes[closest_plane].normal);
+		c.started_inside = true;
 		return;
 	}
 
@@ -2051,11 +2053,12 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 		// Traceables take the world segment plus their frame, so they need no carry-back.
 		bool in_shape_frame = true;
 
-		// Each primitive returns a miss as time == one, EXCEPT trace_aa_box's
-		// inside-and-leaving early return, which writes nothing at all. `col` is reused
-		// across shapes, so without this a previous shape's (already world-space) hit
-		// would survive into the carry-back below and be transformed a second time.
+		// Each primitive returns a miss as time == one, but a TRACEABLE may write nothing
+		// at all when it misses. `col` is reused across shapes, so without this reset a
+		// previous shape's (already world-space) hit would survive into the carry-back
+		// below and be transformed a second time.
 		col.time = one;
+		col.started_inside = false;
 
 		switch (sh->get_type()) {
 		case shape_type::box:
@@ -2100,7 +2103,9 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 		if (col.time == T {})
 			col.trigger_scope |= s->get_trigger_scope();
 
+		const bool began_inside = result.started_inside || col.started_inside;
 		merge_intra_pair(result, col, epsilon, modify_scope);
+		result.started_inside = began_inside;
 	}
 }
 
