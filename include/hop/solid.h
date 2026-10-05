@@ -225,7 +225,7 @@ public:
 		update_inv_inertia_world();            // world I⁻¹ depends on orientation
 		recompute_world_bound();
 	}
-	// Commit an integrated quat (Phase 8 dynamic spin): single writer of the
+	// Commit an integrated quat (dynamic spin): single writer of the
 	// "both representations + world AABB are now consistent" transition, so the
 	// mat3/quat invariant can't silently desync. set_orientation is its mat3-in twin.
 	void set_orientation_from_quat(const quat<T> & q) {
@@ -241,9 +241,9 @@ public:
 		activate();
 	}
 	const vec3<T> & get_velocity() const { return velocity_; }
-	// Kinematic angular velocity (axis·rate about `position_`). Phase 6: this is
-	// scripted spin only — there is no inertia/torque integration, so a finite-mass
-	// body does not acquire it from collisions. Its sole effect is the surface
+	// Kinematic angular velocity (axis·rate about `position_`). Scripted spin only:
+	// there is no inertia/torque integration here, so a finite-mass body does not
+	// acquire it from collisions. Its sole effect is the surface
 	// velocity ω × (contact − position) the contact solver feeds into the existing
 	// non-penetration / friction constraints, so a spinning kinematic platform
 	// carries the riders touching it. Zero by default → exact no-op everywhere.
@@ -259,7 +259,7 @@ public:
 	const vec3<T> & get_force() const { return force_; }
 	void clear_force() { force_.reset(); }
 
-	// Dynamic rotation (Phase 8). Inertia is the principal-axis diagonal in the body
+	// Dynamic rotation. Inertia is the principal-axis diagonal in the body
 	// frame; inv_inertia_ (the per-component reciprocal, 0 where a component is 0) is
 	// the canonical marker — inv_inertia_==0 means "this body never spins
 	// dynamically" (static/kinematic brushes, pinned props). Defaults to zero, so a
@@ -487,7 +487,7 @@ private:
 	vec3<T> velocity_;
 	vec3<T> angular_velocity_;    // world-frame ω (axis·rate about position_); zero by default = no-op. Kinematic scripted spin OR dynamically integrated
 	vec3<T> force_;
-	vec3<T> torque_;              // accumulated world-frame torque (Phase 8); cleared each integrate_angular
+	vec3<T> torque_;              // accumulated world-frame torque; cleared each integrate_angular
 	vec3<T> inertia_;             // principal-axis diagonal (Ix,Iy,Iz) in the body frame; for the I·ω gyroscopic term
 	vec3<T> inv_inertia_;         // per-component reciprocal of inertia_ (0 where a component is 0). PRIMARY marker: inv_inertia_==0 ⇒ never spins dynamically. Zero by default ⇒ rotation is opt-in
 	mat3<T> inv_inertia_world_;   // cached R·diag(inv_inertia_)·Rᵀ; see get_inv_inertia_world/update_inv_inertia_world. Zero for a non-rotating body

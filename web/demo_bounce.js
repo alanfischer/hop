@@ -76,7 +76,6 @@ async function main() {
 	cap2.setVelocity(-1, 2, 3);
 
 	// Compound dumbbell: two spheres on one solid, offset via shape local_position.
-	// Demonstrates compound colliders (Phase 2: shape local_position).
 	const dumbbell = sim.addSolid();
 	dumbbell.setMass(1);
 	dumbbell.setCoefficientOfRestitution(COR);

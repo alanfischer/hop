@@ -258,7 +258,7 @@ public:
 
 	// Half-angle of the cone the child's twist axis may tilt through, and how far it may
 	// spin about that axis, both in radians. NEGATIVE MEANS NO LIMIT, which is what keeps
-	// every pin built before Phase 13 bit-identical.
+	// an unlimited pin bit-identical to one with no limit support at all.
 	void set_swing_span(T s) {
 		swing_span_ = s;
 		activate_endpoints();
@@ -347,7 +347,7 @@ public:
 		vec3<T> a_world;
 		vec3<T> b_world;
 		vec3<T> a_lever;
-		// Anchors rotate with their solid (Phase 10); zero anchor → position_.
+		// Anchors rotate with their solid; zero anchor → position_.
 		mul(a_lever, start_solid_->orientation_, local_anchor_a_);
 		add(a_world, start_solid_->position_, a_lever);
 		if (end_solid_) {

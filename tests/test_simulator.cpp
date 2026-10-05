@@ -396,12 +396,12 @@ template <typename T> static void test_mixed_modes_push(const char * label) {
 	printf("  mixed_modes_push[%s]: OK\n", label);
 }
 
-// Phase 6 (kinematic angular carry): a spinning infinite-mass platform must
+// Kinematic angular carry: a spinning infinite-mass platform must
 // carry the rider resting on it. The platform spins about the vertical (z) axis;
 // at the off-axis rider the surface velocity ω×r is tangential, so friction
 // should drag the rider around the axis (ω×(r,0,·) = (0,ω·r,0) → +y first). The
-// platform's spin is scripted carry only — Phase 6 does not integrate orientation
-// from ω, so the geometry stays put and the term is isolated.
+// platform's spin is scripted carry only — an inertia-less body does not integrate
+// orientation from ω, so the geometry stays put and the term is isolated.
 //
 // The platform here is a large sphere (its near-flat cap is the floor); the
 // box-top version of this carry lives in test_angular_carry_box. Both stay seated
@@ -586,7 +586,7 @@ template <typename T> static void test_angular_carry_box_capsule(const char * la
 // infinite-mass platform) instead of "has angular velocity". The carry then
 // vanished. This is exactly the demo_rotating_platform scenario (its riders have
 // inertia so friction spins them up). The rider must still be carried +y AND, as
-// the Phase 9 secondary effect, spin up about +z from that same friction.
+// the secondary angular effect, spin up about +z from that same friction.
 template <typename T> static void test_angular_carry_finite_inertia_rider(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  angular_carry_finite_inertia_rider[%s]: ", label);
@@ -647,14 +647,14 @@ template <typename T> static void test_angular_carry_finite_inertia_rider(const 
 	assert(sy > 0.5f);                       // carried tangentially (+y) despite dynamic spin
 	assert(sz > 0.3f);                       // stayed seated on the top face
 	assert(r_spun > 2.0f && r_spun < 4.0f);  // carried around the axis, still on top
-	assert(wz_spun > 0.05f);                 // Phase 9: friction spun the rider up about +z
+	assert(wz_spun > 0.05f);                 // friction spun the rider up about +z
 	assert(std::fabs(ty) < 0.2f);            // no drift without platform spin
 	assert(std::fabs(wz_still) < 0.05f);     // and no spin-up without it
 	printf("  angular_carry_finite_inertia_rider[%s]: OK\n", label);
 }
 
 // Statically-rotated boxes dropped on a flat floor must settle on their true
-// rotated geometry (Phase 5 oriented polytope×polytope), not their world AABB, and
+// rotated geometry (the oriented polytope×polytope path), not their world AABB, and
 // the infinite-mass floor must not move. TWO boxes are used deliberately: with a
 // single oriented box the broad-phase bug below is masked, because the floor's own
 // per-tick recovery keeps the lone box up; with two boxes the floor can only
@@ -727,7 +727,7 @@ template <typename T> static void test_oriented_box_rest(const char * label) {
 	printf("OK\n");
 }
 
-// Phase 8: a finite-inertia body integrates orientation under torque and free spin,
+// A finite-inertia body integrates orientation under torque and free spin,
 // while a body with no inertia (inv_inertia == 0, the default) never rotates
 // dynamically. No collision response yet — these bodies don't collide
 // (collide_with_scope 0), they just spin.
@@ -789,7 +789,7 @@ template <typename T> static void test_dynamic_spin(const char * label) {
 	printf("OK\n");
 }
 
-// Phase 9: an off-center impact transfers linear momentum into spin (lever arm),
+// An off-center impact transfers linear momentum into spin (lever arm),
 // while a centered impact produces ~none. A projectile (no inertia, so it can't
 // spin) strikes a free finite-inertia box; the +y-offset hit pushing +x torques the
 // box clockwise about Z (ω.z < 0), and the box's linear speed is lower than the
@@ -895,7 +895,7 @@ template <typename T> static void test_angular_impulse(const char * label) {
 	printf("OK\n");
 }
 
-// Phase 9: friction at a contact below the center of mass torques the body — a box
+// Friction at a contact below the center of mass torques the body — a box
 // sliding along the floor decelerates AND tips forward (acquires ω about the axis
 // perpendicular to motion), the start of rolling. Exercises the angular friction
 // (tangent effective-mass) path.
@@ -1068,7 +1068,7 @@ template <typename T> static void test_friction_rolling(const char * label) {
 	printf("OK\n");
 }
 
-// Phase 10: a spring whose anchor sits off the body's center torques the body via
+// A spring whose anchor sits off the body's center torques the body via
 // its lever arm (τ = r × F). An off-center pull spins the body about +z; a centered
 // pull (lever = 0) produces pure translation and no spin. Exercises rotated anchors
 // + accumulate_constraint_torque, and the bit-identical center-anchor fast path.
@@ -1179,10 +1179,10 @@ template <typename T> static void test_constraint_anchor_torque(const char * lab
 	printf("OK\n");
 }
 
-// Phase 9 hardening: a fast/thin spinner must not tunnel through a thin wall between
+// Angular hardening: a fast/thin spinner must not tunnel through a thin wall between
 // orientation snapshots. A blade (±2 long) spinning at 40 rad/s sweeps a tip 1.28
 // units/step against a 0.2-thick slab — classic angular-tunnel setup. The broad-phase
-// inflation (|ω|·dt·r) + Phase 5 oriented narrowphase + Phase 9 angular response catch
+// inflation (|ω|·dt·r) + the oriented narrowphase + the angular response catch
 // it: pinned at center so it can't recoil, the tip is still stopped at the near face
 // and the spin is arrested. Guards against regressing any of those three mechanisms
 // (the deferred end-of-step SAT recovery proved redundant against this case).
@@ -1341,7 +1341,7 @@ template <typename T> static void test_angular_substep_ccd(const char * label) {
 	printf("OK\n");
 }
 
-// Phase 12: a rigid pin HOLDS. Two links hang off a world point under gravity; a force
+// A rigid pin HOLDS. Two links hang off a world point under gravity; a force
 // spring at any stiffness sags (it needs a stretch to produce force at all), while the
 // rigid solve drives the anchor pair together at both the velocity and position level.
 // The assertion is on the joint error, not the position: a chain is allowed to swing.
@@ -1445,7 +1445,7 @@ template <typename T> static void test_rigid_joint_sleeps(const char * label) {
 	printf("OK\n");
 }
 
-// ── Phase 13: angular limits ────────────────────────────────────────────────
+// ── Angular limits ──────────────────────────────────────────────────────────
 //
 // A horizontal arm pinned to a fixed post at its inboard end. Gravity folds it down, and
 // the whole question is where it stops: a plain pin lets it hang straight down (90 degrees

@@ -1,20 +1,19 @@
 // demo_static_rotation.cpp — Raylib visualization of hop's STATIC orientation
-// (Phase 5: oriented polytope narrowphase).
+// (the oriented polytope narrowphase).
 //
 // Three 1x1x1 boxes are dropped onto a flat floor:
 //   * GRAY  — axis-aligned control. Rests flat, lowest face at z=0, center z=0.5.
 //   * RED   — rotated 45° about the up axis-in-plane (its X-Z cross-section is a
-//             diamond). With Phase 5 it collides on its true rotated faces and
-//             comes to rest BALANCED ON ITS EDGE, center at z=√2/2≈0.707 — NOT
-//             sunk to the axis-aligned 0.5 it would hit if the box collided as
-//             its world AABB (the pre-Phase-5 behavior).
+//             diamond). It collides on its true rotated faces and comes to rest
+//             BALANCED ON ITS EDGE, center at z=√2/2≈0.707 — NOT sunk to the
+//             axis-aligned 0.5 it would hit if the box collided as its world AABB.
 //   * BLUE  — rotated about a tilted axis so it settles on a single corner/edge.
 //
-// What this demo does NOT show: dynamic tumbling. The orientation is STATIC — set
-// once, never integrated — because angular integration (Phase 8) and angular
-// impulse response (Phase 9) are not implemented yet. The diamond therefore rests
+// The three dropped boxes do NOT tumble: they are given no inertia, so their
+// orientation is STATIC — set once, never integrated. The diamond therefore rests
 // perfectly balanced on its edge instead of toppling: there is no torque to tip
-// it. Phase 5 makes the *contact* correct, not the spin.
+// it. The oriented narrowphase makes the *contact* correct, not the spin. The gold
+// box below is the opposite case — finite inertia, so its spin is integrated.
 //
 // Pass --fixed to use fixed16 arithmetic instead of float.
 
@@ -115,9 +114,9 @@ template <typename T> static void run(bool fixed_label) {
 	auto dia = drop(hop::vec3<T>(zero, zero, tr::from_int(3)), diamond);
 	auto cor = drop(hop::vec3<T>(tr::from_int(2), zero, tr::from_int(3)), corner);
 
-	// Phase 8: a freely-spinning box. Finite (asymmetric) inertia + an initial ω
-	// about a tilted axis → hop integrates its orientation and it tumbles in place.
-	// Gravity off and no collision (Phase 9 owns response), so it just spins.
+	// A freely-spinning box. Finite (asymmetric) inertia + an initial ω about a
+	// tilted axis → hop integrates its orientation and it tumbles in place.
+	// Gravity off and collision off, so it just spins.
 	auto spinner = std::make_shared<hop::solid<T>>();
 	spinner->set_mass(tr::one());
 	spinner->set_inertia(hop::vec3<T>(tr::one(), tr::two(), tr::from_int(3))); // asymmetric → visible wobble
@@ -128,7 +127,7 @@ template <typename T> static void run(bool fixed_label) {
 	spinner->set_angular_velocity(hop::vec3<T>(tr::one(), tr::two(), tr::half())); // tilted axis
 	sim.add_solid(spinner);
 
-	InitWindow(900, 650, "hop physics — rotation (Phase 5 static + Phase 8 dynamic)");
+	InitWindow(900, 650, "hop physics — rotation (static orientation + dynamic spin)");
 	SetTargetFPS(60);
 	float cam_angle = 0.5f;
 
@@ -157,19 +156,19 @@ template <typename T> static void run(bool fixed_label) {
 		                  { 220, 70, 70, 90 }, RED);
 		draw_oriented_box(cor->get_position(), cor->get_orientation(), half,
 		                  { 70, 120, 220, 90 }, BLUE);
-		// Phase 8: the freely-spinning box — its orientation is integrated each step.
+		// The freely-spinning box — its orientation is integrated each step.
 		draw_oriented_box(spinner->get_position(), spinner->get_orientation(), half,
 		                  { 230, 200, 70, 110 }, GOLD);
 
 		EndMode3D();
 
-		DrawText("Phase 5 (static orientation in collision) + Phase 8 (dynamic spin)", 14, 12, 20, RAYWHITE);
+		DrawText("static orientation in collision + dynamic spin", 14, 12, 20, RAYWHITE);
 		DrawText(TextFormat("scalar: %s   |   gray=axis-aligned (rests z=0.50)", fixed_label ? "fixed16" : "float"),
 		         14, 38, 16, LIGHTGRAY);
 		DrawText(TextFormat("red 45 deg balances on edge: center z=%.3f (AABB would be 0.500)",
 		                    (double)hop::scalar_traits<T>::to_float(dia->get_position().z)),
 		         14, 58, 16, (Color){ 235, 120, 120, 255 });
-		DrawText("gold box: free spin under angular integration (no collision response yet - Phase 9)",
+		DrawText("gold box: free spin under angular integration (collision off)",
 		         14, 78, 16, (Color){ 220, 190, 90, 255 });
 		EndDrawing();
 	}

@@ -51,18 +51,18 @@
 //   - On a limited corpse it is quieter (~1 rad/s) but does not stop, because a limb pinned
 //     under the torso against the floor sits OUTSIDE its cone and physically cannot get
 //     back in. The velocity-level recovery fires every tick, gets refused by the contact in
-//     the way, and fires again. Phase 13 recorded this ("a settled corpse carries real
+//     the way, and fires again. This is inherent to limits ("a settled corpse carries real
 //     residual violation and always will"); manifolds do not touch it.
 //
 // So Table 3's asleep column reads 0/N — whole-corpse sleep needs all 21 — while ms/tick
-// REST has fallen BELOW ms/tick fall, which is the number that actually proves the phase:
+// REST has fallen BELOW ms/tick fall, which is the number that actually proves it out:
 // most bones now sleep and stop being solved. Whole-corpse sleep is a joint problem, and
 // the game accordingly keeps its own displacement estimator as the fallback for the corpses
 // that never satisfy hop.
 //
 // ── TABLE 4: the corpse keeps its shape ─────────────────────────────────────
 //
-// Phase 13, and the reason there is a Phase 13. A pin is a ball-socket: it constrains
+// This is the reason angular limits exist at all. A pin is a ball-socket: it constrains
 // POSITION and says nothing whatever about relative orientation, so a pin-only corpse's
 // twenty joints are free 360-degree swivels and a neck folded to the knees satisfies every
 // constraint in the system. Table 1 can read 6 mm of joint error while the body holding to
@@ -87,7 +87,7 @@
 // corner-lever spin kept every body awake and every contact being solved forever. With
 // manifolds the inversion is the proof: resting is now CHEAPER than falling, because most
 // bones genuinely sleep and stop being solved at all. Contact rows went up ~4x on the way
-// down and the falling column barely moved, which is the trade the phase was after.
+// down and the falling column barely moved, which is the trade manifolds were after.
 
 #include <chrono>
 #include <cmath>
@@ -181,7 +181,7 @@ struct ragdoll {
 };
 
 // One corpse, dropped in at `origin` with every bone carrying `launch`. `limited` builds
-// the Phase 13 corpse: the same twenty pins, each with a cone and a twist span on it.
+// the limited corpse: the same twenty pins, each with a cone and a twist span on it.
 ragdoll build(simulator<T> & sim, const vec3<T> & origin, const vec3<T> & launch,
               bool limited = false) {
 	ragdoll r;
@@ -445,7 +445,7 @@ int main() {
 			bool slept = false;
 			const float spin = resting_box_spin(half, tilt, &slept);
 			printf("    %10.3f  %10.2f  %12.4f  %7s\n", half, tilt, spin, slept ? "yes" : "NO");
-			// THE headline of the phase. A tilted box used to turn at 5 rad/s forever;
+			// THE headline result for manifolds. A tilted box used to turn at 5 rad/s forever;
 			// with a manifold under it there is nothing for gravity to lever against and
 			// it comes to rest like the axis-aligned one always did. A regression here
 			// means the clip stopped producing more than one point.
@@ -583,7 +583,7 @@ int main() {
 	// And it has to STOP. A corpse still crawling seconds after it lands reads as alive,
 	// and it is also 21 bodies still on the physics bill. Nothing ever comes fully to rest
 	// — every bone balances on a box corner that hands it a few rad/s a tick, which is not
-	// this phase's to fix — so the bar is the pin-only corpse beside it: adding limits must
+	// limits' to fix — so the bar is the pin-only corpse beside it: adding limits must
 	// not add motion. It did once. A limit with a position pass drove a corpse across the
 	// floor at 0.20 m per half-second against this 0.035 m, and two corpses in twelve ever
 	// came to rest; that pass is gone and this is the test that keeps it gone.
@@ -648,7 +648,7 @@ int main() {
 			}
 			// Whole corpses do not sleep — Table 2's header says why, and it is the
 			// joints — but most of their BONES must, or the manifold is not doing its
-			// job. Before the phase this was 0 of 168, every run.
+			// job. With one contact per partner this was 0 of 168, every run.
 			if (sleeping_bones * 3 < total_bones) {
 				printf("  FAIL: only %d of %d bones asleep at rest\n", sleeping_bones, total_bones);
 				ok = false;

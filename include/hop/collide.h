@@ -1899,7 +1899,7 @@ inline int manifold_for_solids(contact_point<T> * out, int max_out, const collis
 	// geometry, where the manifold is an unambiguous win. Holding a multi-point contact
 	// between two free bodies steady wants the solver to carry its load split across
 	// ticks — warm-started impulse application, or a block solve for the manifold — and
-	// that is a phase of its own. tests/test_manifold.cpp reports the stack rather than
+	// that is a project of its own. tests/test_manifold.cpp reports the stack rather than
 	// asserting on it, so the day it is fixed the number moves in plain sight.
 
 	const bool flip = s2->get_solve_id() < s1->get_solve_id();
@@ -2454,8 +2454,8 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// world rotation R1 = orientation·local_rotation we must rotate the support
 			// query in (R1ᵀ·−n) and the result back (R1·support), and rotate lp1 by the
 			// solid orientation. The identity case is bit-identical to the plain offset.
-			// (Correct impact feeds the Phase 6/9 lever arm; was previously un-rotated
-			// for oriented GJK pairs too — fixed here in one place.)
+			// (Correct impact feeds the contact solver's lever arm; the oriented GJK
+			// pairs need the same rotation — handled here in one place.)
 			// A contact point taken from s1's support along -n is degenerate whenever the
 			// contact lies on a FACE: the support direction is perpendicular to that face's
 			// own axes, so the tangential position is unrecoverable and the point collapses
