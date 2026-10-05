@@ -133,6 +133,9 @@ inline constexpr int blocking_bit(int contents) {
 	return (contents >= 0 || contents < -30) ? 1 : (1 << (-contents));
 }
 inline constexpr int BLOCK_SOLID = blocking_bit(hop_bsp::CONTENTS_SOLID);
+// Every bit blocking_bit can produce for a real contents value (-1..-15). Bit 0 is its
+// marker for a corrupt value, and must never end up in a mask of places a mover may be.
+inline constexpr int CONTENTS_BITS = 0xFFFE;
 
 struct hull_trace {
 	double fraction = 1.0;
@@ -140,6 +143,26 @@ struct hull_trace {
 	double normal[3] = { 0, 0, 0 };
 	bool allsolid = true;  // every point along the trace was inside blocking contents
 	bool hit = false;      // fraction < 1 and `normal` is meaningful
+	// Where a segment that STARTED in blocking contents left them again — the
+	// solid->empty crossing, the mirror of the empty->solid one `hit` describes.
+	//
+	// Quake has no use for it, so its walk steps over the crossing without a glance:
+	// the far side is non-blocking, so it just recurses on. Everything needed was
+	// already in hand at that moment, which is why recording it costs one branch.
+	//
+	// Only the FIRST exit is kept, and only when the start was inside solid — a
+	// segment that begins in open air sets `exited` false however many brushes it
+	// crosses, because leaving a brush it entered mid-flight is what `hit` and a
+	// second trace are for.
+	// No exit_point: it is the segment at `exit_fraction` by construction, and this struct is
+	// built on every sweep the movement kernel runs.
+	bool exited = false;        // exit_* are meaningful
+	double exit_fraction = 1.0;
+	// Faces OUT of the solid, i.e. roughly along the direction of travel — the
+	// opposite convention to `normal`, which faces back against it. Deliberate: an
+	// impact normal is what you bounce off, an exit normal is what the surface looks
+	// like from the side you emerge on, which is what an exit decal or puff wants.
+	double exit_normal[3] = { 0, 0, 0 };
 };
 
 // Signed distance of `p` from a plane. Solid is the back side (d < 0).
@@ -426,8 +449,21 @@ inline bool recursive_hull_check(const hull &h, int num, double p1f, double p2f,
 		return false;
 
 	if ((blocking & blocking_bit(
-	         hull_point_contents_biased(h, h.child(num, side ^ 1), mid, skin.bias))) == 0)
+	         hull_point_contents_biased(h, h.child(num, side ^ 1), mid, skin.bias))) == 0) {
+		// The far side is open and everything walked so far was solid: this plane is
+		// where the segment gets OUT. `tr.allsolid` is the test for "still inside what
+		// we started in" — it is cleared by the first non-blocking leaf, and the
+		// near-side recursion above has already visited this split's leaves, so it is
+		// true here only if the start was buried and has stayed buried until now.
+		if (tr.allsolid && !tr.exited) {
+			tr.exited = true;
+			tr.exit_fraction = midf;
+			// Out of the solid, so the opposite sign to the impact normal below.
+			const double s = (side == 0) ? -1.0 : 1.0;
+			for (int i = 0; i < 3; ++i) tr.exit_normal[i] = pl.normal[i] * s;
+		}
 		return recursive_hull_check(h, h.child(num, side ^ 1), midf, p2f, mid, p2, blocking, tr, skin);
+	}
 
 	if (tr.allsolid) return false;  // never got out of the solid area
 
@@ -553,21 +589,65 @@ inline hull_trace hull_sweep_off_surface(const hull &h, const double start[3],
 // Sweeping outward from `p` instead would start inside solid — Quake's startsolid,
 // which reports no surface and no distance, and is the whole reason a point already
 // embedded has to be handled separately in the first place.
+// How far `p` has to travel along `dir` to stop being inside solid — the distance to the
+// FIRST free space that way, within `limit`.
+//
+// It is measured by sweeping OUT from p with the blocking set inverted, so what stops the
+// ordinary hull walk is free space rather than solid. Reading it off a sweep that runs the
+// other way — from the far end of the budget back toward p, which is how this began, since
+// a forward trace out of solid is the one case Quake's walk has nothing to say about — gets
+// the wrong surface whenever a SECOND solid stands between p and the end of the budget: the
+// backward sweep stops on the far side of the outermost one and calls the whole span the
+// depth. ww_2fort's lifts are the case that showed it. A player standing on the deck has the
+// hull of the ropes above them, a clear 33 units over their head, and the moment the rising
+// deck put them one centimetre inside, the way out measured 48 units instead of one — so
+// move_and_slide's recovery launched them a metre and a quarter into the air, and the lift
+// read that as a rider it could not lift clear and reversed.
+//
+// Shrunk by STUCK_SLOP for the same reason hull_push_out is (see there): a candidate that
+// lands ON a floor is a place the mover can be, and rejecting it leaves only candidates that
+// exit the model completely.
+// How far along `dir` the solid ends, or -1 when it does not within `limit`.
+//
+// `verified`, when given, reports whether the far end was confirmed to be open air. One
+// measurement answers both: a caller that wants certainty uses the flag, and
+// hull_push_out prefers a confirmed exit while still accepting an unconfirmed one over
+// its leaf-plane fallback. Measuring twice -- once unbiased, once against the hull shrunk
+// by STUCK_SLOP -- was tried, and the second mechanism is plane TRANSLATION, which this
+// file warns is not an inward shrink (see hull_point_contents_biased) and so can diverge
+// from the first on a non-axial plane.
 inline double hull_inside_distance(const hull &h, int root, const double p[3],
-                                   const double dir[3], double limit, int blocking) {
+                                   const double dir[3], double limit, int blocking,
+                                   bool *verified = nullptr) {
+	if (verified) *verified = false;
 	const double away[3] = {
 		p[0] + dir[0] * limit, p[1] + dir[1] * limit, p[2] + dir[2] * limit
 	};
-	// Shrunk by STUCK_SLOP for the same reason hull_push_out is (see there): a
-	// candidate that lands ON a floor is a place the mover can be, and rejecting it
-	// leaves only candidates that exit the model completely.
-	if ((blocking & blocking_bit(hull_point_contents_biased(h, root, away, -STUCK_SLOP))) != 0)
-		return -1.0;
-	hull_trace tr = hull_sweep_stuck_band(h, away, p, blocking);
-	if (!tr.hit) return -1.0;
-	// The crosspoint sits DIST_EPSILON on the empty side, so the surface is that much
-	// further in than where the trace stopped.
-	const double d = limit * (1.0 - tr.fraction) - DIST_EPSILON;
+	hull_trace tr = hull_sweep(h, p, away, ~blocking & CONTENTS_BITS);
+	if (!tr.hit) return -1.0;  // nothing but solid this way, as far as the budget reaches
+	// The crosspoint sits DIST_EPSILON on the near side of the plane it stopped at, which
+	// here is the inside, so the free space starts that much further out.
+	const double d_true = limit * tr.fraction + DIST_EPSILON;
+
+	// Confirm it really is open air there. The sweep can stop at a plane the point is
+	// already sitting ON: a contents descent sends distance zero to the FRONT child, so at
+	// a brush seam the floor's expanded top plane reads as empty at exactly its own height,
+	// and a probe heading DOWN off that seam looks like it reaches free space a hundredth
+	// of a unit away when it is in fact going deeper into the floor. Being the shortest,
+	// that phantom then wins the search -- which is how the push-out came to point into the
+	// floor a mover was standing on.
+	const double at[3] = {
+		p[0] + dir[0] * d_true, p[1] + dir[1] * d_true, p[2] + dir[2] * d_true
+	};
+	if (verified)
+		*verified = (blocking & blocking_bit(hull_point_contents(h, root, at))) == 0;
+
+	// Less the band: the geometry is probed as it really is, and the mover is left
+	// STUCK_SLOP inside rather than resolved to exactly zero overlap -- deliberately, so a
+	// body resting on a surface does not flip between stuck and free (see STUCK_SLOP, and
+	// test_solid_starting_stuck_reports_overlap, which pins the reported depth at the true
+	// penetration less the band).
+	const double d = d_true - STUCK_SLOP;
 	return d > 0.0 ? d : 0.0;
 }
 
@@ -622,19 +702,31 @@ inline bool hull_push_out(const hull &h, int root, const double p[3], int blocki
 	double best = 0.0;
 	double best_dir[3] = { 0, 0, 0 };
 	bool found = false;
+	// Two answers per axis, kept apart: one whose far end was confirmed to be open air, and
+	// one that was not. A confirmed exit always wins; an unconfirmed one is still better than
+	// the leaf plane below, which for a mover wedged where a wall meets a floor is the seam at
+	// distance nothing and pushes it UP rather than out.
+	double loose_best = 0.0;
+	double loose_dir[3] = { 0, 0, 0 };
+	bool loose_found = false;
 	auto consider = [&](const double dir[3], double limit) {
-		const double d = hull_inside_distance(h, root, p, dir, limit, blocking);
+		bool verified = false;
+		const double d = hull_inside_distance(h, root, p, dir, limit, blocking, &verified);
 		if (d < 0.0) return;
 		for (int i = 0; i < 3; ++i) {
 			const double mag = dir[i] < 0 ? -dir[i] : dir[i];
 			if (mag * d > extent[i]) return;  // overruns the mover's own size on this axis
 		}
-		if (!found || d < best) {
-			best = d;
-			best_dir[0] = dir[0];
-			best_dir[1] = dir[1];
-			best_dir[2] = dir[2];
-			found = true;
+		if (verified) {
+			if (!found || d < best) {
+				best = d;
+				best_dir[0] = dir[0]; best_dir[1] = dir[1]; best_dir[2] = dir[2];
+				found = true;
+			}
+		} else if (!loose_found || d < loose_best) {
+			loose_best = d;
+			loose_dir[0] = dir[0]; loose_dir[1] = dir[1]; loose_dir[2] = dir[2];
+			loose_found = true;
 		}
 	};
 
@@ -642,6 +734,15 @@ inline bool hull_push_out(const hull &h, int root, const double p[3], int blocki
 		{ 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
 	};
 	for (int i = 0; i < 6; ++i) consider(AXES[i], extent[i / 2]);
+
+	// Unconfirmed is what this returned before the confirmation existed, so falling back to
+	// it keeps every input that used to get an answer getting the same one: the only cases
+	// that change are those where the old answer failed its own verification.
+	if (!found && loose_found) {
+		best = loose_best;
+		best_dir[0] = loose_dir[0]; best_dir[1] = loose_dir[1]; best_dir[2] = loose_dir[2];
+		found = true;
+	}
 
 	if (found) {
 		normal[0] = best_dir[0];
@@ -754,14 +855,77 @@ public:
 
 		// A ray is a point mover: hull 0, no offset.
 		hopbsp::hull_trace ht = hopbsp::hull_sweep(hulls_[0], s, e, blocking_);
-		if (!ht.hit || (T)ht.fraction >= result.time) return;
-		if (hopbsp::stopped_against_sky(hulls_[0], ht, blocking_)) return;
 
-		result.time = (T)ht.fraction;
-		hop::vec3<T> hit_local = gs_to_godot(ht.endpos[0], ht.endpos[1], ht.endpos[2]);
-		hop::vec3<T> n_local = gs_dir_to_godot(ht.normal[0], ht.normal[1], ht.normal[2]);
-		to_world(hit_local, n_local, position, orientation, result.point, result.normal);
-		result.impact = result.point;
+		// What it crossed wins, when it crossed anything -- but the report says whether the
+		// segment also began buried, instead of making the caller infer it from the time.
+		// For a BSP both are routinely true: one solid holds the whole map, so a ray from
+		// inside a wall that goes on to hit a farther brush has a real crossing to report
+		// AND a real "you started in solid" to declare.
+		if (ht.hit && (T)ht.fraction < result.time
+				&& !hopbsp::stopped_against_sky(hulls_[0], ht, blocking_)) {
+			// Not `allsolid || exited`: the walk returns before setting `hit` if it never
+			// left solid, so allsolid is false wherever this branch runs.
+			result.started_inside = ht.exited;
+			result.time = (T)ht.fraction;
+			hop::vec3<T> hit_local = gs_to_godot(ht.endpos[0], ht.endpos[1], ht.endpos[2]);
+			hop::vec3<T> hn_local = gs_dir_to_godot(ht.normal[0], ht.normal[1], ht.normal[2]);
+			to_world(hit_local, hn_local, position, orientation, result.point, result.normal);
+			result.impact = result.point;
+			return;
+		}
+
+		// Nothing crossed. A segment that STARTED inside blocking contents reports the
+		// overlap instead -- which is the rule the primitives in hop::collide.h follow:
+		// report the nearest thing the segment meets. From inside a CONVEX shape nothing is
+		// nearer than the overlap at t 0, which is why a box or a sphere reports it
+		// unconditionally. A BSP is not convex, so a ray starting in one brush may cross a
+		// second further along, and that crossing is nearer than nothing at all.
+		//
+		// Reporting the overlap INSTEAD of the crossing was tried and is wrong, measurably:
+		// one `collision` carries one contact, and the whole world arrives as a single
+		// traceable (hop_physics_server replaces the carrier shapes with one), so the
+		// overlap and the farther brush are the same shape's answer and something has to
+		// choose. Choosing the overlap loses the brush outright, because
+		// HopDirectSpaceState::_intersect_ray drops a report of t <= 0 unless the caller
+		// passed hit_from_inside. test_ray_from_inside_still_reports_a_farther_brush is
+		// that case: two slabs with a gap, a ray starting in the first.
+		//
+		// Quake reports neither: its walk answers a start in solid with `allsolid` and no
+		// impact plane, and `allsolid` never reached the caller, so "I am buried" and "the
+		// path is clear" were one answer. That is what had intersect_point -- whose whole job
+		// is "is this point inside something" -- calling every point inside world geometry
+		// empty, and what let a siege monster placed inside ww_2fort's spawn-room wall be
+		// tested, cleared, and dropped through to the room below.
+		//
+		// The sweep has already answered whether the start was buried, so the descent below
+		// runs only when an overlap is actually going to be reported: `allsolid` means it
+		// never left solid, `exited` means it started there and got out (that branch only
+		// fires while allsolid). A ray starting in open air pays nothing for any of this.
+		if (!(ht.allsolid || ht.exited) || T {} >= result.time)
+			return;
+
+		// The overlap carries the nearest bounding plane of the containing leaf, as a depth
+		// and an outward normal. A BSP leaf is convex, so that is the same answer
+		// hop::trace_convex_solid gives from inside a convex_solid. The warning on
+		// hull_nearest_leaf_plane is about a different job -- ejecting a mover with extent,
+		// where hull_push_out's verified axis probes are wanted instead.
+		//
+		// Hull 0 is the point hull, where sky is not blocking contents, so a start inside a
+		// sky brush reads as empty and wants no stopped_against_sky of its own.
+		double start_n[3], start_depth = 0;
+		if (!hopbsp::hull_nearest_leaf_plane(hulls_[0], hulls_[0].root, s, blocking_,
+				start_n, start_depth))
+			return;
+		result.time = T {};
+		result.started_inside = true;
+		result.depth = (T)(start_depth * scale_);
+		// Only the normal needs carrying out of the traceable's frame; the contact point is
+		// the query point itself, exactly, rather than a round trip through GoldSrc units.
+		result.normal = to_world_dir(gs_dir_to_godot(start_n[0], start_n[1], start_n[2]),
+				orientation);
+		result.point.set(seg.origin);
+		result.impact.set(seg.origin);
+		return;
 	}
 
 	void trace_solid(hop::collision<T> &result,
@@ -1192,6 +1356,17 @@ private:
 		}
 	}
 
+	// Just the rotation half of to_world, for a report whose contact point is the query
+	// point itself and so needs no round trip through the traceable's frame.
+	hop::vec3<T> to_world_dir(const hop::vec3<T> &n_local, const hop::mat3<T> &orientation) const {
+		static const hop::mat3<T> identity;
+		if (orientation == identity)
+			return n_local;
+		hop::vec3<T> out;
+		hop::mul(out, orientation, n_local);
+		return out;
+	}
+
 	void to_world(const hop::vec3<T> &p_local, const hop::vec3<T> &n_local,
 	              const hop::vec3<T> &position, const hop::mat3<T> &orientation,
 	              hop::vec3<T> &p_out, hop::vec3<T> &n_out) const {
@@ -1199,11 +1374,10 @@ private:
 		if (orientation != identity) {
 			hop::mul(p_out, orientation, p_local);
 			hop::add(p_out, position);
-			hop::mul(n_out, orientation, n_local);
 		} else {
 			hop::add(p_out, p_local, position);
-			n_out = n_local;
 		}
+		n_out = to_world_dir(n_local, orientation);
 	}
 
 	// The mover's shape, expressed in this model's GoldSrc frame.
@@ -1231,12 +1405,23 @@ private:
 			hop::mul(rel, Rt, Rm);
 			Rm = rel;
 		}
+		// Then the COLLIDER's own turn, which is where the game's rotations actually
+		// live: Godot authors a capsule along Y and a box axis-aligned, and puts the
+		// attitude on the shape as local_rotation (hop_shape_data.cpp). Folded in here,
+		// once, `Rm` is the mover's axes full stop and every case below reads it the
+		// same way — hop_triangle_collision.h composes the same product for the same
+		// reason. A shape with no turn of its own multiplies through exactly.
+		if (const hop::shape<T> *only = single_centred_shape(s)) {
+			hop::mat3<T> full;
+			hop::mul(full, Rm, only->get_local_rotation());
+			Rm = full;
+		}
 
 		// A capsule has to be carried at EVERY attitude, including square-on: traced as
 		// its bounding box it is a brick, and a brick has corners a capsule does not.
 		// A box square-on to the hull is exactly what the plain AABB path already
 		// traces, so it stays on it and stays bit-identical.
-		const bool round = single_centred_capsule(s, Rm, b);
+		const bool round = single_centred_capsule(s, Rm, b) || single_centred_sphere(s, b);
 		if (!round && Rm == identity) return b;
 
 		if (!round) {
@@ -1272,15 +1457,30 @@ private:
 		return b;
 	}
 
-	// Half-extents of a solid that IS one centred, unrotated-in-its-own-frame box, in
-	// GoldSrc axis order. False for anything else.
-	bool single_centred_box_hext(hop::solid<T> *s, double hext[3]) const {
+	// The one shape a solid is made of, if it is made of exactly one and that one sits on
+	// the body's own origin. Everything the hull can carry exactly is of this form: an
+	// expanded hull holds ONE symmetric offset per plane, which an off-centre shape (or a
+	// second shape) has no way to be. The three cases below all start here.
+	hop::shape<T> *single_centred_shape(hop::solid<T> *s, hop::shape_type want) const {
+		hop::shape<T> *sh = single_centred_shape(s);
+		return (sh != nullptr && sh->get_type() == want) ? sh : nullptr;
+	}
+
+	hop::shape<T> *single_centred_shape(hop::solid<T> *s) const {
 		const auto &shapes = s->get_shapes();
-		if (shapes.size() != 1) return false;
+		if (shapes.size() != 1) return nullptr;
 		hop::shape<T> *sh = shapes[0].get();
-		if (sh->get_type() != hop::shape_type::box) return false;
 		const hop::vec3<T> &lp = sh->get_local_position();
-		if (!(lp.x == T {} && lp.y == T {} && lp.z == T {})) return false;
+		if (!(lp.x == T {} && lp.y == T {} && lp.z == T {})) return nullptr;
+		return sh;
+	}
+
+	// Half-extents of a solid that IS one centred box, in GoldSrc axis order. False for
+	// anything else. The caller pairs these with Rm's columns, which carry the box's own
+	// rotation, so the extents stay in the shape's frame where they are authored.
+	bool single_centred_box_hext(hop::solid<T> *s, double hext[3]) const {
+		hop::shape<T> *sh = single_centred_shape(s, hop::shape_type::box);
+		if (sh == nullptr) return false;
 		const hop::aa_box<T> &box = sh->get_box();
 		hop::vec3<T> centre;
 		hop::add(centre, box.mins, box.maxs);
@@ -1288,6 +1488,24 @@ private:
 		hext[0] = 0.5 * (double)(box.maxs.x - box.mins.x) * inv_scale_;
 		hext[1] = 0.5 * (double)(box.maxs.z - box.mins.z) * inv_scale_;
 		hext[2] = 0.5 * (double)(box.maxs.y - box.mins.y) * inv_scale_;
+		return true;
+	}
+
+	// A solid that IS one centred sphere: no spine at all, the whole shape in `radius`.
+	// A sphere is the one mover a hull can hold exactly without knowing which way it is
+	// turned, so this takes no basis and cares about no rotation — every plane is pushed
+	// out by the same radius. Traced as its bounding box instead (which is what it got
+	// before), a ball rests on the box's corner reach: exact on a level floor, and a
+	// whole 58% of its radius high on a 45-degree slope.
+	bool single_centred_sphere(hop::solid<T> *s, hopbsp::mover_basis &b) const {
+		hop::shape<T> *sh = single_centred_shape(s, hop::shape_type::sphere);
+		if (sh == nullptr) return false;
+		const hop::sphere<T> &sp = sh->get_sphere();
+		if (!(sp.origin.x == T {} && sp.origin.y == T {} && sp.origin.z == T {})) return false;
+		if (sp.radius <= T {}) return false;
+		// No axes and no extents to write: mover_basis is born with the identity and
+		// zeroes, and a ball is the same reach whichever way it is turned.
+		b.radius = (double)sp.radius * inv_scale_;
 		return true;
 	}
 
@@ -1301,13 +1519,8 @@ private:
 	// exactly as it did before while the other axis's test passes.
 	bool single_centred_capsule(hop::solid<T> *s, const hop::mat3<T> &Rm,
 	                            hopbsp::mover_basis &b) const {
-		const auto &shapes = s->get_shapes();
-		if (shapes.size() != 1) return false;
-		hop::shape<T> *sh = shapes[0].get();
-		if (sh->get_type() != hop::shape_type::capsule) return false;
-		const hop::vec3<T> &lp = sh->get_local_position();
-		if (!(lp.x == T {} && lp.y == T {} && lp.z == T {})) return false;
-
+		hop::shape<T> *sh = single_centred_shape(s, hop::shape_type::capsule);
+		if (sh == nullptr) return false;
 		const hop::capsule<T> &c = sh->get_capsule();
 		hop::vec3<T> spine_half(c.direction);
 		hop::mul(spine_half, hop::scalar_traits<T>::half());

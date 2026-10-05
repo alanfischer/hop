@@ -52,6 +52,23 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 		if (diy < depth) { depth = diy; face_normal.set(neg_y); }
 		if (day < depth) { depth = day; face_normal.set(pos_y); }
 
+		// An overlapping mover that is already heading OUT through the face nearest it
+		// is not reported. This looks like an inconsistency next to convex_solid, which
+		// reports regardless, and it is load-bearing: test_solid reaches here for the
+		// box-vs-box pair (via the Minkowski sum below), so a body separating from a
+		// surface it overlaps would otherwise be handed to the solver as
+		// penetration-at-frame-start and pushed along the contact normal while it was
+		// already leaving. Removing it on consistency grounds wedged riders into the
+		// walls of ww_golem's rotating cockpit and lifted them.
+		//
+		// A ZERO-length segment skips the test, so it costs point queries nothing --
+		// which is the only thing intersect_point ever needed from this branch.
+		// Set before the guard below: the flag says the segment BEGAN here, which is true
+		// whichever way it is now heading. Putting it after made it mean "began here and I
+		// chose to report it", which is not what collision::started_inside documents and
+		// would silently mislead a caller using it as a containment test.
+		c.started_inside = true;
+
 		if (length_squared(seg.direction) > T {} && dot(seg.direction, face_normal) >= T {})
 			return;
 
@@ -67,7 +84,6 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 template <typename T>
 void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sph, T epsilon) {
 	using tr = scalar_traits<T>;
-	const T one = tr::one();
 	if (test_inside(sph, seg.origin)) {
 		vec3<T> n;
 		n.set(seg.origin);
@@ -78,13 +94,16 @@ void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sp
 			normalize(n, seg.direction);
 			neg(n);
 		}
+		c.started_inside = true;   // began here either way -- see trace_aa_box
+		// Separating movers are not reported -- see trace_aa_box. A zero-length segment
+		// has dot() == 0 and so still reports, which is what a point query needs.
 		if (dot(n, seg.direction) <= epsilon) {
 			c.time = T {};
 			c.depth = sph.radius - dist;
 			c.point.set(seg.origin);
 			c.normal.set(n);
 		} else {
-			c.time = one;
+			c.time = tr::one();
 		}
 	} else {
 		c.time = find_intersection(seg, sph, c.point, c.normal);
@@ -273,6 +292,7 @@ void trace_convex_solid(collision<T> & c, const segment<T> & seg, const convex_s
 		c.depth = -closest_dist;
 		c.point.set(seg.origin);
 		c.normal.set(cs.planes[closest_plane].normal);
+		c.started_inside = true;
 		return;
 	}
 
@@ -2003,6 +2023,11 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 	auto & shapes = s->get_shapes();
 	int n = static_cast<int>(shapes.size());
 	bool modify_scope = false;
+	// Accumulated across this solid's shapes -- the segment began inside the SOLID if it
+	// began inside any of them. Held locally rather than read back out of `result`: callers
+	// reuse one collision across solids and restore only `time`, so ORing the incoming value
+	// made the flag sticky from one solid to the next.
+	bool began_inside = false;
 
 	const mat3<T> identity_m;
 	// Loop-invariant: whether the solid itself turns. Hoisted so the common all-identity
@@ -2051,11 +2076,12 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 		// Traceables take the world segment plus their frame, so they need no carry-back.
 		bool in_shape_frame = true;
 
-		// Each primitive returns a miss as time == one, EXCEPT trace_aa_box's
-		// inside-and-leaving early return, which writes nothing at all. `col` is reused
-		// across shapes, so without this a previous shape's (already world-space) hit
-		// would survive into the carry-back below and be transformed a second time.
+		// Each primitive returns a miss as time == one, but a TRACEABLE may write nothing
+		// at all when it misses. `col` is reused across shapes, so without this reset a
+		// previous shape's (already world-space) hit would survive into the carry-back
+		// below and be transformed a second time.
 		col.time = one;
+		col.started_inside = false;
 
 		switch (sh->get_type()) {
 		case shape_type::box:
@@ -2100,7 +2126,9 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 		if (col.time == T {})
 			col.trigger_scope |= s->get_trigger_scope();
 
+		began_inside = began_inside || col.started_inside;
 		merge_intra_pair(result, col, epsilon, modify_scope);
+		result.started_inside = began_inside;
 	}
 }
 
