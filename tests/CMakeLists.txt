@@ -33,7 +33,7 @@ add_test(NAME test_simulator COMMAND test_simulator)
 
 # Contact manifolds, compiled twice: once at the shipping max_manifold_points and once
 # at 1. The parity build is the proof that the storage change is pure plumbing — at one
-# point per partner the engine has to behave exactly as it did before the phase.
+# point per partner the engine has to behave exactly as it does with no manifolds at all.
 add_executable(test_manifold test_manifold.cpp)
 target_link_libraries(test_manifold PRIVATE hop)
 add_test(NAME test_manifold COMMAND test_manifold)

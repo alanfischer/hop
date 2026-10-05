@@ -1,7 +1,7 @@
 // Contact manifolds: does a resting body get more than one contact point, and does that
 // make it stop?
 //
-// The bug this phase exists for is a box tilted three degrees on a floor turning at
+// The bug manifolds exist for is a box tilted three degrees on a floor turning at
 // several rad/s forever — see the header of examples/demo_ragdoll.cpp, whose control
 // table is the headline measurement. This file is the unit-level version: the clip
 // itself, the warm-start key, the reduction's determinism, and the shapes a manifold
@@ -9,7 +9,7 @@
 //
 // The whole file is compiled TWICE (see tests/CMakeLists.txt): once at the default
 // max_manifold_points = 4 and once at 1. At 1 the manifold machinery must disappear
-// entirely and leave the pre-phase behaviour — one contact per partner — which is the
+// entirely and leave the single-contact behaviour — one point per partner — which is the
 // parity claim the storage change was allowed to make.
 
 #include <cassert>
@@ -67,7 +67,7 @@ static int manifold_of(contact_point<T> * out, solid<T> * mover, solid<T> * floo
 // --- the clip -------------------------------------------------------------
 
 // A box resting flat on a floor is held at FOUR points, one under each corner of its
-// bottom face. This is the whole phase in one assertion: one point can only rock a box,
+// bottom face. This is the whole point in one assertion: one contact can only rock a box,
 // four level it.
 static void test_flat_box_reports_four_points() {
 	auto floor = make_floor();
@@ -233,7 +233,7 @@ static void test_a_tilted_box_sleeps() {
 	}
 	if (max_manifold_points == 1) {
 		// The parity build is allowed to keep the bug; what it must NOT do is behave
-		// differently from the engine before the phase landed.
+		// differently from an engine with no manifold support at all.
 		printf("  a_tilted_box_sleeps: parity build spins at %.3f rad/s (the bug, preserved)\n",
 		       worst_spin_after_landing);
 	assert(worst_spin_after_landing > 1.0 && "at one point the corner lever is still there");
@@ -248,7 +248,7 @@ static void test_a_tilted_box_sleeps() {
 
 // The warm-start contract. A body that is not moving must produce the SAME feature IDs
 // tick after tick, or its points trade accumulators and buzz — which looks exactly like
-// the bug this phase fixes.
+// the bug manifolds fix.
 static void test_feature_ids_are_stable_and_warm_start() {
 	world w;
 	auto box = make_box(0.1, 0.1, 0.1, v(0, 0.101, 0));
@@ -279,7 +279,7 @@ static void test_feature_ids_are_stable_and_warm_start() {
 	printf("  feature_ids_are_stable_and_warm_start ok (%d points)\n", (int)first.size());
 }
 
-// A pile of DYNAMIC bodies. This is the phase's known cost, and it reports rather than
+// A pile of DYNAMIC bodies. This is the known cost of manifolds, and it reports rather than
 // asserts, so the number is in plain sight and moves the day the solver can hold a
 // multi-point contact between two free bodies (see the limitation note in collide.h).
 //
@@ -321,21 +321,21 @@ static void test_a_dynamic_stack_is_a_known_limitation() {
 
 // Two dynamic boxes, one on the other, at the SHIPPING solver settings. This is the
 // shallow end of the stack limitation above, and it is the case shock propagation used to
-// knock over: with the phase running on the manifold's four rows the top box was off by a
-// fifth of a metre after 20 s (it toppled); left to the single-point contacts the phase is
-// meant for, it drifts a millimetre or so and stays a stack. The bottom box is not the
+// knock over: with shock propagation running on the manifold's four rows the top box was
+// off by a fifth of a metre after 20 s (it toppled); left to the single-point contacts it
+// is meant for, it drifts a millimetre or so and stays a stack. The bottom box is not the
 // story — it rests on static geometry, which test_a_box_on_static_geometry_settles_flat
 // covers far more thoroughly.
 static void test_two_dynamic_boxes_survive_the_shock_phase() {
 	world w;
-	assert(w.sim.get_shock_iterations() > 0 && "the phase this guards is on by default");
+	assert(w.sim.get_shock_iterations() > 0 && "shock propagation is on by default");
 	const auto boxes = settle_a_stack(w, 2);
 	const double off = std::fabs((double)boxes[1]->get_position().y - 0.3);
 	assert(off < 0.01 && "the top box is still on the bottom one after 20 s");
 	printf("  two_dynamic_boxes_survive_the_shock_phase ok (top box %.4f m off after 20 s)\n", off);
 }
 
-// A body resting on STATIC geometry — the case the phase exists for, and the one that has
+// A body resting on STATIC geometry — the case manifolds exist for, and the one that has
 // to be right. Four rows under it, settled flat, asleep, and no sign of the slop-band
 // tilt the dynamic stack above suffers from.
 static void test_a_box_on_static_geometry_settles_flat() {

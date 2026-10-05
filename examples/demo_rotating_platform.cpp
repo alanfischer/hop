@@ -1,5 +1,5 @@
 // demo_rotating_platform.cpp — Raylib visualization of hop's KINEMATIC ANGULAR
-// CARRY (Phase 6): a spinning platform drags the bodies resting on it, the way a
+// CARRY: a spinning platform drags the bodies resting on it, the way a
 // GoldSrc func_rotating carries its riders.
 //
 // A large infinite-mass platform spins about the vertical (Z) axis. Its orientation
@@ -8,7 +8,7 @@
 // contact solver biases each rider's relative velocity by ω×r at the contact point.
 // The dynamic riders sitting on top are therefore carried in a circle by friction —
 // no rider-side rotation code, just the surface-velocity bias. The riders also have
-// finite inertia, so the same friction that drags them also spins them up (Phase 9),
+// finite inertia, so the same friction that drags them also spins them up,
 // and an off-center stack tumbles (a fun secondary effect).
 //
 // Pass --fixed to use fixed16 arithmetic instead of float.
@@ -108,7 +108,7 @@ template <typename T> static void run(bool fixed_label) {
 	riders.push_back(add_rider(zero, tr::from_int(2)));
 	riders.push_back(add_rider(-tr::from_milli(1500), -tr::from_milli(1500)));
 
-	InitWindow(900, 650, "hop physics — Phase 6 kinematic angular carry");
+	InitWindow(900, 650, "hop physics — kinematic angular carry");
 	SetTargetFPS(60);
 	const T dt = tr::from_milli(16);
 	float cam_angle = 0.6f;
@@ -151,11 +151,11 @@ template <typename T> static void run(bool fixed_label) {
 
 		EndMode3D();
 
-		DrawText("Phase 6 — kinematic angular carry (a spinning platform carries its riders)", 14, 12, 20, RAYWHITE);
+		DrawText("kinematic angular carry (a spinning platform carries its riders)", 14, 12, 20, RAYWHITE);
 		DrawText(TextFormat("scalar: %s   |   platform spins about +Z; riders dragged around by friction (omega x r)",
 		                    fixed_label ? "fixed16" : "float"),
 		         14, 38, 16, LIGHTGRAY);
-		DrawText("riders also have inertia, so the same friction spins them up (Phase 9)", 14, 58, 16,
+		DrawText("riders also have inertia, so the same friction spins them up", 14, 58, 16,
 		         (Color){ 180, 200, 180, 255 });
 		EndDrawing();
 	}

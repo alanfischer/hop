@@ -545,7 +545,7 @@ template <typename T> static void test_gjk_solid_orientation(const char * label)
 	printf("OK\n");
 }
 
-// Oriented polytope×polytope (the Phase 5 CSO path). A unit-cube target rotated
+// Oriented polytope×polytope (the CSO path). A unit-cube target rotated
 // 45° about Z turns its +x face into a corner that reaches √2≈1.414 along x
 // (vs 1.0 unrotated), so an axis-aligned box mover swept in -x must stop EARLIER
 // against the rotated target than the unrotated one — proving orientation is

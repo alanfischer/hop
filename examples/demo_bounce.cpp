@@ -26,8 +26,8 @@ template <typename T> Vector3 to_raylib(const hop::vec3<T> & v) {
 	return { tr::to_float(v.x), tr::to_float(v.z), tr::to_float(v.y) };
 }
 
-// Draw a cube by its 8 orientation-transformed world corners (Phase 8/9: the free
-// box now spins, so DrawCube — which ignores rotation — would hide the tumble).
+// Draw a cube by its 8 orientation-transformed world corners (the free box spins,
+// so DrawCube — which ignores rotation — would hide the tumble).
 template <typename T>
 static void draw_oriented_cube(const hop::vec3<T> & pos, const hop::mat3<T> & R, T half, Color face, Color wire) {
 	Vector3 c[8];
@@ -152,7 +152,7 @@ template <typename T> static hop::convex_solid<T> make_octahedron(T r) {
 
 // Draw a regular octahedron of radius r, oriented by R at hop position pos. The 6
 // vertices are built in hop space (pos + R·(±r·axis)) and mapped to raylib, so the
-// body's Phase 8/9 spin is visible.
+// body's spin is visible.
 template <typename T>
 static void draw_octahedron(const hop::vec3<T> & pos, const hop::mat3<T> & R, T r, Color fill, Color wire) {
 	auto vert = [&](T x, T y, T z) {
@@ -336,7 +336,7 @@ template <typename T> void run() {
 	box_solid->add_shape(std::make_shared<hop::shape<T>>(hop::aa_box<T>(
 	    hop::vec3<T>(-tr::half(), -tr::half(), -tr::half()),
 	    hop::vec3<T>(tr::half(), tr::half(), tr::half()))));
-	// Phase 8/9: finite inertia (unit box, m=1 → I = m/12·(1²+1²) = 1/6 per axis) so
+	// Finite inertia (unit box, m=1 → I = m/12·(1²+1²) = 1/6 per axis) so
 	// off-center wall/floor hits torque it and it tumbles via angular impulse response.
 	box_solid->set_inertia(hop::vec3<T>(tr::from_milli(167), tr::from_milli(167), tr::from_milli(167)));
 	box_solid->set_position(hop::vec3<T>(tr::from_int(1), zero, tr::from_int(4)));
@@ -352,7 +352,7 @@ template <typename T> void run() {
 	// its middle rather than one end: from local z=−0.75 to +0.75.
 	hop::capsule<T> pendulum_shape(hop::vec3<T>(zero, zero, -tr::from_milli(750)), hop::vec3<T>(zero, zero, tr::from_milli(1500)), tr::from_milli(400));
 	pendulum_solid->add_shape(std::make_shared<hop::shape<T>>(pendulum_shape));
-	// Phase 9: finite inertia (anisotropic — easy spin about the spine = local z).
+	// Finite inertia (anisotropic — easy spin about the spine = local z).
 	pendulum_solid->set_inertia(hop::vec3<T>(tr::half(), tr::half(), tr::from_milli(100)));
 	pendulum_solid->set_position(hop::vec3<T>(tr::from_int(2), zero, tr::from_int(3)));
 	pendulum_solid->set_velocity(hop::vec3<T>(-tr::from_int(2), tr::from_int(1), zero));
@@ -376,7 +376,7 @@ template <typename T> void run() {
 	// Spine centered on the solid origin (= COM), so it spins about its middle.
 	hop::capsule<T> leash_shape(hop::vec3<T>(-tr::from_milli(900), zero, zero), hop::vec3<T>(tr::from_milli(1800), zero, zero), tr::from_milli(300));
 	leash_capsule->add_shape(std::make_shared<hop::shape<T>>(leash_shape));
-	// Phase 9: finite inertia (anisotropic — easy spin about the spine = local x).
+	// Finite inertia (anisotropic — easy spin about the spine = local x).
 	leash_capsule->set_inertia(hop::vec3<T>(tr::from_milli(100), tr::half(), tr::half()));
 	leash_capsule->set_position(hop::vec3<T>(-tr::from_int(2), -tr::from_int(1), tr::from_int(2)));
 	leash_capsule->set_velocity(hop::vec3<T>(tr::one(), tr::from_int(2), tr::from_int(3)));
@@ -398,7 +398,7 @@ template <typename T> void run() {
 	auto octa_solid = std::make_shared<hop::solid<T>>();
 	set_common(octa_solid);
 	octa_solid->add_shape(std::make_shared<hop::shape<T>>(make_octahedron<T>(tr::from_milli(500))));
-	octa_solid->set_inertia(hop::vec3<T>(tr::from_milli(100), tr::from_milli(100), tr::from_milli(100))); // Phase 9: tumbles off hits
+	octa_solid->set_inertia(hop::vec3<T>(tr::from_milli(100), tr::from_milli(100), tr::from_milli(100))); // finite inertia: tumbles off hits
 	octa_solid->set_position(hop::vec3<T>(-tr::from_int(1), tr::from_int(1), tr::from_int(5)));
 	octa_solid->set_velocity(hop::vec3<T>(tr::from_int(2), -tr::one(), zero));
 	sim.add_solid(octa_solid);
@@ -521,7 +521,7 @@ template <typename T> void run() {
 
 		Color tint_in = YELLOW;
 
-		// Box — oriented draw so its Phase 8/9 tumble is visible.
+		// Box — oriented draw so its tumble is visible.
 		{
 			Color box_face = box_in_zone ? tint_in : (Color){ 230, 41, 55, 160 };
 			draw_oriented_cube(box_solid->get_position(), box_solid->get_orientation(), tr::half(), box_face, MAROON);
