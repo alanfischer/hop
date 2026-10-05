@@ -63,6 +63,12 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 		//
 		// A ZERO-length segment skips the test, so it costs point queries nothing --
 		// which is the only thing intersect_point ever needed from this branch.
+		// Set before the guard below: the flag says the segment BEGAN here, which is true
+		// whichever way it is now heading. Putting it after made it mean "began here and I
+		// chose to report it", which is not what collision::started_inside documents and
+		// would silently mislead a caller using it as a containment test.
+		c.started_inside = true;
+
 		if (length_squared(seg.direction) > T {} && dot(seg.direction, face_normal) >= T {})
 			return;
 
@@ -70,7 +76,6 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 		c.depth = depth;
 		c.normal.set(face_normal);
 		c.point.set(seg.origin);
-		c.started_inside = true;
 	} else {
 		c.time = find_intersection(seg, box, c.point, c.normal);
 	}
@@ -89,6 +94,7 @@ void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sp
 			normalize(n, seg.direction);
 			neg(n);
 		}
+		c.started_inside = true;   // began here either way -- see trace_aa_box
 		// Separating movers are not reported -- see trace_aa_box. A zero-length segment
 		// has dot() == 0 and so still reports, which is what a point query needs.
 		if (dot(n, seg.direction) <= epsilon) {
@@ -96,7 +102,6 @@ void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sp
 			c.depth = sph.radius - dist;
 			c.point.set(seg.origin);
 			c.normal.set(n);
-			c.started_inside = true;
 		} else {
 			c.time = tr::one();
 		}
@@ -2018,6 +2023,11 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 	auto & shapes = s->get_shapes();
 	int n = static_cast<int>(shapes.size());
 	bool modify_scope = false;
+	// Accumulated across this solid's shapes -- the segment began inside the SOLID if it
+	// began inside any of them. Held locally rather than read back out of `result`: callers
+	// reuse one collision across solids and restore only `time`, so ORing the incoming value
+	// made the flag sticky from one solid to the next.
+	bool began_inside = false;
 
 	const mat3<T> identity_m;
 	// Loop-invariant: whether the solid itself turns. Hoisted so the common all-identity
@@ -2116,7 +2126,7 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 		if (col.time == T {})
 			col.trigger_scope |= s->get_trigger_scope();
 
-		const bool began_inside = result.started_inside || col.started_inside;
+		began_inside = began_inside || col.started_inside;
 		merge_intra_pair(result, col, epsilon, modify_scope);
 		result.started_inside = began_inside;
 	}

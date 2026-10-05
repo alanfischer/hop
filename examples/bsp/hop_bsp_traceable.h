@@ -607,21 +607,22 @@ inline hull_trace hull_sweep_off_surface(const hull &h, const double start[3],
 // Shrunk by STUCK_SLOP for the same reason hull_push_out is (see there): a candidate that
 // lands ON a floor is a place the mover can be, and rejecting it leaves only candidates that
 // exit the model completely.
-// `strict` measures the geometry as it really is and confirms the far end is open air.
-// Without it this is the older, looser form -- the hull shrunk by STUCK_SLOP and no
-// confirmation -- which hull_push_out still falls back on; see there for why both exist.
+// How far along `dir` the solid ends, or -1 when it does not within `limit`.
+//
+// `verified`, when given, reports whether the far end was confirmed to be open air. One
+// measurement answers both: a caller that wants certainty uses the flag, and
+// hull_push_out prefers a confirmed exit while still accepting an unconfirmed one over
+// its leaf-plane fallback. Measuring twice -- once unbiased, once against the hull shrunk
+// by STUCK_SLOP -- was tried, and the second mechanism is plane TRANSLATION, which this
+// file warns is not an inward shrink (see hull_point_contents_biased) and so can diverge
+// from the first on a non-axial plane.
 inline double hull_inside_distance(const hull &h, int root, const double p[3],
                                    const double dir[3], double limit, int blocking,
-                                   bool strict = true) {
+                                   bool *verified = nullptr) {
+	if (verified) *verified = false;
 	const double away[3] = {
 		p[0] + dir[0] * limit, p[1] + dir[1] * limit, p[2] + dir[2] * limit
 	};
-	if (!strict) {
-		hull_trace loose = hull_sweep_stuck_band(h, p, away, ~blocking & CONTENTS_BITS);
-		if (!loose.hit) return -1.0;
-		return limit * loose.fraction + DIST_EPSILON;
-	}
-
 	hull_trace tr = hull_sweep(h, p, away, ~blocking & CONTENTS_BITS);
 	if (!tr.hit) return -1.0;  // nothing but solid this way, as far as the budget reaches
 	// The crosspoint sits DIST_EPSILON on the near side of the plane it stopped at, which
@@ -638,8 +639,8 @@ inline double hull_inside_distance(const hull &h, int root, const double p[3],
 	const double at[3] = {
 		p[0] + dir[0] * d_true, p[1] + dir[1] * d_true, p[2] + dir[2] * d_true
 	};
-	if ((blocking & blocking_bit(hull_point_contents(h, root, at))) != 0)
-		return -1.0;
+	if (verified)
+		*verified = (blocking & blocking_bit(hull_point_contents(h, root, at))) == 0;
 
 	// Less the band: the geometry is probed as it really is, and the mover is left
 	// STUCK_SLOP inside rather than resolved to exactly zero overlap -- deliberately, so a
@@ -701,20 +702,31 @@ inline bool hull_push_out(const hull &h, int root, const double p[3], int blocki
 	double best = 0.0;
 	double best_dir[3] = { 0, 0, 0 };
 	bool found = false;
-	bool strict = true;
+	// Two answers per axis, kept apart: one whose far end was confirmed to be open air, and
+	// one that was not. A confirmed exit always wins; an unconfirmed one is still better than
+	// the leaf plane below, which for a mover wedged where a wall meets a floor is the seam at
+	// distance nothing and pushes it UP rather than out.
+	double loose_best = 0.0;
+	double loose_dir[3] = { 0, 0, 0 };
+	bool loose_found = false;
 	auto consider = [&](const double dir[3], double limit) {
-		const double d = hull_inside_distance(h, root, p, dir, limit, blocking, strict);
+		bool verified = false;
+		const double d = hull_inside_distance(h, root, p, dir, limit, blocking, &verified);
 		if (d < 0.0) return;
 		for (int i = 0; i < 3; ++i) {
 			const double mag = dir[i] < 0 ? -dir[i] : dir[i];
 			if (mag * d > extent[i]) return;  // overruns the mover's own size on this axis
 		}
-		if (!found || d < best) {
-			best = d;
-			best_dir[0] = dir[0];
-			best_dir[1] = dir[1];
-			best_dir[2] = dir[2];
-			found = true;
+		if (verified) {
+			if (!found || d < best) {
+				best = d;
+				best_dir[0] = dir[0]; best_dir[1] = dir[1]; best_dir[2] = dir[2];
+				found = true;
+			}
+		} else if (!loose_found || d < loose_best) {
+			loose_best = d;
+			loose_dir[0] = dir[0]; loose_dir[1] = dir[1]; loose_dir[2] = dir[2];
+			loose_found = true;
 		}
 	};
 
@@ -723,16 +735,13 @@ inline bool hull_push_out(const hull &h, int root, const double p[3], int blocki
 	};
 	for (int i = 0; i < 6; ++i) consider(AXES[i], extent[i / 2]);
 
-	// Nothing survived the strict probe. Fall back to the looser one, which is what this
-	// did before the strict pass existed, and only then to the leaf plane below. The order
-	// is what makes this no worse than it was: a verified exit beats an unverified one,
-	// an unverified one beats the nearest face of the LEAF -- which for a mover wedged
-	// where a wall meets a floor is the seam at distance nothing, so it pushes them UP
-	// rather than out. The only cases that change are the ones where the old answer failed
-	// its own verification.
-	if (!found) {
-		strict = false;
-		for (int i = 0; i < 6; ++i) consider(AXES[i], extent[i / 2]);
+	// Unconfirmed is what this returned before the confirmation existed, so falling back to
+	// it keeps every input that used to get an answer getting the same one: the only cases
+	// that change are those where the old answer failed its own verification.
+	if (!found && loose_found) {
+		best = loose_best;
+		best_dir[0] = loose_dir[0]; best_dir[1] = loose_dir[1]; best_dir[2] = loose_dir[2];
+		found = true;
 	}
 
 	if (found) {
@@ -854,7 +863,9 @@ public:
 		// AND a real "you started in solid" to declare.
 		if (ht.hit && (T)ht.fraction < result.time
 				&& !hopbsp::stopped_against_sky(hulls_[0], ht, blocking_)) {
-			result.started_inside = ht.allsolid || ht.exited;
+			// Not `allsolid || exited`: the walk returns before setting `hit` if it never
+			// left solid, so allsolid is false wherever this branch runs.
+			result.started_inside = ht.exited;
 			result.time = (T)ht.fraction;
 			hop::vec3<T> hit_local = gs_to_godot(ht.endpos[0], ht.endpos[1], ht.endpos[2]);
 			hop::vec3<T> hn_local = gs_dir_to_godot(ht.normal[0], ht.normal[1], ht.normal[2]);
@@ -871,11 +882,13 @@ public:
 		// second further along, and that crossing is nearer than nothing at all.
 		//
 		// Reporting the overlap INSTEAD of the crossing was tried and is wrong, measurably:
-		// the whole world is one BSP solid, and HopDirectSpaceState::_intersect_ray skips a
-		// solid whose report is t <= 0 unless the caller passed hit_from_inside -- so an
-		// overlap that replaces the sweep makes the skip discard the entire world, and the
-		// farther brush with it. test_ray_from_inside_still_reports_a_farther_brush is that
-		// case: two slabs with a gap, a ray starting in the first.
+		// one `collision` carries one contact, and the whole world arrives as a single
+		// traceable (hop_physics_server replaces the carrier shapes with one), so the
+		// overlap and the farther brush are the same shape's answer and something has to
+		// choose. Choosing the overlap loses the brush outright, because
+		// HopDirectSpaceState::_intersect_ray drops a report of t <= 0 unless the caller
+		// passed hit_from_inside. test_ray_from_inside_still_reports_a_farther_brush is
+		// that case: two slabs with a gap, a ray starting in the first.
 		//
 		// Quake reports neither: its walk answers a start in solid with `allsolid` and no
 		// impact plane, and `allsolid` never reached the caller, so "I am buried" and "the
@@ -1361,11 +1374,10 @@ private:
 		if (orientation != identity) {
 			hop::mul(p_out, orientation, p_local);
 			hop::add(p_out, position);
-			hop::mul(n_out, orientation, n_local);
 		} else {
 			hop::add(p_out, p_local, position);
-			n_out = n_local;
 		}
+		n_out = to_world_dir(n_local, orientation);
 	}
 
 	// The mover's shape, expressed in this model's GoldSrc frame.

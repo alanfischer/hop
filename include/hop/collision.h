@@ -40,8 +40,8 @@ template <typename T> struct contact_point {
 // remove_solid() so they never dangle past a tick. Callbacks may copy them
 // freely; just don't cache one across a remove_solid() call.
 
-// What one reported contact means. Two kinds of query fill this in and they agree on
-// every field below, which is worth saying plainly because the fields are easy to read
+// What one reported contact means. Two kinds of query fill these in, and they agree on all
+// of them but `impact`, which is worth saying plainly because the fields are easy to read
 // as more independent than they are:
 //
 //   test_segment  — a ray or a point (a zero-length segment) against a solid.
@@ -61,14 +61,14 @@ template <typename T> struct contact_point {
 // `point`  where the contact is, in world space. For a crossing that is on the
 //          collidee's surface; for an overlap at the start it is the query's own origin,
 //          which is INSIDE the collidee — the surface is `point + normal * depth`.
-// `impact` the same place, except for a swept solid that carries an orientation, where
-//          it is the feature of the MOVER that actually touches. Segment queries have no
-//          Minkowski expansion, and a mover with no orientation of its own reports its
-//          centre, so in both of those impact == point.
+// `impact` the feature of the MOVER that actually touches, for a swept solid — `point`
+//          plus the mover's support along -normal, computed whether or not the mover is
+//          turned. Segment queries have no Minkowski expansion, so there impact ==
+//          point. (One exception lives outside this header: the GoldSrc BSP traceable's
+//          own trace_solid keeps the traced centre for an UNORIENTED mover.)
 // `normal` unit, pointing from the collidee back toward the collider — against the
 //          direction of travel for a sweep, out of the collidee for an overlap.
-//
-// `collider` / `collidee` are non-owning; see the note above on their lifetime.
+// `velocity` the collidee's surface velocity at the contact, where it has one.
 
 template <typename T> struct collision {
 	using tr = scalar_traits<T>;
@@ -100,6 +100,13 @@ template <typename T> struct collision {
 	// `test_inside` is non-strict, so a segment starting exactly ON a surface is inside
 	// it with depth exactly 0 — the commonest pose there is.
 	bool started_inside = false;
+
+	// The report IS the start overlap, rather than something crossed later. Both halves are
+	// needed and neither implies the other: a segment can begin inside a non-convex collidee
+	// and still report a crossing further along (time > 0), and a contact at time 0 can be a
+	// surface simply met with no distance to travel. Named because four query-layer filters
+	// were spelling it out, and a fifth would have had to guess which half mattered.
+	bool is_start_overlap() const { return started_inside && time <= T {}; }
 
 	collision & set(const collision & c) {
 		time = c.time;
