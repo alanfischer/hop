@@ -171,6 +171,24 @@ public:
 	void set_position_iterations(int n) { spec_pos_iters_ = n < 0 ? 0 : n; }
 	int get_position_iterations() const { return spec_pos_iters_; }
 
+	// Joint projection: how far a rigid joint may open, as a fraction of its own anchor
+	// span, before the geometry is moved to close the excess. 0 disables it.
+	//
+	// The position pass above splits each correction by inverse mass, so a joint with one
+	// immovable end hands it all to the free end — and when that end is held too, the row
+	// makes no progress and the error stands. Nothing else bounds a pin, and a skinned
+	// bone's length IS the distance between two bodies, so an unbounded pin is a limb
+	// drawn metres long. This moves ONE end instead: no sharing, nothing to deadlock, and
+	// geometry only, so the chain is handed no energy to ring with.
+	//
+	// A tolerance, not a stiffness — set it past the error normal play leaves behind
+	// (demo_ragdoll Table 1). Per joint because a spine segment and a femur do not stretch
+	// by the same centimetres; a joint anchored at both bodies' centres has no span and is
+	// never projected. It buys bounded error with penetration: a joint and a contact can be
+	// in real conflict, and this breaks the contact for the solver to take back out.
+	void set_joint_projection(T fraction) { joint_projection_ = fraction < T {} ? T {} : fraction; }
+	T get_joint_projection() const { return joint_projection_; }
+
 	// Solid management
 	void add_solid(std::shared_ptr<solid<T>> s) {
 		for (auto & existing : solids_) {
@@ -221,6 +239,10 @@ public:
 	const std::vector<std::shared_ptr<solid<T>>> & get_solids() const { return solids_; }
 
 	// Constraint management
+	//
+	// Order is a CONTRACT for one thing: joint projection walks constraints as they were
+	// added, so a chain must be added parent-before-child (which a ragdoll builder does
+	// anyway). Tail-first still bounds every joint, but repairs one joint per tick.
 	void add_constraint(typename constraint<T>::ptr c) {
 		for (auto & existing : constraints_) {
 			if (existing == c)
@@ -331,6 +353,14 @@ public:
 			// Pass A — so a speculative body takes the whole correction against a
 			// sweep_slide partner. commit_solid folds the correction into the move.
 			correct_positions();
+		}
+		// ...and then the one thing that pass cannot do: close a joint whose ends are both
+		// held. Outside the any_speculative gate on purpose — Pass A skips sleeping bodies,
+		// so an all-asleep scene never sets the flag, and waking a rig that went quiet
+		// stretched is the one useful thing to do there. Nothing is written in that case:
+		// a body that can take a correction is a body that integrated.
+		project_joints();
+		if (any_speculative) {
 			// Pass B: commit each speculative body's position; sweep_slide bodies
 			// already committed (and ran post_update) in Pass A.
 			for (size_t ii = 0; ii < num; ++ii) {
@@ -370,6 +400,12 @@ public:
 	// each contact's separation from the running correction so multi-contact
 	// corrections converge instead of summing. Velocity is never touched.
 	void correct_positions();
+	// This tick's pseudo-rotation as a real quaternion, false when there is none worth
+	// applying. Shared so the commit and the pass that predicts it cannot drift apart.
+	bool correction_quat(const solid<T> * s, quat<T> & dq) const;
+	// Moves one end of an over-stretched rigid joint by the excess, after
+	// correct_positions and into the same correction. See set_joint_projection.
+	void project_joints();
 	// Shared deactivation/sleep logic: given the body's about-to-be-committed
 	// position, decide whether it qualifies to sleep this tick. Used by both the
 	// default and speculative pipelines.
@@ -545,6 +581,7 @@ private:
 		spec_slop_ = epsilon_;                       // penetration tolerated without correction (anti-jitter)
 		spec_pos_baumgarte_ = tr::from_milli(800);   // 0.8 — fraction of penetration removed per NGS iteration
 		limit_recovery_max_ = tr::from_int(16);      // rad/s a violated angular limit may close at
+		joint_projection_ = tr::one();               // a rigid joint may open by its own anchor span
 	}
 
 	void report_collisions();
@@ -791,6 +828,7 @@ private:
 	T spec_slop_ {};           // penetration tolerated without correction (kills resting jitter)
 	T spec_pos_baumgarte_ {};  // fraction of remaining penetration removed per NGS position iteration
 	T limit_recovery_max_ {};  // rad/s ceiling on an angular joint limit's recovery (see build_joint_rows)
+	T joint_projection_ {};    // fraction of its anchor span a rigid joint may open before it is projected
 	int spec_pos_iters_ = 8;   // NGS position-solver iterations per tick
 	// Shock-propagation passes appended to the velocity solve. Each pass walks
 	// contacts bottom-up and freezes every body once its support-from-below is
@@ -1684,6 +1722,16 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 // position correction, then run the shared deactivation logic. The correction is
 // a pseudo-position (velocity is untouched), so it removes penetration without
 // adding energy.
+template <typename T> bool simulator<T>::correction_quat(const solid<T> * s, quat<T> & dq) const {
+	const T angle = length(s->rot_correction_);
+	if (angle <= epsilon_)
+		return false;
+	vec3<T> axis;
+	mul(axis, s->rot_correction_, tr::one() / angle);
+	set_quat_from_axis_angle(dq, axis, angle);
+	return true;
+}
+
 template <typename T> void simulator<T>::commit_solid(solid<T> * solid_ptr, T dt) {
 	vec3<T> old_pos(solid_ptr->position_);
 	cap_vec3(old_pos, max_position_component_);
@@ -1700,12 +1748,9 @@ template <typename T> void simulator<T>::commit_solid(solid<T> * solid_ptr, T dt
 	// The angular half of the same pseudo-correction (rigid joints only — nothing
 	// else writes it). Pure geometry, like the translation: the body is turned, its
 	// angular velocity is not, so nothing here hands the solve energy back.
-	const T angle = length(solid_ptr->rot_correction_);
-	if (angle > epsilon_) {
-		vec3<T> axis;
-		mul(axis, solid_ptr->rot_correction_, tr::one() / angle);
-		quat<T> dq, q;
-		set_quat_from_axis_angle(dq, axis, angle);
+	quat<T> dq;
+	if (correction_quat(solid_ptr, dq)) {
+		quat<T> q;
 		mul(q, dq, solid_ptr->orientation_q_);
 		normalize(q);
 		solid_ptr->set_orientation_from_quat(q);
@@ -1937,6 +1982,127 @@ template <typename T> void simulator<T>::correct_positions() {
 		}
 		if (!corrected)
 			break;
+	}
+}
+
+// Joint projection; see set_joint_projection for what it is for. Over constraints_ rather
+// than joint_rows_, because build_joint_rows drops a row with both ends asleep and a rig
+// that settled stretched and went quiet is one of the states this repairs.
+//
+// Two passes, and the order is the content: first the joints with a HELD end (a world
+// point, an infinite-mass mover, a sleeping body), moving the free end onto it; then the
+// rest, parent-before-child, moving whichever end the first pass did not place. One body
+// moves once a tick. A single sweep does nothing at all on a chain held at its far end —
+// the joint nearest the hold moves the next bone in and the next joint moves it straight
+// back, same tick (1.351 m of open pin, the no-projection number, which is what
+// test_joint_projection_bounds_carry measures with the held pass taken out).
+//
+// A constraint's start is the parent and its end the child, and insertion order follows
+// the tree: see add_constraint. A joint inside its tolerance is skipped, so a satisfied
+// rig cannot tell this exists — asserted as bit equality in test_simulator.cpp.
+template <typename T> void simulator<T>::project_joints() {
+	const T zero = T {};
+	if (joint_projection_ <= zero)
+		return;
+	// An end this pass can move now. A sweep_slide body placed itself in Pass A and never
+	// folds pos_correction_, an infinite-mass body is the scene rather than a thing in it,
+	// and a sleeping body is skipped by the whole tick — anchors, all three, which is how
+	// correct_positions reads them too.
+	auto settable = [](const solid<T> & s) {
+		return s.active_ && s.uses_speculative_solve() && !s.has_infinite_mass();
+	};
+	// The anchor where the commit will leave it, which needs the pseudo-rotation as a real
+	// quaternion and NOT as correct_positions' r + d×r. That linearisation asks for
+	// rotations that cannot exist once a pin's error is large against its lever arm — 2.5
+	// to 3.4 radians, measured — and reads as if the anchor had arrived, which had this
+	// pass see 0.14 m on a joint 0.49 m open and do nothing at all.
+	auto anchor_now = [this](const solid<T> * s, const vec3<T> & local, vec3<T> & out) {
+		vec3<T> lever;
+		anchor_lever(lever, s, local);
+		quat<T> dq;
+		if (correction_quat(s, dq)) {
+			vec3<T> turned;
+			mul(turned, dq, lever);
+			lever = turned;
+		}
+		add(out, s->position_, lever);
+		add(out, s->pos_correction_);
+	};
+	for (int pass = 0; pass < 2; ++pass) {
+		const bool held_pass = pass == 0;  // held ends first; see the header
+		for (auto & held : constraints_) {
+			constraint<T> * c = held.get();
+			if (!c || !c->is_active() || c->type_ != constraint<T>::type::rigid)
+				continue;
+			solid<T> * start = c->start_solid_.get();
+			if (!start)
+				continue;
+			solid<T> * end = c->end_solid_.get();
+			if (end == start)
+				continue;  // pinned to itself: no relative error to remove
+
+			const bool start_free = settable(*start);
+			const bool end_free = end && settable(*end);
+			// A world point counts as a held end. Decided before anything is measured: each
+			// constraint is visited twice and handled once, so measuring first threw half of
+			// every tick's spans and anchors away.
+			const bool anchored = !start_free || !end_free;
+			if (anchored != held_pass)
+				continue;
+
+			// Local vectors, so the span is orientation-invariant and constant for the
+			// life of the joint.
+			T span = length(c->local_anchor_a_);
+			if (end)
+				span += length(c->local_anchor_b_);
+			const T tolerance = span * joint_projection_;
+			if (tolerance <= zero)
+				continue;  // no length to measure a stretch against; see set_joint_projection
+
+			vec3<T> a_world, b_world, err;
+			anchor_now(start, c->local_anchor_a_, a_world);
+			if (end)
+				anchor_now(end, c->local_anchor_b_, b_world);
+			else
+				b_world = c->end_point_;
+			sub(err, a_world, b_world);
+			// Squared: in ordinary play every joint fails this and the sqrt is pure loss.
+			if (length_squared(err) <= tolerance * tolerance)
+				continue;
+			const T error = length(err);
+
+			// A pin this far open is not a body at rest. hop holds that rule the other way
+			// round already (constraint::is_loaded keeps a loaded pin awake); the sleep test
+			// just never re-examines a joint pried open AFTER the bodies slept. Waking is
+			// also the only way to move them — see settable — and without it a rig that went
+			// quiet stretched stays stretched (test_joint_projection_wakes_a_quiet_rig).
+			if (!start->active_ && !start->has_infinite_mass())
+				start->activate();
+			if (end && !end->active_ && !end->has_infinite_mass())
+				end->activate();
+
+			// Held pass: the free end. Otherwise the child — unless the held pass already
+			// placed it, and moving the parent to IT is what walks a drag up a limb.
+			if (held_pass && !start_free && !end_free)
+				continue;  // held at both ends: nothing this pass is allowed to move
+			const bool mover_is_start = held_pass ? start_free
+			                                      : end->projected_tick_ == current_tick_;
+			solid<T> * mover = mover_is_start ? start : end;
+			if (mover->projected_tick_ == current_tick_)
+				continue;  // moved once already — see the header
+
+			// By the excess only, so the joint is left at the tolerance rather than snapped
+			// shut and has nothing to fight the position solver for. `err` runs start to
+			// end, so the start end closes it along -err.
+			vec3<T> fix;
+			mul(fix, err, (error - tolerance) / error);
+			if (mover_is_start) {
+				sub(mover->pos_correction_, fix);
+			} else {
+				add(mover->pos_correction_, fix);
+			}
+			mover->projected_tick_ = current_tick_;
+		}
 	}
 }
 
