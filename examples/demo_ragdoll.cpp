@@ -74,6 +74,28 @@
 // velocity level and a turn about the joint at the position level, so this must not move),
 // and head-minus-pelvis — which is the one that actually answers "does it look like a body".
 //
+// ── TABLE 5: the limb stays a limb ──────────────────────────────────────────
+//
+// The failure here does not look like physics, it looks like a bug report: half a corpse
+// inside a wall, half fallen out, the model drawn stretched metres long. Nothing stretched
+// — there are no bone LENGTHS in this pipeline. A rig is 21 bodies and 20 pins, the skin is
+// drawn between wherever the bodies are, and the only thing holding two of them a bone
+// apart is a constraint the solver is allowed to lose.
+//
+// It loses in one state: both ends held. Here the world holds one bone deep inside the slab
+// the corpse is lying on, putting it back every tick — which is what a start-in-solid
+// ejection that may only move a body by its own box size does to a bone buried deeper than
+// that — while the slab holds the rest of the corpse up. The velocity sweep is refused by
+// the floor contact and the position pass shares its correction by inverse mass, so neither
+// end can take it and the error simply stands.
+//
+// set_joint_projection is the answer and this table is the argument for it. Worth being
+// precise about whose fault the burial is, though, because the pass is a mitigation: in
+// Wizard Wars a brush entity is on the world layer with a mask of NOTHING and a ragdoll puts
+// 20 of its 21 bones on no layer at all (so the game finds one corpse, not 21), so a moving
+// brush can neither push a bone nor be blocked by one. It engulfs it. That is a layer
+// decision taken for an unrelated reason, not a law of physics.
+//
 // ── TABLE 3: what it costs ──────────────────────────────────────────────────
 //
 // Milliseconds per tick against corpse count, now with and without the limits, because up
@@ -150,6 +172,7 @@ const bone_def kBones[] = {
 };
 const int kBoneCount = static_cast<int>(sizeof(kBones) / sizeof(kBones[0]));
 const int kHeadBone = 4;
+const int kStrayBone = 12;   // r_hand — a leaf, so a stray one puts a whole arm at stake
 const int kDrops = 32;  // one drop is chaos; only the mean over many is a measurement
 
 const float kDeg = 3.14159265f / 180.0f;
@@ -243,6 +266,17 @@ ragdoll build(simulator<T> & sim, const vec3<T> & origin, const vec3<T> & launch
 		r.joints.push_back(c);
 	}
 	return r;
+}
+
+// Corpse number `drop` of kDrops: dropped on his feet, shoved, and flung. One drop is not a
+// measurement — a ragdoll on a floor is chaos — and every table that reports a mean walks
+// the SAME 32 deaths, which is what makes two tables' numbers comparable.
+ragdoll drop_spread(simulator<T> & sim, int drop, bool limited) {
+	const float turn = drop * 1.7f;
+	return build(sim, vec3<T>(0.0f, 0.05f + 0.35f * (drop % 3), 0.0f),
+	             vec3<T>(1.6f * std::cos(turn) * (drop % 4),
+	                     0.4f * (drop % 2),
+	                     1.6f * std::sin(turn) * (drop % 4)), limited);
 }
 
 void add_floor(simulator<T> & sim) {
@@ -483,14 +517,7 @@ int main() {
 			simulator<T> s3;
 			s3.set_gravity(vec3<T>(0.0f, -20.0f, 0.0f));
 			add_floor(s3);
-			// A spread of deaths: dropped on his feet, shoved, and flung. One drop is not a
-			// measurement — a ragdoll on a floor is chaos, and a single corpse's settle time
-			// swings by seconds on a change that means nothing.
-			const float turn = drop * 1.7f;
-			ragdoll d = build(s3, vec3<T>(0.0f, 0.05f + 0.35f * (drop % 3), 0.0f),
-			                  vec3<T>(1.6f * std::cos(turn) * (drop % 4),
-			                          0.4f * (drop % 2),
-			                          1.6f * std::sin(turn) * (drop % 4)), limited);
+			ragdoll d = drop_spread(s3, drop, limited);
 			std::vector<vec3<T>> mark;
 			snapshot(d, mark);
 			int settled_at = -1;
@@ -599,6 +626,74 @@ int main() {
 		printf("  FAIL: the corpse writhes for %.2f s before it settles\n", limited_settle);
 		ok = false;
 	}
+
+	// ── TABLE 5: the limb stays a limb ─────────────────────────────────────
+	printf("\nTable 5: one bone held where it does not belong, %d corpses, 60 ticks.\n", kDrops);
+	printf("  %11s  %11s  %11s  %11s\n", "projection", "worst pin", "head-pelvis", "body drag");
+	float stray_pin[2] = { 0.0f, 0.0f };
+	float stray_drag[2] = { 0.0f, 0.0f };
+	for (int pass = 0; pass < 2; ++pass) {
+		// Off, then the shipping default of one anchor span — well past the error Tables 1
+		// and 4 show a corpse settling with, so it is silent in ordinary play.
+		const float projection = pass == 0 ? 0.0f : 1.0f;
+		double pin_sum = 0.0, span_sum = 0.0, drag_sum = 0.0;
+		for (int drop = 0; drop < kDrops; ++drop) {
+			simulator<T> s5;
+			s5.set_gravity(vec3<T>(0.0f, -20.0f, 0.0f));
+			s5.set_joint_projection(projection);
+			add_floor(s5);
+			ragdoll d = drop_spread(s5, drop, true);
+			for (int tick = 0; tick < 180; ++tick)
+				s5.update(dt);  // land and settle first: this is about a corpse, not a fall
+
+			auto & stray = d.bones[kStrayBone];
+			const vec3<T> settled = d.bones[0]->get_position();
+			// Where the world insists the bone belongs: inside the slab, put back every
+			// tick. Finite mass, not thrown — this is what a capped start-in-solid ejection
+			// does to a bone buried deeper than its own box (hop_bsp_traceable.h,
+			// hull_push_out; TumblingCorpse._push_bones_clear).
+			const vec3<T> buried(settled.x, -0.6f, settled.z);
+			stray->set_collide_with_scope(0);  // already inside the brush; the floor is no help
+			float worst = 0.0f;
+			for (int tick = 0; tick < 60; ++tick) {
+				stray->set_position(buried);
+				s5.update(dt);
+				const float pin = worst_joint_error(d);
+				if (pin > worst)
+					worst = pin;
+			}
+			pin_sum += worst;
+			span_sum += std::sqrt(length_squared(d.bones[kHeadBone]->get_position(),
+			                                     d.bones[0]->get_position()));
+			// Whether the stray bone took the corpse with it — a pin that cannot be closed
+			// is a pin still pulling, and that walks the body into the geometry after it.
+			drag_sum += std::sqrt(length_squared(d.bones[0]->get_position(), settled));
+		}
+		stray_pin[pass] = static_cast<float>(pin_sum / kDrops);
+		stray_drag[pass] = static_cast<float>(drag_sum / kDrops);
+		printf("  %11s  %11.3f  %11.3f  %11.3f\n", pass == 0 ? "off" : "1.00",
+		       stray_pin[pass], span_sum / kDrops, stray_drag[pass]);
+	}
+	// Only an argument if the state is really this bad without the pass.
+	if (stray_pin[0] < 0.3f) {
+		printf("  FAIL: a stray bone only pried the worst pin open %.3f m — not reproducing\n",
+		       stray_pin[0]);
+		ok = false;
+	}
+	// And with it, nothing opens past the loosest tolerance in the rig (0.22 m, the hip).
+	if (stray_pin[1] > 0.3f) {
+		printf("  FAIL: projection left the worst pin %.3f m open\n", stray_pin[1]);
+		ok = false;
+	}
+	// And the corpse stays where it died.
+	if (stray_drag[1] > stray_drag[0]) {
+		printf("  FAIL: projection dragged the body further (%.3f m against %.3f m)\n",
+		       stray_drag[1], stray_drag[0]);
+		ok = false;
+	}
+	printf("  A stray bone is put back instead of pulling: %.3f m of open pin against\n"
+	       "  %.3f m, and the body stays within %.3f m of where it died against %.3f m.\n",
+	       stray_pin[1], stray_pin[0], stray_drag[1], stray_drag[0]);
 
 	// ── TABLE 3: what it costs ──────────────────────────────────────────────
 	printf("\nTable 3: cost, %d bodies and %d joints per corpse.\n",

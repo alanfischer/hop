@@ -1344,6 +1344,39 @@ template <typename T> static void test_angular_substep_ccd(const char * label) {
 // A rigid pin HOLDS. Two links hang off a world point under gravity; a force
 // spring at any stiffness sags (it needs a stretch to produce force at all), while the
 // rigid solve drives the anchor pair together at both the velocity and position level.
+// A body a rigid joint can hang off, at (0, y, 0). The speculative mode has to be set AFTER
+// add_solid stamps the space default: a rigid joint solves in Pass B, so its bodies must not
+// have committed their position in Pass A. Scopes are the caller's.
+template <typename T>
+static std::shared_ptr<solid<T>> joint_body(simulator<T> & sim, T half_xz, T half_y, T y) {
+	using tr = scalar_traits<T>;
+	const T z {};
+	auto s = std::make_shared<solid<T>>();
+	s->set_mass(tr::one());
+	s->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one()));
+	s->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-half_xz, -half_y, -half_xz), vec3<T>(half_xz, half_y, half_xz))));
+	s->set_position(vec3<T>(z, y, z));
+	sim.add_solid(s);
+	s->set_contact_mode(contact_mode::speculative);
+	return s;
+}
+
+// How far apart a joint is holding its anchors — zero for a satisfied pin.
+template <typename T> static float joint_error(const constraint<T> & c) {
+	using tr = scalar_traits<T>;
+	auto anchor_of = [](const solid<T> * s, const vec3<T> & local) {
+		vec3<T> lever, out;
+		mul(lever, s->get_orientation(), local);
+		add(out, s->get_position(), lever);
+		return out;
+	};
+	const vec3<T> a = anchor_of(c.get_start_solid(), c.get_local_anchor_a());
+	const vec3<T> b = c.get_end_solid() ? anchor_of(c.get_end_solid(), c.get_local_anchor_b())
+	                                    : c.get_end_point();
+	return std::sqrt(tr::to_float(length_squared(a, b)));
+}
+
 // The assertion is on the joint error, not the position: a chain is allowed to swing.
 template <typename T> static void test_rigid_joint_chain(const char * label) {
 	using tr = scalar_traits<T>;
@@ -1353,18 +1386,8 @@ template <typename T> static void test_rigid_joint_chain(const char * label) {
 	simulator<T> sim;
 	sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));  // hang along -y, not hop's default -z
 	auto link = [&](T y) {
-		auto s = std::make_shared<solid<T>>();
-		s->set_mass(tr::one());
-		s->set_inertia(vec3<T>(tr::one(), tr::one(), tr::one()));
+		auto s = joint_body(sim, tr::from_milli(100), half, y);
 		s->set_collide_with_scope(0);  // a hanging chain, nothing to hit
-		s->add_shape(std::make_shared<shape<T>>(
-		    aa_box<T>(vec3<T>(-tr::from_milli(100), -half, -tr::from_milli(100)),
-		              vec3<T>(tr::from_milli(100), half, tr::from_milli(100)))));
-		s->set_position(vec3<T>(z, y, z));
-		sim.add_solid(s);
-		// After add_solid, which stamps the space default: a rigid joint solves in Pass B,
-		// so its bodies must not have committed their position already in Pass A.
-		s->set_contact_mode(contact_mode::speculative);
 		return s;
 	};
 	// Anchors at (0,0,0) and (0,-1,0): link 1 hangs off the world, link 2 off link 1.
@@ -1380,21 +1403,12 @@ template <typename T> static void test_rigid_joint_chain(const char * label) {
 	mid->set_local_anchor_b(vec3<T>(z, half, z));
 	sim.add_constraint(mid);
 
-	auto anchor_of = [](const std::shared_ptr<solid<T>> & s, const vec3<T> & local) {
-		vec3<T> lever, out;
-		mul(lever, s->get_orientation(), local);
-		add(out, s->get_position(), lever);
-		return out;
-	};
 	float worst_top = 0.0f;
 	float worst_mid = 0.0f;
 	for (int i = 0; i < 300; ++i) {
 		sim.update(tr::from_milli(16));
-		vec3<T> a = anchor_of(s1, vec3<T>(z, half, z));
-		float e_top = std::sqrt(tr::to_float(length_squared(a, vec3<T>(z, z, z))));
-		vec3<T> b = anchor_of(s1, vec3<T>(z, -half, z));
-		vec3<T> c = anchor_of(s2, vec3<T>(z, half, z));
-		float e_mid = std::sqrt(tr::to_float(length_squared(b, c)));
+		const float e_top = joint_error(*top);
+		const float e_mid = joint_error(*mid);
 		if (i > 30) {  // the first few ticks are the chain taking up its own weight
 			if (e_top > worst_top) worst_top = e_top;
 			if (e_mid > worst_mid) worst_mid = e_mid;
@@ -1405,6 +1419,171 @@ template <typename T> static void test_rigid_joint_chain(const char * label) {
 	assert(worst_top < 0.02f);   // the chain hangs where it is pinned
 	assert(worst_mid < 0.02f);
 	assert(span > -2.2f);        // and did not stretch or fall away
+	printf("OK\n");
+}
+
+// Both ends held: one bone seized (infinite-mass, carried down into the slab the corpse is
+// lying on) and the other held up by that same slab. The velocity sweep is refused by the
+// contact and the position pass can give its correction to neither end, so the error stands
+// — and a skinned bone's length is only the distance between two bodies. Projection chooses
+// which to break: it moves the free end into the floor. Same scene both runs.
+template <typename T> static void test_joint_projection_bounds_carry(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  joint_projection_bounds_carry[%s]: ", label);
+	const T z {};
+	const T half = tr::from_milli(100);  // a bone, 0.2 m end to end
+	auto carry = [&](T projection, float & penetration_out) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
+		sim.set_joint_projection(projection);
+		// The slab the corpse is lying on: top face at y = 0.
+		auto floor = std::make_shared<solid<T>>();
+		floor->set_infinite_mass();
+		floor->set_coefficient_of_gravity(z);
+		floor->add_shape(std::make_shared<shape<T>>(
+		    aa_box<T>(vec3<T>(-tr::from_int(10), -tr::from_int(10), -tr::from_int(10)),
+		              vec3<T>(tr::from_int(10), z, tr::from_int(10)))));
+		floor->set_position(vec3<T>(z, z, z));
+		sim.add_solid(floor);
+		floor->set_collision_scope(1);
+		floor->set_collide_with_scope(0);
+
+		auto body = [&](T y) {
+			auto s = joint_body(sim, tr::from_milli(40), half, y);
+			s->set_collision_scope(0);
+			s->set_collide_with_scope(1);  // hears the floor, like a ragdoll bone
+			return s;
+		};
+		// The free bone rests on the slab; the seized one is carried down through it at 1 m/s.
+		auto rests = body(half);
+		auto seized = body(-half);
+		seized->set_infinite_mass();
+		seized->set_coefficient_of_gravity(z);
+		seized->set_collide_with_scope(0);  // a swallowed bone is already inside the brush
+		auto pin = std::make_shared<constraint<T>>(seized, rests);
+		pin->set_type(constraint<T>::type::rigid);
+		pin->set_local_anchor_a(vec3<T>(z, half, z));
+		pin->set_local_anchor_b(vec3<T>(z, -half, z));
+		sim.add_constraint(pin);
+
+		float worst = 0.0f;
+		penetration_out = 0.0f;
+		for (int i = 0; i < 120; ++i) {
+			vec3<T> p(seized->get_position());
+			p.y -= tr::from_milli(16);
+			seized->set_position(p);
+			sim.update(tr::from_milli(16));
+			const float e = joint_error(*pin);
+			if (e > worst)
+				worst = e;
+			// How far the free bone is inside the slab it was resting on — what the bound
+			// above is bought with.
+			const float sunk = -tr::to_float(rests->get_position().y - half);
+			if (sunk > penetration_out)
+				penetration_out = sunk;
+		}
+		return worst;
+	};
+
+	float pen_off = 0.0f, pen_on = 0.0f;
+	const float loose = carry(z, pen_off);            // projection off: today's behaviour
+	const float bounded = carry(tr::one(), pen_on);   // and on, at the shipping default
+	// What the default asks for: one anchor span, half a body either side of the joint.
+	const float tolerance = tr::to_float(half + half);
+	printf("off=%.3f on=%.3f tol=%.3f sunk=%.3f ", loose, bounded, tolerance, pen_on);
+	// Worth having only if what it replaces was big enough to see.
+	assert(loose > tolerance * 1.5f);
+	// The slack is the tick the carry moves within, before the commit projection rides on.
+	assert(bounded <= tolerance * 1.2f);
+	assert(bounded < loose * 0.5f);
+	// And paid for in penetration: the free bone is dragged into the slab.
+	assert(pen_on > 0.0f);
+	assert(pen_off <= pen_on);
+	printf("OK\n");
+}
+
+// A rig that went quiet while a joint was open. hop normally refuses to let that happen
+// (constraint::is_loaded keeps a loaded pin awake), but sleep is settable from outside —
+// hop-godot routes RigidBody3D.sleeping straight to solid::deactivate — and no pass of the
+// tick looks at a sleeping body again. So projection has to wake what it means to move.
+template <typename T> static void test_joint_projection_wakes_a_quiet_rig(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  joint_projection_wakes_a_quiet_rig[%s]: ", label);
+	const T z {};
+	const T half = tr::from_milli(100);
+	auto run = [&](T projection) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, z, z));  // nothing to fall: this is about the pass alone
+		sim.set_joint_projection(projection);
+		auto body = [&](T y) {
+			auto s = joint_body(sim, tr::from_milli(40), half, y);
+			s->set_collide_with_scope(0);
+			return s;
+		};
+		auto parent = body(half);
+		auto child = body(-half);
+		auto pin = std::make_shared<constraint<T>>(parent, child);
+		pin->set_type(constraint<T>::type::rigid);
+		pin->set_local_anchor_a(vec3<T>(z, -half, z));
+		pin->set_local_anchor_b(vec3<T>(z, half, z));
+		sim.add_constraint(pin);
+		// Pry it open, then sleep the rig on the spot — the one order that reaches the state.
+		child->set_position(vec3<T>(z, -tr::one(), z));
+		parent->deactivate();
+		child->deactivate();
+		for (int i = 0; i < 20; ++i)
+			sim.update(tr::from_milli(16));
+		return joint_error(*pin);
+	};
+	const float asleep = run(z);
+	const float woken = run(tr::one());
+	printf("off=%.3f on=%.3f ", asleep, woken);
+	// Nothing reaches a sleeping pair, so untouched it stays as broken as it was left.
+	assert(asleep > 0.5f);
+	// And with it: woken, and closed to the tolerance it is allowed.
+	assert(woken <= tr::to_float(half + half) * 1.2f);
+	printf("OK\n");
+}
+
+// A satisfied joint must not be able to tell projection is on. Same scene twice, and the
+// positions have to match EXACTLY, or the pass is participating in ordinary play.
+template <typename T> static void test_joint_projection_silent_when_satisfied(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  joint_projection_silent_when_satisfied[%s]: ", label);
+	const T z {};
+	const T half = tr::half();
+	auto run = [&](T projection, vec3<T> & tail_out) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
+		sim.set_joint_projection(projection);
+		std::vector<std::shared_ptr<solid<T>>> links;
+		for (int i = 0; i < 4; ++i) {
+			auto s = joint_body(sim, tr::from_milli(100), half, -half - tr::from_int(i));
+			s->set_collide_with_scope(0);
+			links.push_back(s);
+		}
+		auto top = std::make_shared<constraint<T>>(links[0], vec3<T>(z, z, z));
+		top->set_type(constraint<T>::type::rigid);
+		top->set_local_anchor_a(vec3<T>(z, half, z));
+		sim.add_constraint(top);
+		for (int i = 1; i < 4; ++i) {
+			auto c = std::make_shared<constraint<T>>(links[i - 1], links[i]);
+			c->set_type(constraint<T>::type::rigid);
+			c->set_local_anchor_a(vec3<T>(z, -half, z));
+			c->set_local_anchor_b(vec3<T>(z, half, z));
+			sim.add_constraint(c);
+		}
+		// Swung sideways so the chain actually works for its living.
+		links[3]->set_velocity(vec3<T>(tr::from_int(3), z, z));
+		for (int i = 0; i < 300; ++i)
+			sim.update(tr::from_milli(16));
+		tail_out = links[3]->get_position();
+	};
+	vec3<T> off, on;
+	run(z, off);
+	run(tr::one(), on);
+	printf("tail_off=(%.5f,%.5f,%.5f) ", tr::to_float(off.x), tr::to_float(off.y), tr::to_float(off.z));
+	assert(off.x == on.x && off.y == on.y && off.z == on.z);
 	printf("OK\n");
 }
 
@@ -1839,6 +2018,10 @@ int main() {
 	test_constraint_anchor_torque<float>("float");
 	test_rigid_joint_chain<float>("float");
 	test_rigid_joint_sleeps<float>("float");
+	test_joint_projection_bounds_carry<float>("float");
+	test_joint_projection_bounds_carry<fixed32>("fixed32");
+	test_joint_projection_wakes_a_quiet_rig<float>("float");
+	test_joint_projection_silent_when_satisfied<float>("float");
 	test_cone_limit_holds<float>("float");
 	test_twist_limit_holds<float>("float");
 	test_limit_is_unilateral<float>("float");
