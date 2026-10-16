@@ -1,8 +1,9 @@
 // A corpse is 21 boxes and 20 pins. Does the chain hold, does it sleep, and what does it
 // cost?
 //
-// Headless — no raylib, no renderer. Run it and read the three tables. Exits non-zero
-// while anything is wrong, so it is the acceptance test for constraint::type::rigid.
+// It opens a raylib window and drops a corpse you can watch; --headless runs the tables
+// instead. The tables exit non-zero while anything is wrong, so they are the acceptance
+// test for constraint::type::rigid.
 //
 // The bodies are laid out like the hitboxes on a GoldSrc player model, because that is
 // literally where the game's ragdoll comes from: models/player/*.mdl carries 21 boxes in
@@ -114,8 +115,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <memory>
 #include <vector>
 #include <hop/hop.h>
+#include <raylib.h>
+#include <rlgl.h>
 
 using namespace hop;
 using T = float;
@@ -408,9 +413,7 @@ float resting_box_spin(T half, T tilt, bool * slept_out = nullptr) {
 	return static_cast<float>(sum / n);
 }
 
-} // namespace
-
-int main() {
+int run_tables() {
 	bool ok = true;
 	const T dt = tr::from_milli(16);
 
@@ -759,4 +762,152 @@ int main() {
 
 	printf("\n%s\n", ok ? "PASS" : "FAIL");
 	return ok ? 0 : 1;
+}
+
+// Space : pause   . : step   R : drop again   N : next throw   L : limits   P : projection
+// hop and raylib are both Y-up here, so positions pass straight through.
+Vector3 to_rl(const vec3<T> & v) {
+	return { v.x, v.y, v.z };
+}
+
+void draw_bone(const solid<T> & s, const bone_def & b, Color face, Color wire) {
+	const mat3<T> & R = s.get_orientation();
+	const vec3<T> & p = s.get_position();
+	// Column-major, which is what rlMultMatrixf takes.
+	const float m[16] = {
+		R.at(0, 0), R.at(1, 0), R.at(2, 0), 0.0f,
+		R.at(0, 1), R.at(1, 1), R.at(2, 1), 0.0f,
+		R.at(0, 2), R.at(1, 2), R.at(2, 2), 0.0f,
+		p.x, p.y, p.z, 1.0f,
+	};
+	rlPushMatrix();
+	rlMultMatrixf(m);
+	DrawCube({ 0.0f, 0.0f, 0.0f }, 2.0f * b.hx, 2.0f * b.hy, 2.0f * b.hz, face);
+	DrawCubeWires({ 0.0f, 0.0f, 0.0f }, 2.0f * b.hx, 2.0f * b.hy, 2.0f * b.hz, wire);
+	rlPopMatrix();
+}
+
+struct scene {
+	std::unique_ptr<simulator<T>> sim;
+	ragdoll doll;
+};
+
+void drop(scene & sc, int throw_index, bool limited, float projection) {
+	sc.sim = std::make_unique<simulator<T>>();
+	sc.sim->set_gravity(vec3<T>(0.0f, -20.0f, 0.0f));
+	sc.sim->set_joint_projection(projection);
+	add_floor(*sc.sim);
+	// Throw 0 is Table 1's; the rest are the spread Tables 4 and 5 average over.
+	sc.doll = throw_index == 0
+	    ? build(*sc.sim, vec3<T>(0.0f, 1.2f, 0.0f), vec3<T>(0.0f, 1.0f, -4.0f), limited)
+	    : drop_spread(*sc.sim, throw_index, limited);
+}
+
+void run_view() {
+	const T dt = tr::from_milli(16);
+	int throw_index = 0;
+	bool limited = true;
+	float projection = 1.0f;
+	scene sc;
+	drop(sc, throw_index, limited, projection);
+
+	InitWindow(1280, 720, "hop — ragdoll");
+	SetTargetFPS(60);
+
+	bool paused = false;
+	float cam_angle = 0.8f;
+	float phys_ms = 0.0f;
+	Vector3 focus = { 0.0f, 0.5f, 0.0f };
+
+	while (!WindowShouldClose()) {
+		if (IsKeyPressed(KEY_SPACE)) paused = !paused;
+		if (IsKeyPressed(KEY_R)) drop(sc, throw_index, limited, projection);
+		if (IsKeyPressed(KEY_N)) {
+			throw_index = (throw_index + 1) % kDrops;
+			drop(sc, throw_index, limited, projection);
+		}
+		if (IsKeyPressed(KEY_L)) {
+			limited = !limited;
+			drop(sc, throw_index, limited, projection);
+		}
+		if (IsKeyPressed(KEY_P)) {
+			projection = projection > 0.0f ? 0.0f : 1.0f;
+			sc.sim->set_joint_projection(projection);
+		}
+		if (IsKeyDown(KEY_LEFT)) cam_angle -= 1.5f * GetFrameTime();
+		if (IsKeyDown(KEY_RIGHT)) cam_angle += 1.5f * GetFrameTime();
+
+		if (!paused || IsKeyPressed(KEY_PERIOD)) {
+			auto t0 = std::chrono::steady_clock::now();
+			sc.sim->update(dt);
+			auto t1 = std::chrono::steady_clock::now();
+			phys_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
+		}
+
+		const Vector3 pelvis = to_rl(sc.doll.bones[0]->get_position());
+		focus.x += (pelvis.x - focus.x) * 0.05f;
+		focus.y += (std::max(pelvis.y, 0.3f) - focus.y) * 0.05f;
+		focus.z += (pelvis.z - focus.z) * 0.05f;
+
+		Camera3D cam = {};
+		cam.position = { focus.x + 3.2f * cosf(cam_angle), focus.y + 1.4f,
+		                 focus.z + 3.2f * sinf(cam_angle) };
+		cam.target = focus;
+		cam.up = { 0.0f, 1.0f, 0.0f };
+		cam.fovy = 50.0f;
+		cam.projection = CAMERA_PERSPECTIVE;
+
+		BeginDrawing();
+		ClearBackground({ 18, 18, 26, 255 });
+		BeginMode3D(cam);
+		DrawPlane({ 0.0f, 0.0f, 0.0f }, { 40.0f, 40.0f }, { 40, 42, 58, 255 });
+		DrawGrid(40, 0.5f);
+
+		int awake = 0;
+		for (int i = 0; i < kBoneCount; ++i) {
+			const bool active = sc.doll.bones[i]->active();
+			awake += active ? 1 : 0;
+			draw_bone(*sc.doll.bones[i], kBones[i],
+			          active ? Color { 205, 150, 120, 255 } : Color { 110, 110, 120, 255 },
+			          { 30, 20, 20, 255 });
+		}
+		// A pin drawn open is a pin the solver has not closed.
+		for (auto & c : sc.doll.joints) {
+			const vec3<T> a = anchor_world(c->get_start_solid(), c->get_local_anchor_a());
+			const vec3<T> b = anchor_world(c->get_end_solid(), c->get_local_anchor_b());
+			const bool open = length_squared(a, b) > 0.02f * 0.02f;
+			DrawSphere(to_rl(a), 0.015f, open ? RED : SKYBLUE);
+			if (open)
+				DrawLine3D(to_rl(a), to_rl(b), RED);
+		}
+		EndMode3D();
+
+		DrawText(TextFormat("Throw:      %d / %d", throw_index, kDrops - 1), 12, 12, 20, WHITE);
+		DrawText(TextFormat("Limits:     %s", limited ? "ON" : "OFF (pins only)"), 12, 36, 20, WHITE);
+		DrawText(TextFormat("Projection: %s", projection > 0.0f ? "ON" : "OFF"), 12, 60, 20, WHITE);
+		DrawText(TextFormat("Worst pin:  %.4f m", worst_joint_error(sc.doll)), 12, 84, 20, WHITE);
+		DrawText(TextFormat("Awake:      %d / %d bones", awake, kBoneCount), 12, 108, 20, WHITE);
+		DrawText(TextFormat("Physics:    %.2f ms", phys_ms), 12, 132, 20, WHITE);
+		if (paused)
+			DrawText("PAUSED", 580, 330, 40, { 255, 220, 60, 220 });
+		DrawText("Space : pause   . : step   R : drop again   N : next throw   L : limits   "
+		         "P : projection   Left/Right : orbit   (--headless runs the tables)",
+		         12, 694, 16, { 110, 110, 140, 255 });
+		EndDrawing();
+	}
+	CloseWindow();
+}
+
+} // namespace
+
+int main(int argc, char ** argv) {
+	bool headless = false;
+	for (int i = 1; i < argc; ++i)
+		if (std::strcmp(argv[i], "--headless") == 0)
+			headless = true;
+	if (!headless) {
+		run_view();
+		return 0;
+	}
+	return run_tables();
 }
