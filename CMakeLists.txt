@@ -28,6 +28,10 @@ if(HOP_BUILD_REPRO)
     # A 21-box, 20-pin corpse: does the chain hold, does it sleep, what does it cost.
     add_executable(demo_ragdoll examples/demo_ragdoll.cpp)
     target_link_libraries(demo_ragdoll PRIVATE hop)
+
+    # Bouncing blocks counting digits of pi.
+    add_executable(demo_pi_blocks examples/demo_pi_blocks.cpp)
+    target_link_libraries(demo_pi_blocks PRIVATE hop)
 endif()
 
 if(HOP_BUILD_EXAMPLES)
