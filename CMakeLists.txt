@@ -18,10 +18,7 @@ endif()
 # Examples
 option(HOP_BUILD_EXAMPLES "Build example programs" OFF)
 
-# Headless reproduction of the resting-contact spin-up. No renderer, so it builds
-# and runs anywhere, and it exits non-zero while the bug is present.
-option(HOP_BUILD_REPRO "Build headless reproduction programs" OFF)
-if(HOP_BUILD_REPRO)
+if(HOP_BUILD_EXAMPLES)
     add_executable(demo_gib_spin examples/demo_gib_spin.cpp)
     target_link_libraries(demo_gib_spin PRIVATE hop)
 
@@ -32,9 +29,7 @@ if(HOP_BUILD_REPRO)
     # Bouncing blocks counting digits of pi.
     add_executable(demo_pi_blocks examples/demo_pi_blocks.cpp)
     target_link_libraries(demo_pi_blocks PRIVATE hop)
-endif()
 
-if(HOP_BUILD_EXAMPLES)
     find_package(raylib REQUIRED)
     add_executable(demo_bounce examples/demo_bounce.cpp)
     target_link_libraries(demo_bounce PRIVATE hop raylib)
@@ -52,6 +47,10 @@ if(HOP_BUILD_EXAMPLES)
 
     add_executable(demo_rotating_platform examples/demo_rotating_platform.cpp)
     target_link_libraries(demo_rotating_platform PRIVATE hop raylib)
+
+    # Opens a window by default; --headless runs the acceptance tables.
+    add_executable(demo_ragdoll examples/demo_ragdoll.cpp)
+    target_link_libraries(demo_ragdoll PRIVATE hop raylib)
 
     # Gibs on a BSP hull vs an aa_box floor. The GoldSrc traceable it needs is copied
     # into examples/bsp from hop-godot — see the README there.

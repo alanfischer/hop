@@ -2591,7 +2591,7 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 			// Shared by both limits: turn an angle and its span into a world axis, the
 			// angular mass the pair presents about it, and how hard the velocity sweep
 			// should lean on it.
-			auto arm = [&](const vec3<T> & local_axis, T angle, T span,
+			auto arm = [&](const vec3<T> & local_axis, T angle, T span, T held,
 			               typename joint_row::limit_row & out) {
 				if (span < zero)
 					return;  // negative span: no limit at all
@@ -2621,9 +2621,11 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 				out.eff_spin = tr::one() / spin;
 				// Past the span the row is a stop whatever happens below — it never lets
 				// the joint open further. The recovery is the other half, and a SETTLED
-				// limit gives it up: it is held out of its cone by something the solver
-				// cannot move, and shoving at it every tick only keeps the pair awake.
-				const T viol = (r.limit_settled || angle <= span) ? zero : angle - span;
+				// limit winds back only as far as where it settled: it is held out of its
+				// cone by something the solver cannot move, and shoving past that every
+				// tick only keeps the pair awake.
+				const T back_to = (r.limit_settled && held > span) ? held : span;
+				const T viol = (angle <= back_to) ? zero : angle - back_to;
 				out.recover = viol * inv_dt * c->limit_bias_;
 				if (out.recover > max_recover)
 					out.recover = max_recover;
@@ -2648,10 +2650,10 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 				if (over > worst_violation)
 					worst_violation = over;
 			}
-			c->note_limit_violation(worst_violation);
+			c->note_limit_violation(worst_violation, swing, twist);
 			r.limit_settled = c->limit_settled();
 
-			arm(swing_axis, swing, c->swing_span_, r.swing);
+			arm(swing_axis, swing, c->swing_span_, c->get_held_swing(), r.swing);
 			// Twist is signed, and its violation axis is +X when the joint has wound one
 			// way and -X when it has wound the other — so both directions are the same
 			// one-sided row, and only the axis flips.
@@ -2660,7 +2662,7 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 				twist_axis.x = -tr::one();
 				twist = -twist;
 			}
-			arm(twist_axis, twist, c->twist_span_, r.twist);
+			arm(twist_axis, twist, c->twist_span_, c->get_held_twist(), r.twist);
 		}
 		joint_rows_.push_back(r);
 	}

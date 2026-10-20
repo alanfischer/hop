@@ -78,3 +78,8 @@ add_test(NAME test_shape_traceable_ownership COMMAND test_shape_traceable_owners
 add_executable(test_oriented_queries test_oriented_queries.cpp)
 target_link_libraries(test_oriented_queries PRIVATE hop)
 add_test(NAME test_oriented_queries COMMAND test_oriented_queries)
+
+# A spinning body must not invent energy, in a vacuum or landing on a floor.
+add_executable(test_gib_spin test_gib_spin.cpp)
+target_link_libraries(test_gib_spin PRIVATE hop)
+add_test(NAME test_gib_spin COMMAND test_gib_spin)

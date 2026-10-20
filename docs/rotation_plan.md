@@ -639,8 +639,8 @@ hitboxes. `constraint<T>` could not carry that, because everything it had was a 
 - **Tests:** `test_rigid_joint_chain` (two links hung off a world point hold both anchors
   to <2 cm under gravity and do not stretch) and `test_rigid_joint_sleeps` (the same body
   on a spring is still awake after 400 ticks; on a pin it is asleep) in
-  `tests/test_simulator.cpp`. Demo: `examples/demo_ragdoll.cpp`, headless under
-  `HOP_BUILD_REPRO`, builds the real 21-bone / 20-pin corpse.
+  `tests/test_simulator.cpp`. Demo: `examples/demo_ragdoll.cpp` (`--headless` for the
+  tables), builds the real 21-bone / 20-pin corpse.
 
 **What the demo turned up, which is not this phase's to fix.** The joints are exact — in
 free fall the 20 pins hold to 0.0000 m and the bones do not spin at all. On a floor the

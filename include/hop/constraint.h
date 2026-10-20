@@ -143,7 +143,7 @@ public:
 		limit_softness_ = tr::from_milli(800);    // ...SOFTNESS
 		limit_relaxation_ = tr::one();            // ...RELAXATION
 		settle_ticks_ = 30;                       // half a second at 60 Hz
-		limit_watch_.clear();
+		clear_settle();
 		local_anchor_a_.reset();
 		local_anchor_b_.reset();
 		end_point_.reset();
@@ -296,8 +296,11 @@ public:
 	// is what made a landed ragdoll shiver where it lay and never sleep.
 	//
 	// A settled limit keeps its stop — it still refuses to let the joint open any further.
-	// What it gives up is the RECOVERY and its claim on the sleep test, which is exactly
-	// how hop already treats a body resting on a floor: held, but not working.
+	// What it gives up is the RECOVERY past where it settled, and its claim on the sleep
+	// test, which is exactly how hop already treats a body resting on a floor: held, but not
+	// working. It still winds back to the angle it settled at, because the limit is solved
+	// only at the velocity level and every position pass rotates the pair behind its back;
+	// with no recovery at all a settled joint drifted ten degrees further open.
 	//
 	// Zero disables the rule, which is what hop did before this existed.
 	void set_settle_ticks(int t) { settle_ticks_ = t > 0 ? t : 0; }
@@ -306,16 +309,41 @@ public:
 
 	// Settling is a property of a pair that has stopped moving, so anything that gets the
 	// pair moving again re-opens the question — solid::activate calls this when a body wakes.
-	void clear_settle() { limit_watch_.clear(); }
+	void clear_settle() {
+		limit_watch_.clear();
+		window_swing_ = T {};
+		window_twist_ = T {};
+	}
 
 	// Bookkeeping for the rule above, called once per tick by the solver with the violation
 	// it just measured (zero when the joint is inside its cone, slop included). The question
 	// is asked once per WINDOW rather than once per tick, because a limit that is losing does
 	// not sit still while it loses — it oscillates, and a tick-by-tick "is that better than
-	// last tick?" reads every upswing as a fresh start and never concludes anything.
-	void note_limit_violation(T violation) {
-		limit_watch_.note(violation, settle_ticks_, tr::from_milli(2));  // ~0.1 degree
+	// last tick?" reads every upswing as a fresh start and never concludes anything. Windows
+	// are compared by their mean, and a violation still GROWING is being driven open, not
+	// held open — judged on progress alone, a tumbling corpse's joints settled mid-fall.
+	void note_limit_violation(T violation, T swing, T twist) {
+		const bool was_settled = limit_watch_.settled;
+		if (swing > window_swing_)
+			window_swing_ = swing;
+		if (tr::abs(twist) > window_twist_)
+			window_twist_ = tr::abs(twist);
+		limit_watch_.note(violation, settle_ticks_, tr::from_milli(2),  // ~0.1 degree
+		                  tr::from_milli(5));
+		// The window's widest, not this tick's: a limit that is losing oscillates, and
+		// holding it at the low end of that swing is still shoving at it.
+		if (limit_watch_.settled && (!was_settled || limit_watch_.count == 0)) {
+			held_swing_ = window_swing_;
+			held_twist_ = window_twist_;
+		}
+		if (limit_watch_.count == 0) {
+			window_swing_ = T {};
+			window_twist_ = T {};
+		}
 	}
+	// Where a settled limit gave up: its recovery winds back to here instead of the span.
+	T get_held_swing() const { return held_swing_; }
+	T get_held_twist() const { return held_twist_; }
 
 	bool is_active() const { return simulator_ != nullptr; }
 
@@ -435,16 +463,20 @@ private:
 	// One window's worth of "is this error going anywhere?", kept per error kind.
 	struct progress_watch {
 		bool settled = false;
+		bool have_last = false;
 		int count = 0;
-		T window_error {};
+		T window_sum {};
+		T last_mean {};
 
 		void clear() {
 			settled = false;
+			have_last = false;
 			count = 0;
-			window_error = T {};
+			window_sum = T {};
+			last_mean = T {};
 		}
 
-		void note(T error, int window, T progress) {
+		void note(T error, int window, T progress, T growth) {
 			if (error <= T {}) {   // no error at all: nothing to be stuck on
 				clear();
 				return;
@@ -453,19 +485,23 @@ private:
 				settled = false;
 				return;
 			}
-			if (count == 0) {
-				window_error = error;
-				count = 1;
-				return;
-			}
+			window_sum += error;
 			if (++count < window)
 				return;
-			settled = !(error < window_error - progress);
-			window_error = error;
-			count = 1;
+			const T mean = window_sum / scalar_traits<T>::from_int(window);
+			if (have_last)
+				settled = !(mean < last_mean - progress) && (settled || !(mean > last_mean + growth));
+			last_mean = mean;
+			have_last = true;
+			count = 0;
+			window_sum = T {};
 		}
 	};
 	progress_watch limit_watch_;
+	T held_swing_ {};
+	T held_twist_ {};
+	T window_swing_ {};
+	T window_twist_ {};
 
 	simulator<T> * simulator_ = nullptr;
 
