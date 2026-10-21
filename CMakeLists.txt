@@ -19,17 +19,6 @@ endif()
 option(HOP_BUILD_EXAMPLES "Build example programs" OFF)
 
 if(HOP_BUILD_EXAMPLES)
-    add_executable(demo_gib_spin examples/demo_gib_spin.cpp)
-    target_link_libraries(demo_gib_spin PRIVATE hop)
-
-    # A 21-box, 20-pin corpse: does the chain hold, does it sleep, what does it cost.
-    add_executable(demo_ragdoll examples/demo_ragdoll.cpp)
-    target_link_libraries(demo_ragdoll PRIVATE hop)
-
-    # Bouncing blocks counting digits of pi.
-    add_executable(demo_pi_blocks examples/demo_pi_blocks.cpp)
-    target_link_libraries(demo_pi_blocks PRIVATE hop)
-
     find_package(raylib REQUIRED)
     add_executable(demo_bounce examples/demo_bounce.cpp)
     target_link_libraries(demo_bounce PRIVATE hop raylib)
@@ -47,6 +36,10 @@ if(HOP_BUILD_EXAMPLES)
 
     add_executable(demo_rotating_platform examples/demo_rotating_platform.cpp)
     target_link_libraries(demo_rotating_platform PRIVATE hop raylib)
+
+    # Bouncing blocks counting digits of pi; --headless runs the tables.
+    add_executable(demo_pi_blocks examples/demo_pi_blocks.cpp)
+    target_link_libraries(demo_pi_blocks PRIVATE hop raylib)
 
     # Opens a window by default; --headless runs the acceptance tables.
     add_executable(demo_ragdoll examples/demo_ragdoll.cpp)

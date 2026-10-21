@@ -338,6 +338,35 @@ public:
 			}
 		}
 
+		// A sweep_slide contact was found where the partner stood then, and a partner that
+		// swept later may have left. Expire a pair that has opened past slop and isn't
+		// closing, so the solve doesn't hold the two together and their next hit is new.
+		for (size_t ii = 0; ii < num; ++ii) {
+			solid<T> * s = select(ii);
+			if (!s || s->uses_speculative_solve()) continue;
+			for (int i = 0; i < s->touch_count_; ++i) {
+				auto & slot = s->touches_[i];
+				if (slot.last_tick != current_tick_ || slot.point_count == 0) continue;
+				const auto & pt = slot.points[0];
+				solid<T> * partner = slot.partner;
+				vec3<T> moved;
+				sub(moved, s->position_, partner->position_);
+				sub(moved, slot.offset);
+				if (pt.separation + dot(moved, slot.normal) <= spec_slop_)
+					continue;
+				// Surface velocities at the contact, so a spinning body's tip counts.
+				vec3<T> v_self, v_partner, r_partner, spin;
+				cross(spin, s->angular_velocity_, pt.lever);
+				add(v_self, s->velocity_, spin);
+				sub(r_partner, pt.impact, partner->position_);
+				cross(spin, partner->angular_velocity_, r_partner);
+				add(v_partner, partner->velocity_, spin);
+				sub(v_self, v_partner);
+				if (dot(v_self, slot.normal) >= T {})
+					slot.last_tick = -1;
+			}
+		}
+
 		// Global velocity solve over the touched-pair graph: stacking force
 		// propagates here and impulses are exchanged at each body's real mass —
 		// including between a sweep_slide body and speculative bodies, so a
@@ -636,6 +665,18 @@ private:
 	                                                   int tick);
 	// Find an existing cache slot for (s, partner) or nullptr.
 	typename solid<T>::touch * find_touch(solid<T> * s, solid<T> * partner);
+	// Queue a contact for report_collisions, once per pair per tick: both bodies of an
+	// awake pair find it, and each record already reaches both listeners.
+	void record_collision(solid<T> * self, collision<T> & c) {
+		for (int i = 0; c.collider && i < num_collisions_; ++i) {
+			const auto & r = collisions_[i];
+			if ((r.collidee == self && r.collider == c.collider) || (r.collidee == c.collider && r.collider == self))
+				return;
+		}
+		c.collidee = self;
+		if (num_collisions_ < static_cast<int>(collisions_.size()))
+			collisions_[num_collisions_++].set(c);
+	}
 
 	// has_speculative gates the speculative-only shock-propagation phase (true when
 	// any body resolved this tick uses the speculative solve).
@@ -1226,13 +1267,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			bool sustained = (existing != nullptr && existing->last_tick == current_tick_ - 1);
 			if (!sustained &&
 			    (solid_ptr->collision_callback_ != nullptr ||
-			     (hit_solid && hit_solid->collision_callback_ != nullptr))) {
-				c.collidee = solid_ptr;
-				if (num_collisions_ < static_cast<int>(collisions_.size())) {
-					collisions_[num_collisions_].set(c);
-					num_collisions_++;
-				}
-			}
+			     (hit_solid && hit_solid->collision_callback_ != nullptr)))
+				record_collision(solid_ptr, c);
 
 			// Manager-driven custom response (e.g., destroy on impact). When
 			// the manager owns the response, the contact is not added to the
@@ -1270,7 +1306,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				cp.normal.set(pair_normal);
 				cp.separation = separation;
 				cp.id = 0;  // the swept path has one contact per partner; no feature to name
-				add_or_refresh_manifold(solid_ptr, hit_solid, &cp, 1, c.point, impact_speed, current_tick_);
+				auto * slot = add_or_refresh_manifold(solid_ptr, hit_solid, &cp, 1, c.point, impact_speed, current_tick_);
+				sub(slot->offset, old_pos, hit_solid->position_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly. On the
 				// approach the pair actually had: this tick's own gravity increment is
@@ -1626,13 +1663,8 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		typename solid<T>::touch * existing = find_touch(solid_ptr, partner);
 		bool sustained = (existing != nullptr && existing->last_tick == current_tick_ - 1);
 		if (!sustained && (solid_ptr->collision_callback_ != nullptr ||
-		                   (!partner_is_world && partner->collision_callback_ != nullptr))) {
-			col.collidee = solid_ptr;
-			if (num_collisions_ < static_cast<int>(collisions_.size())) {
-				collisions_[num_collisions_].set(col);
-				num_collisions_++;
-			}
-		}
+		                   (!partner_is_world && partner->collision_callback_ != nullptr)))
+			record_collision(solid_ptr, col);
 
 		// Manager-owned custom response (destroy on impact, character controller,
 		// bounce pad, ...). A claimed contact is excluded from the solver.
