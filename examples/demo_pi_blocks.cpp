@@ -62,15 +62,12 @@ static std::string run(T ratio, T hz, hop::contact_mode mode, bool tuned) {
 	big->set_stay_active(true);
 
 	int collisions = 0;
+	small->set_collision_callback([&](const hop::collision<T> &) { ++collisions; });
 	const T dt = 1 / hz;
 	int separating = 0;
 	for (long tick = 0; tick < hz * 20 && separating < hz; ++tick) {
-		T vs0 = small->get_velocity().x, vb0 = big->get_velocity().x;
 		sim.update(dt);
 		T vs = small->get_velocity().x, vb = big->get_velocity().x;
-		// A tick counts once, even if it held both a wall and a block contact.
-		if (vb != vb0 || (vs0 < 0 && vs > vs0))
-			++collisions;
 		separating = (vs >= 0 && vb >= vs) ? separating + 1 : 0;
 	}
 	T vs = small->get_velocity().x, vb = big->get_velocity().x;
