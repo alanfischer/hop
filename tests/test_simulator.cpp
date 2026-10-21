@@ -2022,6 +2022,54 @@ template <typename T> static void test_impact_reported_once(const char * label) 
 	printf("OK\n");
 }
 
+// sweep_slide bodies sweep one after another, so a body records its contact where its
+// partner stood at the time. Here the big block sweeps first, finds the small one touching
+// it and stops; the small one then leaves for the wall. Solved as still touching, that stale
+// contact held the small block to the big one and ate its bounce off the wall — and once
+// expired, it must not make the blocks' next real hit read as a sustained contact.
+template <typename T> static void test_sweep_contact_left_behind(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  sweep_contact_left_behind[%s]: ", label);
+	const T z {};
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>(z, z, z));
+	sim.set_default_contact_mode(contact_mode::sweep_slide);
+	auto make = [&](T mass, T x, T half, T vx) {
+		auto s = std::make_shared<solid<T>>();
+		if (mass > z)
+			s->set_mass(mass);
+		else
+			s->set_infinite_mass();
+		s->set_coefficient_of_gravity(z);
+		s->set_coefficient_of_restitution(tr::one());
+		s->set_coefficient_of_static_friction(z);
+		s->set_coefficient_of_dynamic_friction(z);
+		s->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-half, -half, -half), vec3<T>(half, half, half))));
+		s->set_position(vec3<T>(x, z, z));
+		s->set_velocity(vec3<T>(vx, z, z));
+		sim.add_solid(s);
+		return s;
+	};
+	// Added wall, small, big: the first tick runs the list reversed, so big sweeps first.
+	auto wall = make(z, -tr::one(), tr::one(), z);
+	auto small = make(tr::one(), tr::half(), tr::from_milli(250), -tr::from_int(20));
+	auto big = make(tr::from_int(100), tr::from_milli(1250), tr::half(), -tr::from_int(5));
+	int wall_hits = 0, block_hits = 0;
+	small->set_collision_callback([&](const collision<T> & c) { ++(c.collider == wall.get() ? wall_hits : block_hits); });
+
+	sim.update(tr::from_milli(16));
+	float bounced = tr::to_float(small->get_velocity().x);
+	int wall_first = wall_hits;
+	int blocks_before = block_hits;
+	for (int i = 0; i < 10; ++i)
+		sim.update(tr::from_milli(16));
+	printf("small v after wall %.2f, wall hits %d, later block hits %d ", bounced, wall_first, block_hits - blocks_before);
+	assert(wall_first == 1);
+	assert(bounced > 15.0f);                  // the bounce kept, not lost to the big block
+	assert(block_hits - blocks_before >= 1);  // and the blocks' next hit is reported
+	printf("OK\n");
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -2070,6 +2118,7 @@ int main() {
 	test_fast_spinner_no_tunnel<float>("float");
 	test_angular_substep_ccd<float>("float");
 	test_impact_reported_once<float>("float");
+	test_sweep_contact_left_behind<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -2120,6 +2169,7 @@ int main() {
 	test_fast_spinner_no_tunnel<fixed16>("fixed16");
 	test_angular_substep_ccd<fixed16>("fixed16");
 	test_impact_reported_once<fixed16>("fixed16");
+	test_sweep_contact_left_behind<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

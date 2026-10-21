@@ -338,6 +338,28 @@ public:
 			}
 		}
 
+		// A sweep_slide body found its contacts where each partner stood when it swept,
+		// and a partner that sweeps later can leave. Solving a pair that has come apart
+		// as still touching holds the partner to it (a block bouncing off a wall is held
+		// to the one it just left), so expire it: the solve skips it, and the pair's next
+		// hit is an impact rather than a sustained contact. A pair still closing keeps its
+		// contact: the body was stopped short of a partner it is catching up to.
+		for (size_t ii = 0; ii < num; ++ii) {
+			solid<T> * s = select(ii);
+			if (!s || s->uses_speculative_solve()) continue;
+			for (int i = 0; i < s->touch_count_; ++i) {
+				auto & slot = s->touches_[i];
+				if (slot.last_tick != current_tick_ || slot.point_count == 0) continue;
+				vec3<T> moved, closing;
+				sub(moved, s->position_, slot.partner->position_);
+				sub(moved, slot.offset);
+				sub(closing, s->velocity_, slot.partner->velocity_);
+				if (slot.points[0].separation + dot(moved, slot.normal) > spec_slop_ &&
+				    dot(closing, slot.normal) >= T {})
+					slot.last_tick = -1;
+			}
+		}
+
 		// Global velocity solve over the touched-pair graph: stacking force
 		// propagates here and impulses are exchanged at each body's real mass —
 		// including between a sweep_slide body and speculative bodies, so a
@@ -1283,7 +1305,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				cp.normal.set(pair_normal);
 				cp.separation = separation;
 				cp.id = 0;  // the swept path has one contact per partner; no feature to name
-				add_or_refresh_manifold(solid_ptr, hit_solid, &cp, 1, c.point, impact_speed, current_tick_);
+				auto * slot = add_or_refresh_manifold(solid_ptr, hit_solid, &cp, 1, c.point, impact_speed, current_tick_);
+				sub(slot->offset, old_pos, hit_solid->position_);
 				// Wake the partner if it was sleeping — pass B needs it
 				// participating in the solver to redistribute force properly. On the
 				// approach the pair actually had: this tick's own gravity increment is

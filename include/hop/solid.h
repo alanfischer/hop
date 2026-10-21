@@ -83,6 +83,7 @@ public:
 		int        last_tick = -1;    // refresh marker; stale slots are skipped by the solver
 		int        pair_built_tick = -1; // bumped to current_tick when the solver has already built a pair via this slot's twin (dedup)
 		int        manifold_tick = -1; // bumped to current_tick when these points were CLIPPED, not fallen back to the trace's single contact; the partner mirrors them rather than clipping its own
+		vec3<T>    offset;            // sweep_slide only: this solid's position minus the partner's when the contact was swept into, so a partner that moves later in Pass A can be seen to have left
 		point      points[max_manifold_points];
 		int        point_count = 0;
 	};
