@@ -1982,6 +1982,46 @@ template <typename T> static void test_blocked_limit_gives_up(const char * label
 }
 
 
+// Two awake bodies each find the contact between them, and every record is delivered to
+// both listeners: one impact must still arrive once per listener, not once per finder.
+template <typename T> static void test_impact_reported_once(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  impact_reported_once[%s]: ", label);
+	const T z {};
+	for (contact_mode mode : { contact_mode::speculative, contact_mode::sweep_slide }) {
+		simulator<T> sim;
+		sim.set_gravity(vec3<T>(z, z, z));
+		sim.set_default_contact_mode(mode);
+		auto make = [&](T x, T vx) {
+			auto s = std::make_shared<solid<T>>();
+			s->set_mass(tr::one());
+			s->set_coefficient_of_restitution(tr::one());
+			s->add_shape(std::make_shared<shape<T>>(sphere<T>(vec3<T>(z, z, z), tr::half())));
+			s->set_position(vec3<T>(x, z, z));
+			s->set_velocity(vec3<T>(vx, z, z));
+			sim.add_solid(s);
+			return s;
+		};
+		auto a = make(-tr::from_int(2), tr::from_int(5));
+		auto b = make(tr::from_int(2), -tr::from_int(5));
+		int seen_a = 0, seen_b = 0, total_a = 0, total_b = 0, worst = 0;
+		a->set_collision_callback([&](const collision<T> &) { ++seen_a; });
+		b->set_collision_callback([&](const collision<T> &) { ++seen_b; });
+		for (int i = 0; i < 100; ++i) {
+			seen_a = seen_b = 0;
+			sim.update(tr::from_milli(16));
+			total_a += seen_a;
+			total_b += seen_b;
+			worst = std::max(worst, std::max(seen_a, seen_b));
+		}
+		printf("%s a=%d b=%d worst_tick=%d ", mode == contact_mode::speculative ? "speculative" : "sweep_slide",
+		       total_a, total_b, worst);
+		assert(total_a >= 1 && total_b >= 1);
+		assert(worst == 1);
+	}
+	printf("OK\n");
+}
+
 template <typename T> static void test_dual_instantiation() {
 	// Just verify both can be instantiated in the same TU
 	simulator<T> sim;
@@ -2029,6 +2069,7 @@ int main() {
 	test_blocked_limit_gives_up<float>("float");
 	test_fast_spinner_no_tunnel<float>("float");
 	test_angular_substep_ccd<float>("float");
+	test_impact_reported_once<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -2078,6 +2119,7 @@ int main() {
 	test_blocked_limit_gives_up<fixed16>("fixed16");
 	test_fast_spinner_no_tunnel<fixed16>("fixed16");
 	test_angular_substep_ccd<fixed16>("fixed16");
+	test_impact_reported_once<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

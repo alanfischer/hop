@@ -636,6 +636,18 @@ private:
 	                                                   int tick);
 	// Find an existing cache slot for (s, partner) or nullptr.
 	typename solid<T>::touch * find_touch(solid<T> * s, solid<T> * partner);
+	// Both bodies of an awake pair find their contact, and report_collisions hands one
+	// record to both listeners: a second record this tick would deliver the impact twice.
+	bool collision_recorded(const solid<T> * a, const solid<T> * b) const {
+		if (!b)
+			return false;
+		for (int i = 0; i < num_collisions_; ++i) {
+			const auto & c = collisions_[i];
+			if ((c.collidee == a && c.collider == b) || (c.collidee == b && c.collider == a))
+				return true;
+		}
+		return false;
+	}
 
 	// has_speculative gates the speculative-only shock-propagation phase (true when
 	// any body resolved this tick uses the speculative solve).
@@ -1226,7 +1238,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			bool sustained = (existing != nullptr && existing->last_tick == current_tick_ - 1);
 			if (!sustained &&
 			    (solid_ptr->collision_callback_ != nullptr ||
-			     (hit_solid && hit_solid->collision_callback_ != nullptr))) {
+			     (hit_solid && hit_solid->collision_callback_ != nullptr)) &&
+			    !collision_recorded(solid_ptr, hit_solid)) {
 				c.collidee = solid_ptr;
 				if (num_collisions_ < static_cast<int>(collisions_.size())) {
 					collisions_[num_collisions_].set(c);
@@ -1625,8 +1638,10 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		// Callback recording, suppressed on sustained contact (as update_solid).
 		typename solid<T>::touch * existing = find_touch(solid_ptr, partner);
 		bool sustained = (existing != nullptr && existing->last_tick == current_tick_ - 1);
-		if (!sustained && (solid_ptr->collision_callback_ != nullptr ||
-		                   (!partner_is_world && partner->collision_callback_ != nullptr))) {
+		if (!sustained &&
+		    (solid_ptr->collision_callback_ != nullptr ||
+		     (!partner_is_world && partner->collision_callback_ != nullptr)) &&
+		    !collision_recorded(solid_ptr, col.collider)) {
 			col.collidee = solid_ptr;
 			if (num_collisions_ < static_cast<int>(collisions_.size())) {
 				collisions_[num_collisions_].set(col);
