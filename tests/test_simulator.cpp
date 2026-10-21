@@ -1336,7 +1336,7 @@ template <typename T> static void test_angular_substep_ccd(const char * label) {
 	// The blade crosses the peg ~81 times in 200 frames (two ends, ~73°/frame). A single
 	// snapshot only sees the crossings a frame boundary happens to land inside, which is
 	// the narrow angular window the peg subtends; subdividing traces the sweep itself.
-	assert(seen_on > seen_off * 2);
+	assert(seen_on > seen_off * 3);
 	assert(on > 50.0f); // and a traced pass still knocks the peg well away
 	printf("OK\n");
 }
@@ -2022,11 +2022,8 @@ template <typename T> static void test_impact_reported_once(const char * label) 
 	printf("OK\n");
 }
 
-// sweep_slide bodies sweep one after another, so a body records its contact where its
-// partner stood at the time. Here the big block sweeps first, finds the small one touching
-// it and stops; the small one then leaves for the wall. Solved as still touching, that stale
-// contact held the small block to the big one and ate its bounce off the wall — and once
-// expired, it must not make the blocks' next real hit read as a sustained contact.
+// The big block sweeps first and stops against the small one, which then leaves for the
+// wall. That stale contact must not eat the wall bounce, nor hide the blocks' next hit.
 template <typename T> static void test_sweep_contact_left_behind(const char * label) {
 	using tr = scalar_traits<T>;
 	printf("  sweep_contact_left_behind[%s]: ", label);
