@@ -2077,6 +2077,87 @@ template <typename T> static void test_dual_instantiation() {
 	printf("  dual instantiation: OK\n");
 }
 
+// A body's own contact mode holds on whichever side of add_solid it is set; only a body that
+// never chose one takes the simulator's default.
+template <typename T> static void test_contact_mode_survives_add_solid(const char * label) {
+	printf("  contact_mode_survives_add_solid[%s]: ", label);
+	simulator<T> sim;  // default sweep_slide
+	auto chose = std::make_shared<solid<T>>();
+	auto left = std::make_shared<solid<T>>();
+	assert(left->get_contact_mode() == contact_mode::inherit);
+	assert(!left->uses_speculative_solve());
+	chose->set_contact_mode(contact_mode::speculative);
+	sim.add_solid(chose);
+	sim.add_solid(left);
+	assert(chose->get_contact_mode() == contact_mode::speculative);
+	assert(left->get_contact_mode() == contact_mode::sweep_slide);
+
+	// inherit on a body already added means that simulator's default, now.
+	chose->set_contact_mode(contact_mode::inherit);
+	assert(chose->get_contact_mode() == contact_mode::sweep_slide);
+
+	// A body moved to another simulator keeps its mode; a new one takes that default.
+	simulator<T> other;
+	other.set_default_contact_mode(contact_mode::speculative);
+	sim.remove_solid(left);
+	other.add_solid(left);
+	assert(left->get_contact_mode() == contact_mode::sweep_slide);
+	auto fresh = std::make_shared<solid<T>>();
+	other.add_solid(fresh);
+	assert(fresh->get_contact_mode() == contact_mode::speculative);
+
+	// reset forgets the choice along with everything else.
+	auto pooled = std::make_shared<solid<T>>();
+	pooled->set_contact_mode(contact_mode::speculative);
+	pooled->reset();
+	assert(pooled->get_contact_mode() == contact_mode::inherit);
+	printf("OK\n");
+}
+
+// The case the API used to get wrong: a tumbling box made speculative BEFORE add_solid,
+// in a sweep_slide scene. It has to land on the speculative path, get its manifold and
+// sleep; dropped to sweep_slide by add_solid, it rocked on one point forever.
+template <typename T> static void test_mode_set_before_add_settles(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  mode_set_before_add_settles[%s]: ", label);
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>(T {}, T {}, -tr::from_milli(9810)));
+
+	auto floor = std::make_shared<solid<T>>();
+	floor->set_infinite_mass();
+	floor->set_coefficient_of_gravity(T {});
+	floor->add_shape(std::make_shared<shape<T>>(
+	    aa_box<T>(vec3<T>(-tr::from_int(6), -tr::from_int(6), -tr::one()),
+	              vec3<T>(tr::from_int(6), tr::from_int(6), T {}))));
+	sim.add_solid(floor);
+
+	auto box = std::make_shared<solid<T>>();
+	box->set_mass(tr::one());
+	const T i = tr::from_milli(60);  // (0.6 m)^2 / 6
+	box->set_inertia(vec3<T>(i, i, i));
+	box->set_coefficient_of_restitution(tr::from_milli(200));
+	box->set_coefficient_of_static_friction(tr::from_milli(600));
+	box->set_coefficient_of_dynamic_friction(tr::from_milli(450));
+	const T h = tr::from_milli(300);
+	box->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-h, -h, -h), vec3<T>(h, h, h))));
+	box->set_position(vec3<T>(-tr::from_int(3), tr::from_int(3), tr::from_milli(2500)));
+	box->set_velocity(vec3<T>(tr::from_int(4), tr::one(), tr::from_int(2)));
+	box->set_angular_velocity(vec3<T>(tr::from_milli(400), -tr::from_milli(1600), T {}));
+	box->set_contact_mode(contact_mode::speculative);
+	sim.add_solid(box);
+	assert(box->uses_speculative_solve());
+
+	int slept_at = -1;
+	for (int t = 0; t < 12 * 60 && slept_at < 0; ++t) {
+		sim.update(tr::one() / tr::from_int(60));
+		if (!box->active())
+			slept_at = t;
+	}
+	printf("slept at tick %d ", slept_at);
+	assert(slept_at >= 0);
+	printf("OK\n");
+}
+
 int main() {
 	printf("test_simulator (float):\n");
 	test_gravity_drop<float>();
@@ -2116,6 +2197,8 @@ int main() {
 	test_angular_substep_ccd<float>("float");
 	test_impact_reported_once<float>("float");
 	test_sweep_contact_left_behind<float>("float");
+	test_contact_mode_survives_add_solid<float>("float");
+	test_mode_set_before_add_settles<float>("float");
 	test_dual_instantiation<float>();
 
 	printf("test_simulator (fixed16):\n");
@@ -2167,6 +2250,7 @@ int main() {
 	test_angular_substep_ccd<fixed16>("fixed16");
 	test_impact_reported_once<fixed16>("fixed16");
 	test_sweep_contact_left_behind<fixed16>("fixed16");
+	test_contact_mode_survives_add_solid<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

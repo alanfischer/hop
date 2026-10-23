@@ -139,10 +139,11 @@ public:
 	int get_max_collision_iterations() const { return max_collision_iterations_; }
 
 	// Contact resolution is a per-body property (solid::set_contact_mode); the
-	// simulator has no global pipeline switch. This sets the default mode stamped
-	// onto bodies as they are added (add_solid), so a scene that wants one strategy
-	// throughout sets it once here; mixed scenes override individual bodies. Default
-	// is sweep_slide (the swept collide-and-slide path). See contact_mode and
+	// simulator has no global pipeline switch. This sets the mode add_solid gives a
+	// body that hasn't chosen one (contact_mode::inherit), so a scene that wants one
+	// strategy throughout sets it once here; mixed scenes set individual bodies, before
+	// or after adding them. Bodies already added keep their mode. Default is
+	// sweep_slide (the swept collide-and-slide path). See contact_mode and
 	// solid::set_contact_mode.
 	void set_default_contact_mode(contact_mode m) { default_contact_mode_ = m; }
 	contact_mode get_default_contact_mode() const { return default_contact_mode_; }
@@ -198,7 +199,8 @@ public:
 		solids_.push_back(s);
 		s->internal_set_simulator(this);
 		s->solve_id_ = next_solve_id_++;  // stable canonical-ordering key (see solid::solve_id_)
-		s->set_contact_mode(default_contact_mode_);  // per-body default; override after add_solid
+		if (s->get_contact_mode() == contact_mode::inherit)
+			s->set_contact_mode(default_contact_mode_);
 		s->activate();
 		spacial_collection_.resize(solids_.size());
 	}
@@ -862,8 +864,8 @@ private:
 	std::vector<int> shock_order_;
 	std::vector<T> shock_key_;
 	std::vector<solid<T> *> shock_lo_;
-	// Default contact mode stamped onto bodies in add_solid (per-body overridable;
-	// see set_default_contact_mode / solid::set_contact_mode).
+	// The mode add_solid gives a body still on contact_mode::inherit (see
+	// set_default_contact_mode / solid::set_contact_mode).
 	contact_mode default_contact_mode_ = contact_mode::sweep_slide;
 	T spec_margin_ {};         // discover contacts up to this far beyond the predicted motion
 	T spec_slop_ {};           // penetration tolerated without correction (kills resting jitter)
