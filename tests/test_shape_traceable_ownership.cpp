@@ -76,8 +76,8 @@ static void test_move_carries_ownership() {
 	printf("  move_carries_ownership ok\n");
 }
 
-// Switching to any other variant releases the owned geometry — the same
-// discipline convex_solid_ already follows.
+// Switching to any other variant releases the owned geometry — assigning a new
+// alternative to the shape's payload destroys the outgoing one, convex_solid included.
 static void test_switching_variant_releases_owned_traceable() {
 	shape<T> s(std::make_unique<counting_traceable>());
 	assert(g_live == 1);
