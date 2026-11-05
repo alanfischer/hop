@@ -1687,23 +1687,21 @@ inline int manifold_for_traceable(contact_point<T> * out, int max_out,
 	// anyway; admitting it would only put a sideways row where a supporting one belongs.
 	const T same_surface = tr::from_milli(700);  // within ~45 degrees of the contact normal
 
-	contact_point<T> scratch[manifold_face<T>::max_verts];
+	// A probe that finds the same surface under `world_point` fills `hit`.
 	collision<T> hit;
-	int nscratch = 0;
-	for (int i = 0; i < nwitness && nscratch < manifold_face<T>::max_verts; ++i) {
-		vec3<T> world_vert;
-		add(world_vert, witness[i], origin);
+	auto supported = [&](const vec3<T> & world_point) {
 		segment<T> probe;
 		vec3<T> up;
 		mul(up, n, lift);
-		add(probe.origin, world_vert, up);
+		add(probe.origin, world_point, up);
 		mul(probe.direction, neg_n, span);
 		hit.reset();
 		geom->trace_segment(hit, geom_position, geom_orientation, probe);
-		if (hit.time >= tr::one())
-			continue;  // nothing under this corner
-		if (dot(hit.normal, n) < same_surface)
-			continue;
+		return hit.time < tr::one() && dot(hit.normal, n) >= same_surface;
+	};
+	contact_point<T> scratch[manifold_face<T>::max_verts * 2];
+	int nscratch = 0;
+	auto emit = [&](int inc_tag) {
 		contact_point<T> & cp = scratch[nscratch++];
 		// Distance travelled before the hit, less the lift, is the signed gap along the
 		// contact normal: 0 resting on the surface, negative sunk into it.
@@ -1711,7 +1709,45 @@ inline int manifold_for_traceable(contact_point<T> * out, int max_out,
 		cp.impact.set(hit.point);
 		cp.normal.set(hit.normal);
 		cp.id = manifold_feature_id(/*ref_is_partner*/ true, mover_shape_index, geom_shape_index,
-		                            face_index, 0, witness_tag[i], 0x3F);
+		                            face_index, 0, inc_tag, 0x3F);
+	};
+	vec3<T> world_vert[manifold_face<T>::max_verts];
+	bool held[manifold_face<T>::max_verts];
+	for (int i = 0; i < nwitness; ++i) {
+		add(world_vert[i], witness[i], origin);
+		held[i] = supported(world_vert[i]);
+		if (held[i])
+			emit(witness_tag[i]);
+	}
+	// A body overhanging a ledge rests on the ledge, not just on its corners still over
+	// the surface: with those alone its weight sits past them and it tips off. Each edge
+	// with one end held and one over the drop gets a point where it crosses the ledge,
+	// found by bisection. A fixed count keeps it deterministic.
+	const int nedges = nwitness == 2 ? 1 : nwitness;
+	for (int e = 0; e < nedges; ++e) {
+		const int i = e, j = (e + 1) % nwitness;
+		if (held[i] == held[j])
+			continue;
+		vec3<T> in = held[i] ? world_vert[i] : world_vert[j];
+		vec3<T> out_v = held[i] ? world_vert[j] : world_vert[i];
+		bool found = false;
+		collision<T> best;
+		for (int k = 0; k < 10; ++k) {
+			vec3<T> mid;
+			add(mid, in, out_v);
+			mul(mid, tr::half());
+			if (supported(mid)) {
+				in = mid;
+				best = hit;
+				found = true;
+			} else {
+				out_v = mid;
+			}
+		}
+		if (!found)
+			continue;  // the ledge is at the held corner, which has its point
+		hit = best;
+		emit(0x40 | e);
 	}
 	if (nscratch == 0)
 		return 0;

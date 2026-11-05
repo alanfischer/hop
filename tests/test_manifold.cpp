@@ -550,6 +550,41 @@ static void test_a_lying_capsule_on_traceable_geometry_has_two_points() {
 	assert_both_sides_agree("rod on level geometry", rod.get(), ground.get(), v(0, 1, 0), 2);
 }
 
+// A ledge: the level plane, but only where z <= 0.
+class ledge_traceable : public plane_traceable {
+public:
+	void trace_segment(collision<T> & result, const vec3<T> & position, const mat3<T> & R,
+	                   const segment<T> & seg) override {
+		collision<T> hit;
+		hit.reset();
+		plane_traceable::trace_segment(hit, position, R, seg);
+		if (hit.time < (T)1 && hit.point.z <= T {})
+			result = hit;
+	}
+};
+
+// A box overhanging a ledge with its weight still over the top rests on the ledge. Its
+// corners past the edge have nothing under them, and the two left behind are all on the
+// far side of its centre of mass, so the ledge itself must be a point or the box tips off.
+static void test_a_box_overhanging_a_ledge_is_held_at_the_ledge() {
+	if (max_manifold_points == 1) { printf("  a_box_overhanging_a_ledge_is_held_at_the_ledge skipped (parity build)\n"); return; }
+	auto ground = std::make_shared<solid<T>>();
+	ground->add_shape(std::make_shared<shape<T>>(std::make_unique<ledge_traceable>()));
+	ground->set_infinite_mass();
+	ground->set_position(v(0, 0, 0));
+	auto box = make_box(0.15, 0.05, 0.4, v(0, 0.05, -0.1));
+	contact_point<T> pts[max_manifold_points];
+	const int n = manifold_of(pts, box.get(), ground.get());
+	T reach = (T)-1;
+	for (int i = 0; i < n; ++i) {
+		assert(pts[i].impact.z <= kEps && "no point over the drop");
+		reach = std::max(reach, (T)pts[i].impact.z);
+	}
+	assert(n >= 3);
+	assert(reach > (T)-0.01 && "a point reaches the ledge, past the centre of mass");
+	printf("  a_box_overhanging_a_ledge_is_held_at_the_ledge ok (%d points, reach z=%.4f)\n", n, (double)reach);
+}
+
 // One manifold per pair per tick, held by BOTH sides: the second body to discover the
 // contact mirrors the first's points rather than clipping its own.
 static void test_the_two_slots_hold_one_manifold() {
@@ -728,6 +763,7 @@ int main() {
 	test_a_dropped_rod_comes_to_rest_on("box floor", make_floor);
 	test_a_dropped_rod_comes_to_rest_on("map geometry", make_traceable_floor);
 	test_a_lying_capsule_on_traceable_geometry_has_two_points();
+	test_a_box_overhanging_a_ledge_is_held_at_the_ledge();
 	test_rolling_resistance_stops_a_sphere();
 	test_parity_at_one_point();
 	printf("test_manifold: all passed\n");
