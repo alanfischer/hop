@@ -83,3 +83,7 @@ add_test(NAME test_oriented_queries COMMAND test_oriented_queries)
 add_executable(test_gib_spin test_gib_spin.cpp)
 target_link_libraries(test_gib_spin PRIVATE hop)
 add_test(NAME test_gib_spin COMMAND test_gib_spin)
+
+add_executable(test_alloc test_alloc.cpp)
+target_link_libraries(test_alloc PRIVATE hop)
+add_test(NAME test_alloc COMMAND test_alloc)

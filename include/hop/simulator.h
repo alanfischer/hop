@@ -3409,10 +3409,12 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		const int nshock = static_cast<int>(shock_order_.size());
 		// Order contacts support-end-first: descending depth, so a body's contacts
 		// from below are visited before the contacts it supports from above.
-		// stable_sort keeps the canonical pair order for equal depths, so the sweep
-		// stays deterministic (fixed-point included).
-		std::stable_sort(shock_order_.begin(), shock_order_.end(),
-		                 [this](int i, int j) { return shock_key_[i] > shock_key_[j]; });
+		// Equal depths keep the canonical pair order, so the sweep stays deterministic
+		// (fixed-point included). The index tie-break gives std::sort stable_sort's
+		// order without the buffer stable_sort allocates.
+		std::sort(shock_order_.begin(), shock_order_.end(), [this](int i, int j) {
+			return shock_key_[i] > shock_key_[j] || (shock_key_[i] == shock_key_[j] && i < j);
+		});
 		for (int pass = 0; pass < config_.shock_iterations && nshock > 0; ++pass) {
 			// Re-seed the freeze state each pass: only the standing anchors start
 			// frozen; the support-end-first walk re-freezes the rest against the

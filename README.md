@@ -14,7 +14,7 @@ Supports `float`, `double`, `fixed16`, and `fixed32` scalar types via template p
 
 ## Design Philosophy
 
-Hop began as a **translation-only** physics engine — and that fast, predictable core is still its heart: continuous swept-collision detection, deterministic fixed-point support, and zero-allocation simulation. It was designed for the [toadlet](https://github.com/alanfischer/toadlet) game engine, where gameplay objects (characters, projectiles, pickups, triggers, vehicles on terrain) need solid collision response without the cost of a full rigid-body solver on every body.
+Hop began as a **translation-only** physics engine — and that fast, predictable core is still its heart: continuous swept-collision detection, deterministic fixed-point support, and a tick that allocates nothing once warm. Solids, shapes and constraints are `shared_ptr`-owned and allocated when the scene is built; `update()` reuses its scratch, growing it only when a scene reaches a new high-water mark (`tests/test_alloc.cpp` holds it to that). It was designed for the [toadlet](https://github.com/alanfischer/toadlet) game engine, where gameplay objects (characters, projectiles, pickups, triggers, vehicles on terrain) need solid collision response without the cost of a full rigid-body solver on every body.
 
 **Rotation is now supported, and it is opt-in by construction.** A solid carries an orientation, angular velocity, and a principal-axis inertia, but every rotational term is gated behind a runtime *identity fast path*: a solid with identity orientation and zero inertia takes exactly the original translation-only code path, bit-for-bit (including fixed-point replay). There is **no template flag and no global switch** — you pay for rotation only on the bodies that use it:
 

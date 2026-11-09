@@ -336,6 +336,7 @@ void build_convex_box_minkowski(convex_solid<T> & out,
                                 const convex_solid<T> & convex,
                                 const vec3<T> & box_half) {
 	const aa_box<T> box(-box_half.x, -box_half.y, -box_half.z, box_half.x, box_half.y, box_half.z);
+	out.vertices.clear();
 	out.planes = convex.planes;
 	out.planes.reserve(convex.planes.size() + 6);
 	vec3<T> sup;
@@ -498,7 +499,7 @@ void trace_rounded_convex_forward(collision<T> & col, const segment<T> & seg,
 	vec3<T> D_world;
 	if (is_capsule)
 		mul(D_world, R1, sh1->get_capsule().direction);
-	convex_solid<T> cs, box_scratch;
+	thread_local convex_solid<T> cs, box_scratch;
 	inflate_convex_world(cs, polytope_of(sh2, box_scratch), Rc, radius, is_capsule, D_world, margin);
 	// Primitive reference offset from s1's position: s1_orientation·lp1 + R1·prim_origin.
 	vec3<T> sh1_offset, ro;
@@ -524,7 +525,7 @@ void trace_rounded_convex_inverted(collision<T> & col, const segment<T> & seg,
 	vec3<T> D_world;
 	if (is_capsule)
 		mul(D_world, R2, sh2->get_capsule().direction);
-	convex_solid<T> cs, box_scratch;
+	thread_local convex_solid<T> cs, box_scratch;
 	inflate_convex_world(cs, polytope_of(sh1, box_scratch), Rc, radius, is_capsule, D_world, margin);
 	// lp_delta in world: s2_orientation·lp2 − s1_orientation·lp1 (trace_inverted_convex
 	// adds it to s2_position − s1_position to reach the convex's local frame).
@@ -1074,13 +1075,14 @@ inline void trace_pair_oriented_polytope(collision<T> & col, const segment<T> & 
 	sub(rel, s2->get_position(), seg.origin);
 	add(base2, rel);
 
-	world_polytope<T> A, B;
+	// Per-thread scratch: clear() keeps capacity, so a warm tick allocates nothing.
+	thread_local world_polytope<T> A, B;
+	thread_local convex_solid<T> cso;
 	build_world_polytope(A, sh1, R1, base1, epsilon);
 	build_world_polytope(B, sh2, R2, base2, epsilon);
 	if (A.verts.empty() || B.verts.empty())
 		return; // malformed convex — leave col untouched (no hit)
 
-	convex_solid<T> cso;
 	build_polytope_cso(cso, A, B, epsilon);
 	if (margin > T {})
 		for (auto & p : cso.planes)
@@ -2335,7 +2337,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				vec3<T> half;
 				sub(half, sh1->get_box().maxs, sh1->get_box().mins);
 				mul(half, tr::half());
-				convex_solid<T> cs;
+				thread_local convex_solid<T> cs;
 				build_convex_box_minkowski(cs, sh2->get_convex_solid(), half);
 				vec3<T> sh1_offset;
 				add(sh1_offset, sh1->get_box().mins, sh1->get_box().maxs);
@@ -2437,7 +2439,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				vec3<T> half;
 				sub(half, sh2->get_box().maxs, sh2->get_box().mins);
 				mul(half, tr::half());
-				convex_solid<T> cs;
+				thread_local convex_solid<T> cs;
 				build_convex_box_minkowski(cs, sh1->get_convex_solid(), half);
 				vec3<T> sh2_offset;
 				add(sh2_offset, sh2->get_box().mins, sh2->get_box().maxs);
@@ -2463,7 +2465,8 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			else if (sh1->get_type() == shape_type::convex_solid && sh2->get_type() == shape_type::convex_solid) {
 				const auto & a = sh1->get_convex_solid();
 				const auto & b = sh2->get_convex_solid();
-				convex_solid<T> cs;
+				thread_local convex_solid<T> cs;
+				cs.vertices.clear();
 				cs.planes = b.planes;
 				cs.planes.reserve(b.planes.size() + a.planes.size());
 				vec3<T> sup;

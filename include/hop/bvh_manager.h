@@ -81,8 +81,8 @@ public:
 	void mark_dynamic_moved() { dynamic_moved_ = true; }
 
 	void rebuild() {
-		std::vector<std::pair<aa_box<T>, solid<T> *>> entries;
-		entries.reserve(static_solids_.size());
+		auto & entries = entries_;
+		entries.clear();
 
 		for (auto * s : static_solids_) {
 			if (s->get_shapes().empty())
@@ -112,8 +112,8 @@ public:
 	// from their initial spatial clustering and queries are returning too
 	// many false positives.
 	void rebuild_dynamic() {
-		std::vector<std::pair<aa_box<T>, solid<T> *>> entries;
-		entries.reserve(dynamic_solids_.size());
+		auto & entries = entries_;
+		entries.clear();
 
 		for (auto * s : dynamic_solids_) {
 			if (s->get_shapes().empty())
@@ -299,6 +299,7 @@ private:
 	std::vector<solid<T> *> static_solids_;
 	std::vector<solid<T> *> dynamic_solids_;
 	std::vector<solid<T> *> iteration_order_;
+	std::vector<std::pair<aa_box<T>, solid<T> *>> entries_; // rebuild scratch
 	bvh<T, solid<T> *> bvh_;
 	bvh<T, solid<T> *> dynamic_bvh_;
 	bool dirty_ = false;
