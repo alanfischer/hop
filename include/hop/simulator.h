@@ -22,13 +22,91 @@ enum class integrator_type {
 	runge_kutta,
 };
 
+// Simulator tuning. Every field carries its default; most scenes change only the
+// first group. Hand it to the constructor or to simulator::set_config.
+template <typename T> struct simulator_config {
+	using tr = scalar_traits<T>;
+
+	// --- The ones people change ---
+
+	// The contact_mode add_solid gives a body still on contact_mode::inherit. A scene
+	// that wants one strategy throughout sets it here; mixed scenes set bodies
+	// individually (solid::set_contact_mode).
+	contact_mode default_contact_mode = contact_mode::sweep_slide;
+	// Gauss–Seidel sweeps of the contact solver per tick. Deep sweep_slide stacks need
+	// the full count; lowering it is not a speed-up, since an unsettled pile keeps more
+	// bodies awake.
+	int solver_iterations = 16;
+	// A body sleeps after deactivate_count consecutive ticks slower than
+	// deactivate_speed. Raising the speed or lowering the count sleeps more of a pile,
+	// and past a point freezes bodies mid-motion.
+	T deactivate_speed = tr::from_milli(200);
+	int deactivate_count = 32;
+	// Closing speeds along the normal at or below this get no restitution bounce.
+	T micro_collision_threshold = tr::one();
+	// Rounded-vs-polytope narrowphase: true is the GJK closest-point sweep (correct
+	// edge and vertex normals), false the cheaper plane-inflation path (face normals
+	// only). Zero-radius polytope pairs always take the cheap path.
+	bool accurate_narrowphase = true;
+	// Angular continuous collision for fast spinners: a sweep_slide body's frame is
+	// split into up to this many fixed-orientation sub-traces, more the faster it
+	// spins. 1 is one orientation snapshot per frame.
+	int angular_substeps_max = 1;
+	// Tip travel per angular substep: N ≈ ceil(|ω|·dt·r_max / clearance).
+	T angular_substep_clearance = tr::from_milli(250);
+	// How far a rigid joint may open, as a fraction of its own anchor span, before one
+	// end is moved to close the excess. A tolerance, not a stiffness: set it past the
+	// error normal play leaves. Bounded error is bought with penetration. 0 disables it.
+	T joint_projection = tr::one();
+
+	// --- Integration ---
+
+	integrator_type integrator = integrator_type::heun;
+	// Scene-wide switch for dynamic rotation. Bodies with zero inverse inertia already
+	// skip it; this turns spin off for everything.
+	bool angular_integration = true;
+	// Distance tolerance of the traces and contact tests. Fixed-point types take it as
+	// tr::make_epsilon(bits). speculative_margin and speculative_slop below default to
+	// multiples of the default epsilon; set them too when changing it.
+	T epsilon = tr::default_epsilon();
+	// Blend the normals of several simultaneous colliders into one contact normal.
+	bool average_normals = true;
+
+	// --- Per-component clamps (0 disables the angular one) ---
+
+	T max_position_component = tr::default_max_position_component();
+	T max_velocity_component = tr::default_max_velocity_component();
+	T max_angular_velocity_component = tr::default_max_angular_velocity_component();
+	T max_force_component = tr::default_max_force_component();
+
+	// --- Solver budgets ---
+
+	// Swept sub-steps per body per tick in sweep_slide. Too low lets a fast body in a
+	// dense scene slip through geometry it never traced against.
+	int max_collision_iterations = 16;
+	// Shock-propagation passes after the speculative velocity solve, so a deep pile
+	// carries its load to the floor without solver_iterations ≈ depth. 0 disables them.
+	int shock_iterations = 2;
+	// Speculative position solver iterations per tick. 0 disables it.
+	int position_iterations = 8;
+	// Fraction of remaining penetration each position iteration removes.
+	T position_baumgarte = tr::from_milli(800);
+	// Contacts are discovered this far past a speculative body's predicted motion.
+	T speculative_margin = tr::default_epsilon() * tr::from_int(8);
+	// Penetration tolerated without correction (the resting-jitter band).
+	T speculative_slop = tr::default_epsilon();
+	// Ceiling in rad/s on how fast a violated angular joint limit winds back in.
+	T limit_recovery_max = tr::from_int(16);
+};
+
 template <typename T> class simulator {
 public:
 	using tr = scalar_traits<T>;
 
-	simulator(const vec3<T> gravity = { T {}, T {}, -tr::from_milli(9810) }) {
+	simulator(const vec3<T> & gravity = { T {}, T {}, -tr::from_milli(9810) },
+	          const simulator_config<T> & config = {}) {
 		set_gravity(gravity);
-		init_epsilon_defaults();
+		set_config(config);
 		collisions_.resize(64);
 		// Immovable world anchor: the partner for speculative contacts against
 		// manager-injected geometry that has no owning solid. solve_id 0 sorts it
@@ -39,66 +117,17 @@ public:
 
 	~simulator() = default;
 
-	// Epsilon
-	void set_epsilon(T epsilon) {
-		static_assert(!is_fixed_scalar_v<T>, "set_epsilon not available for fixed types; use set_epsilon_bits");
-		epsilon_ = tr::make_epsilon(epsilon);
+	// Takes effect from the next update. Counts are clamped to their valid range.
+	void set_config(const simulator_config<T> & config) {
+		config_ = config;
+		config_.solver_iterations = std::max(config_.solver_iterations, 1);
+		config_.max_collision_iterations = std::max(config_.max_collision_iterations, 1);
+		config_.angular_substeps_max = std::max(config_.angular_substeps_max, 1);
+		config_.shock_iterations = std::max(config_.shock_iterations, 0);
+		config_.position_iterations = std::max(config_.position_iterations, 0);
+		config_.joint_projection = std::max(config_.joint_projection, T {});
 	}
-
-	void set_epsilon_bits(int bits) {
-		static_assert(is_fixed_scalar_v<T>, "set_epsilon_bits only for fixed types; use set_epsilon for float/double");
-		epsilon_ = tr::make_epsilon(bits);
-	}
-
-	T get_epsilon() const { return epsilon_; }
-
-	// Integrator
-	void set_integrator(integrator_type i) { integrator_ = i; }
-	integrator_type get_integrator() const { return integrator_; }
-	// Global dynamic-rotation toggle. All angular integration lives in
-	// integrate_angular, so disabling it is the clean A/B + deterministic-replay-
-	// bisection lever. Per-solid `inv_inertia == 0` already makes it free for
-	// non-rotating bodies, so this is only for turning spin off scene-wide.
-	void set_angular_integration(bool b) { angular_integration_ = b; }
-	bool get_angular_integration() const { return angular_integration_; }
-
-	// Angular substepping (opt-in CCD for fast spinners). Default max = 1: one
-	// orientation snapshot per frame (the original behavior, bit-identical). Raise it
-	// and a fast-spinning sweep_slide body's frame is subdivided into up to N
-	// fixed-orientation sub-traces, so a thin obstacle the single snapshot would step
-	// *over* angularly (clear before and after, swept through between) is still caught.
-	// N grows with spin speed up to this cap; a slow or non-spinning body still does
-	// one trace, so non-fast-spinners pay nothing. (Speculative-mode bodies are not
-	// substepped — they use a different discover/commit model.)
-	void set_angular_substeps_max(int n) { angular_substeps_max_ = n > 1 ? n : 1; }
-	int get_angular_substeps_max() const { return angular_substeps_max_; }
-	// Tip travel per substep that triggers another subdivision (smaller → more, finer
-	// substeps). N ≈ ceil(|ω|·dt·r_max / clearance), capped by set_angular_substeps_max.
-	void set_angular_substep_clearance(T c) { angular_substep_clearance_ = c; }
-	T get_angular_substep_clearance() const { return angular_substep_clearance_; }
-
-	void set_average_normals(bool a) { average_normals_ = a; }
-	bool get_average_normals() const { return average_normals_; }
-
-	// Narrowphase mode for rounded-shape (sphere/capsule) vs polytope
-	// (convex_solid/box) pairs. true (default): accurate GJK closest-point sweep
-	// — correct edge/vertex normals (ledge ride-up) and bounded. false: the cheap
-	// plane-inflation / AABB-expansion path — faster, but face-normals-only at
-	// edges. Zero-radius polytope pairs always use the cheap path regardless.
-	void set_accurate_narrowphase(bool a) { accurate_narrowphase_ = a; }
-	bool get_accurate_narrowphase() const { return accurate_narrowphase_; }
-
-	void set_max_position_component(T v) { max_position_component_ = v; }
-	T get_max_position_component() const { return max_position_component_; }
-	void set_max_velocity_component(T v) { max_velocity_component_ = v; }
-	T get_max_velocity_component() const { return max_velocity_component_; }
-	// Per-component ceiling on a spinning body's angular velocity, the rotational
-	// twin of the linear cap above. Bounds solver overshoot and integrator runaway
-	// for finite-inertia bodies; 0 disables it. No-op for the non-rotating default.
-	void set_max_angular_velocity_component(T v) { max_angular_velocity_component_ = v; }
-	T get_max_angular_velocity_component() const { return max_angular_velocity_component_; }
-	void set_max_force_component(T v) { max_force_component_ = v; }
-	T get_max_force_component() const { return max_force_component_; }
+	const simulator_config<T> & get_config() const { return config_; }
 
 	void set_fluid_velocity(const vec3<T> & v) { fluid_velocity_ = v; }
 	const vec3<T> & get_fluid_velocity() const { return fluid_velocity_; }
@@ -113,83 +142,6 @@ public:
 	void set_manager(manager<T> * m) { manager_ = m; }
 	manager<T> * get_manager() const { return manager_; }
 
-	void set_micro_collision_threshold(T t) { micro_collision_threshold_ = t; }
-	T get_micro_collision_threshold() const { return micro_collision_threshold_; }
-
-	void set_deactivate_speed(T s) { deactivate_speed_ = s; }
-	T get_deactivate_speed() const { return deactivate_speed_; }
-	void set_deactivate_count(int c) { deactivate_count_ = c; }
-
-	// Contact solver. Pass B (post-integration Gauss–Seidel sweep over the
-	// touched-pair graph) iterates this many times per tick. Higher counts let
-	// taller stacks transmit load in a single tick at the cost of solver time;
-	// warm-starting from the previous tick's accumulated impulses means a
-	// resting pile converges in roughly one iteration anyway.
-	void set_solver_iterations(int n) { solver_iterations_ = n > 0 ? n : 1; }
-	int get_solver_iterations() const { return solver_iterations_; }
-
-	// Per-body, per-tick budget for the swept-collision sub-step loop in
-	// update_solid. Each sub-step snaps to the earliest contact along the
-	// remaining motion and slides the leftover on; a body whose step crosses
-	// many colliders (a long path through a crowded scene) needs one sub-step
-	// per colliding layer. When the budget runs out the body is pushed off its
-	// last contact and left where it is for the tick — so too low a limit lets a
-	// fast body in a dense scene slip through geometry it never traced against.
-	void set_max_collision_iterations(int n) { max_collision_iterations_ = n > 0 ? n : 1; }
-	int get_max_collision_iterations() const { return max_collision_iterations_; }
-
-	// Contact resolution is a per-body property (solid::set_contact_mode); the
-	// simulator has no global pipeline switch. This sets the mode add_solid gives a
-	// body that hasn't chosen one (contact_mode::inherit), so a scene that wants one
-	// strategy throughout sets it once here; mixed scenes set individual bodies, before
-	// or after adding them. Bodies already added keep their mode. Default is
-	// sweep_slide (the swept collide-and-slide path). See contact_mode and
-	// solid::set_contact_mode.
-	void set_default_contact_mode(contact_mode m) { default_contact_mode_ = m; }
-	contact_mode get_default_contact_mode() const { return default_contact_mode_; }
-
-	// Shock-propagation passes appended to the speculative velocity solve (see
-	// spec_shock_iters_). Lets a deep pile transmit support to the floor without
-	// needing solver_iterations ≈ pile-depth. 0 disables it.
-	void set_shock_iterations(int n) { spec_shock_iters_ = n < 0 ? 0 : n; }
-	int get_shock_iterations() const { return spec_shock_iters_; }
-
-	// Remaining speculative-pipeline knobs (defaults set in init_epsilon_defaults).
-	// spec_margin: how far past the predicted motion contacts are discovered.
-	// spec_slop: penetration tolerated without correction (resting-jitter band).
-	// pos_baumgarte: fraction of remaining penetration the NGS removes per iter.
-	// pos_iterations: NGS position-solver iterations per tick (0 disables it).
-	void set_speculative_margin(T m) { spec_margin_ = m; }
-	T get_speculative_margin() const { return spec_margin_; }
-	void set_speculative_slop(T s) { spec_slop_ = s; }
-	T get_speculative_slop() const { return spec_slop_; }
-	void set_position_baumgarte(T b) { spec_pos_baumgarte_ = b; }
-	T get_position_baumgarte() const { return spec_pos_baumgarte_; }
-	// Ceiling on how fast a violated angular joint limit winds itself back in (rad/s).
-	// See build_joint_rows: it is what keeps the recovery from being a catapult.
-	void set_limit_recovery_max(T r) { limit_recovery_max_ = r; }
-	T get_limit_recovery_max() const { return limit_recovery_max_; }
-	void set_position_iterations(int n) { spec_pos_iters_ = n < 0 ? 0 : n; }
-	int get_position_iterations() const { return spec_pos_iters_; }
-
-	// Joint projection: how far a rigid joint may open, as a fraction of its own anchor
-	// span, before the geometry is moved to close the excess. 0 disables it.
-	//
-	// The position pass above splits each correction by inverse mass, so a joint with one
-	// immovable end hands it all to the free end — and when that end is held too, the row
-	// makes no progress and the error stands. Nothing else bounds a pin, and a skinned
-	// bone's length IS the distance between two bodies, so an unbounded pin is a limb
-	// drawn metres long. This moves ONE end instead: no sharing, nothing to deadlock, and
-	// geometry only, so the chain is handed no energy to ring with.
-	//
-	// A tolerance, not a stiffness — set it past the error normal play leaves behind
-	// (demo_ragdoll Table 1). Per joint because a spine segment and a femur do not stretch
-	// by the same centimetres; a joint anchored at both bodies' centres has no span and is
-	// never projected. It buys bounded error with penetration: a joint and a contact can be
-	// in real conflict, and this breaks the contact for the solver to take back out.
-	void set_joint_projection(T fraction) { joint_projection_ = fraction < T {} ? T {} : fraction; }
-	T get_joint_projection() const { return joint_projection_; }
-
 	// Solid management
 	void add_solid(std::shared_ptr<solid<T>> s) {
 		for (auto & existing : solids_) {
@@ -200,7 +152,7 @@ public:
 		s->internal_set_simulator(this);
 		s->solve_id_ = next_solve_id_++;  // stable canonical-ordering key (see solid::solve_id_)
 		if (s->get_contact_mode() == contact_mode::inherit)
-			s->set_contact_mode(default_contact_mode_);
+			s->set_contact_mode(config_.default_contact_mode);
 		s->activate();
 		spacial_collection_.resize(solids_.size());
 	}
@@ -354,7 +306,7 @@ public:
 				vec3<T> moved;
 				sub(moved, s->position_, partner->position_);
 				sub(moved, slot.offset);
-				if (pt.separation + dot(moved, slot.normal) <= spec_slop_)
+				if (pt.separation + dot(moved, slot.normal) <= config_.speculative_slop)
 					continue;
 				// Surface velocities at the contact, so a spinning body's tip counts.
 				vec3<T> v_self, v_partner, r_partner, spin;
@@ -436,7 +388,7 @@ private:
 	// applying. Shared so the commit and the pass that predicts it cannot drift apart.
 	bool correction_quat(const solid<T> * s, quat<T> & dq) const;
 	// Moves one end of an over-stretched rigid joint by the excess, after
-	// correct_positions and into the same correction. See set_joint_projection.
+	// correct_positions and into the same correction. See simulator_config::joint_projection.
 	void project_joints();
 	// Shared deactivation/sleep logic: given the body's about-to-be-committed
 	// position, decide whether it qualifies to sleep this tick. Used by both the
@@ -452,14 +404,14 @@ public:
 	// to shed.
 	//
 	// disp is the body's translation over one tick, so a caller holding a velocity
-	// passes v · dt. deactivate_speed_ is a speed, so the displacement it permits
-	// scales with dt. Comparing a raw displacement against deactivate_speed_ directly
+	// passes v · dt. deactivate_speed is a speed, so the displacement it permits
+	// scales with dt. Comparing a raw displacement against deactivate_speed directly
 	// (as the sleep test once did) made the effective velocity threshold 1/dt times
 	// too large — at dt = 16 ms a body drifting at ~12 m/s still counted as "still"
 	// and could be frozen in mid-air the instant it brushed a neighbour (the classic
 	// "ball hanging in the air").
 	bool at_rest(const solid<T> * s, const vec3<T> & disp, const vec3<T> & w, T dt) const {
-		const T deactivate_disp = deactivate_speed_ * dt;
+		const T deactivate_disp = config_.deactivate_speed * dt;
 		if (tr::abs(disp.x) >= deactivate_disp || tr::abs(disp.y) >= deactivate_disp ||
 		    tr::abs(disp.z) >= deactivate_disp)
 			return false;
@@ -469,7 +421,7 @@ public:
 		// isn't translating — otherwise a freely spinning solid would freeze
 		// mid-rotation. Kinematic-carry bodies (inv_inertia == 0, game-driven) are
 		// unaffected: their ω never keeps them awake here.
-		return !s->rotates_dynamically() || length(w) < deactivate_speed_;
+		return !s->rotates_dynamically() || length(w) < config_.deactivate_speed;
 	}
 
 	// Find solids in box. collide_with_bits filters the result to solids whose
@@ -480,12 +432,12 @@ public:
 	int find_solids_in_aa_box(const aa_box<T> & box, solid<T> * solids[], int max_solids,
 	                          int collide_with_bits = -1) const {
 		aa_box<T> expanded(box);
-		expanded.mins.x -= epsilon_;
-		expanded.mins.y -= epsilon_;
-		expanded.mins.z -= epsilon_;
-		expanded.maxs.x += epsilon_;
-		expanded.maxs.y += epsilon_;
-		expanded.maxs.z += epsilon_;
+		expanded.mins.x -= config_.epsilon;
+		expanded.mins.y -= config_.epsilon;
+		expanded.mins.z -= config_.epsilon;
+		expanded.maxs.x += config_.epsilon;
+		expanded.maxs.y += config_.epsilon;
+		expanded.maxs.z += config_.epsilon;
 
 		int amount = -1;
 		if (manager_)
@@ -517,14 +469,14 @@ public:
 	                   solid<T> * ignore = nullptr);
 	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits = -1);
 	void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s) {
-		hop::test_segment(result, seg, s, epsilon_);
+		hop::test_segment(result, seg, s, config_.epsilon);
 	}
 	// `mode` selects how equal-time hits on several of s2's shapes fold into the one
 	// reported contact (see hop::intra_merge). The solver's default is `average`;
 	// overlap/rest queries want `deepest` so their single contact is a real surface.
 	void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T margin = T {},
 	                intra_merge mode = intra_merge::average) {
-		hop::test_solid(result, s1, seg, s2, epsilon_, margin, accurate_narrowphase_, mode);
+		hop::test_solid(result, s1, seg, s2, config_.epsilon, margin, config_.accurate_narrowphase, mode);
 	}
 
 	int count_active_solids() const {
@@ -564,26 +516,26 @@ private:
 
 	// How many fixed-orientation sub-traces to split a frame into so a fast spinner
 	// doesn't step angularly over a thin obstacle. 1 (no subdivision) unless the
-	// feature is enabled (set_angular_substeps_max > 1) and the body actually spins
+	// feature is enabled (angular_substeps_max > 1) and the body actually spins
 	// far enough this frame. spin_broadphase_reach is the tip's swept distance |ω|·dt·r;
 	// one substep per clearance-length of that, capped. Deterministic (fixed-point
 	// compare + reciprocal + to_int), so fixed16 replays identically.
 	int angular_substeps(const solid<T> * s, T dt) const {
-		if (angular_substeps_max_ <= 1 || !s->rotates_dynamically())
+		if (config_.angular_substeps_max <= 1 || !s->rotates_dynamically())
 			return 1;
 		T reach = spin_broadphase_reach(s, dt);
-		if (reach <= angular_substep_clearance_)
+		if (reach <= config_.angular_substep_clearance)
 			return 1;
-		int n = 1 + tr::to_int(reach / angular_substep_clearance_);
-		return n < angular_substeps_max_ ? n : angular_substeps_max_;
+		int n = 1 + tr::to_int(reach / config_.angular_substep_clearance);
+		return n < config_.angular_substeps_max ? n : config_.angular_substeps_max;
 	}
 
 	void calculate_epsilon_offset(vec3<T> & result, const vec3<T> & direction, const vec3<T> & normal) const {
 		T len = length(direction);
-		if (len > epsilon_) {
-			result.x = (-direction.x / len) * epsilon_;
-			result.y = (-direction.y / len) * epsilon_;
-			result.z = (-direction.z / len) * epsilon_;
+		if (len > config_.epsilon) {
+			result.x = (-direction.x / len) * config_.epsilon;
+			result.y = (-direction.y / len) * config_.epsilon;
+			result.z = (-direction.z / len) * config_.epsilon;
 		} else {
 			result.reset();
 		}
@@ -592,28 +544,6 @@ private:
 	bool too_small(const vec3<T> & v, T epsilon) const {
 		T x = v.x, y = v.y, z = v.z;
 		return x < epsilon && x > -epsilon && y < epsilon && y > -epsilon && z < epsilon && z > -epsilon;
-	}
-
-	void init_epsilon_defaults() {
-		if constexpr (is_fixed_scalar_v<T>) {
-			set_epsilon_bits(tr::default_epsilon_bits());
-		} else {
-			set_epsilon(tr::default_epsilon());
-		}
-		max_position_component_ = tr::default_max_position_component();
-		max_velocity_component_ = tr::default_max_velocity_component();
-		max_angular_velocity_component_ = tr::default_max_angular_velocity_component();
-		max_force_component_ = tr::default_max_force_component();
-		deactivate_speed_ = tr::one() * tr::from_milli(200); // 0.2
-		deactivate_count_ = 32;
-		micro_collision_threshold_ = tr::one() * tr::from_milli(1000); // 1.0
-		angular_substep_clearance_ = tr::from_milli(250); // 0.25 world units of tip travel per substep
-		// Speculative-contacts tuning (consulted only for contact_mode::speculative bodies).
-		spec_margin_ = epsilon_ * tr::from_int(8);  // discover contacts this far past the predicted motion
-		spec_slop_ = epsilon_;                       // penetration tolerated without correction (anti-jitter)
-		spec_pos_baumgarte_ = tr::from_milli(800);   // 0.8 — fraction of penetration removed per NGS iteration
-		limit_recovery_max_ = tr::from_int(16);      // rad/s a violated angular limit may close at
-		joint_projection_ = tr::one();               // a rigid joint may open by its own anchor span
 	}
 
 	void report_collisions();
@@ -702,24 +632,14 @@ private:
 	                      vec3<T> & result_x,
 	                      vec3<T> & result_v);
 
-	integrator_type integrator_ = integrator_type::heun;
-	bool angular_integration_ = true; // global dynamic-rotation toggle
-	int angular_substeps_max_ = 1;    // 1 = off (single snapshot/frame, bit-identical)
-	T angular_substep_clearance_ {};  // tip travel per substep (set in init_epsilon_defaults)
+	simulator_config<T> config_;
 	vec3<T> fluid_velocity_;
 	vec3<T> gravity_;
-	T epsilon_ {};
-	bool average_normals_ = true;
-	bool accurate_narrowphase_ = true;
 	// Set by trace_solid_with_current_spacials: the un-blended normal of the
 	// contact's first collider (c.collider). When average_normals blends several
 	// colliders into c.normal, this still carries c.collider's true normal, which
 	// the contact solver needs to avoid the settling drift (see update_solid).
 	vec3<T> solid_trace_pair_normal_;
-	T max_position_component_ {};
-	T max_velocity_component_ {};
-	T max_angular_velocity_component_ {};
-	T max_force_component_ {};
 	std::vector<collision<T>> collisions_;
 	int num_collisions_ = 0;
 	std::vector<std::shared_ptr<solid<T>>> solids_;
@@ -727,9 +647,6 @@ private:
 	std::vector<solid<T> *> spacial_collection_;
 	int num_spacial_collection_ = 0;
 	bool reporting_collisions_ = false;
-	T micro_collision_threshold_ = tr::one();
-	T deactivate_speed_ {};
-	int deactivate_count_ = 0;
 	manager<T> * manager_ = nullptr;
 	int current_tick_ = 0;  // increments per update(); also stamps touch slot refresh
 	std::size_t next_solve_id_ = 1;  // monotonic; assigned to each solid at add (see solid::solve_id_)
@@ -865,36 +782,6 @@ private:
 	std::vector<int> shock_order_;
 	std::vector<T> shock_key_;
 	std::vector<solid<T> *> shock_lo_;
-	// The mode add_solid gives a body still on contact_mode::inherit (see
-	// set_default_contact_mode / solid::set_contact_mode).
-	contact_mode default_contact_mode_ = contact_mode::sweep_slide;
-	T spec_margin_ {};         // discover contacts up to this far beyond the predicted motion
-	T spec_slop_ {};           // penetration tolerated without correction (kills resting jitter)
-	T spec_pos_baumgarte_ {};  // fraction of remaining penetration removed per NGS position iteration
-	T limit_recovery_max_ {};  // rad/s ceiling on an angular joint limit's recovery (see build_joint_rows)
-	T joint_projection_ {};    // fraction of its anchor span a rigid joint may open before it is projected
-	int spec_pos_iters_ = 8;   // NGS position-solver iterations per tick
-	// Shock-propagation passes appended to the velocity solve. Each pass walks
-	// contacts bottom-up and freezes every body once its support-from-below is
-	// resolved, so the support impulse reaches the floor in a single pass
-	// regardless of stack depth — the cure for plain Gauss–Seidel needing ~depth
-	// sweeps to hold a tall pile (which otherwise compresses into penetration and
-	// never sleeps). 0 disables it.
-	int spec_shock_iters_ = 2;
-	// Iteration budget for solve_contacts' Gauss–Seidel sweeps. Each sweep
-	// propagates one layer of impulse through the contact graph. Historically this
-	// had to be ≳ the tallest pile, since transmitting gravity load to the floor
-	// took ~depth sweeps; for speculative bodies that job is now done in O(1) by the
-	// shock-propagation phase (spec_shock_iters_), so this budget no longer needs to
-	// scale with stack depth — it governs friction / lateral-constraint convergence
-	// and how fast a pile settles to sleep. (The sweep_slide path still relies on it
-	// for depth, so the shared default stays conservative.) Warm-starting keeps
-	// steady-state cost low.
-	int solver_iterations_ = 16;
-	// Sub-step budget for update_solid's swept-collision slide loop. Was a
-	// hard-coded 5; raised to give a fast body room to resolve more colliders
-	// along a long step before the loop gives up (see set_max_collision_iterations).
-	int max_collision_iterations_ = 16;
 };
 
 // ============================================================================
@@ -946,7 +833,7 @@ inline T angular_eff_mass(const Pair & p, const vec3<T> & dir) {
 // or when global angular integration is off.
 template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr, T dt) {
 	using tr = scalar_traits<T>;
-	if (!angular_integration_ || !solid_ptr->rotates_dynamically())
+	if (!config_.angular_integration || !solid_ptr->rotates_dynamically())
 		return;
 
 	// Off-center constraint anchors torque the body via their lever arm.
@@ -1010,15 +897,15 @@ template <typename T> void simulator<T>::integrate_angular(solid<T> * solid_ptr,
 
 	vec3<T> w;
 	mul(w, R, wb);
-	if (max_angular_velocity_component_ > T {})
-		cap_vec3(w, max_angular_velocity_component_);
+	if (config_.max_angular_velocity_component > T {})
+		cap_vec3(w, config_.max_angular_velocity_component);
 	solid_ptr->angular_velocity_.set(w);
 
 	// Exponential orientation step (drift-free for constant ω): q ← dq · q, with dq
 	// built from the world-frame axis/angle. set_orientation_from_quat renormalizes,
 	// syncs the queried mat3, and refreshes the oriented world AABB as one unit.
 	T speed = length(w);
-	if (speed > epsilon_) {
+	if (speed > config_.epsilon) {
 		vec3<T> axis;
 		mul(axis, w, tr::one() / speed);
 		quat<T> dq;
@@ -1053,13 +940,13 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	old_pos.set(solid_ptr->position_);
 
 	// Integration
-	if (integrator_ == integrator_type::euler) {
+	if (config_.integrator == integrator_type::euler) {
 		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, dt, dx1, dv1);
 		mul(new_pos, dx1, dt);
 		add(new_pos, old_pos);
 		mul(vel, dv1, dt);
 		add(vel, solid_ptr->velocity_);
-	} else if (integrator_ == integrator_type::improved) {
+	} else if (config_.integrator == integrator_type::improved) {
 		T hdt = dt / two;
 		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, dt, dx1, dv1);
 		new_pos.set(dx1);
@@ -1071,7 +958,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		add(vel, dv2);
 		mul(vel, hdt);
 		add(vel, solid_ptr->velocity_);
-	} else if (integrator_ == integrator_type::heun) {
+	} else if (config_.integrator == integrator_type::heun) {
 		T qdt = dt / tr::four();
 		T ttdt = dt * two / three;
 		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, dt, dx1, dv1);
@@ -1086,7 +973,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		add(vel, dv2);
 		mul(vel, qdt);
 		add(vel, solid_ptr->velocity_);
-	} else if (integrator_ == integrator_type::runge_kutta) {
+	} else if (config_.integrator == integrator_type::runge_kutta) {
 		T hdt = dt / two;
 		T sdt = dt / tr::from_int(6);
 		integration_step(solid_ptr, old_pos, solid_ptr->velocity_, zero_vec, zero_vec, dt, dx1, dv1);
@@ -1111,7 +998,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		add(vel, solid_ptr->velocity_);
 	}
 
-	cap_vec3(vel, max_velocity_component_);
+	cap_vec3(vel, config_.max_velocity_component);
 	accumulate_ext_dv(solid_ptr, vel); // see integrate_and_discover / solve_contacts
 	solid_ptr->velocity_.set(vel);
 	solid_ptr->clear_force();
@@ -1127,8 +1014,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		manager_->intra_update(solid_ptr, dt);
 	}
 
-	cap_vec3(old_pos, max_position_component_);
-	cap_vec3(new_pos, max_position_component_);
+	cap_vec3(old_pos, config_.max_position_component);
+	cap_vec3(new_pos, config_.max_position_component);
 
 	// Collect spacials
 	if (solid_ptr->collide_with_scope_ != 0) {
@@ -1142,7 +1029,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		// a neighbor only reachable after the redirect would be missed this tick.
 		// length(temp) bounds the whole reachable envelope, making the one gather valid
 		// for every substep that reuses it.
-		T m = length(temp) + epsilon_;
+		T m = length(temp) + config_.epsilon;
 		m += spin_broadphase_reach(solid_ptr, dt); // cover a spinner's swept surface (0 if not spinning)
 
 		// Use the cached world AABB (world_bound_ = rotate_aabb(local_bound_,
@@ -1189,7 +1076,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	while (true) {
 		if (!first) {
 			sub(temp, new_pos, old_pos);
-			if (too_small(temp, epsilon_)) {
+			if (too_small(temp, config_.epsilon)) {
 				new_pos.set(old_pos);
 				break;
 			}
@@ -1319,7 +1206,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				sub(wake_dv, hit_solid->ext_dv_);
 				if ((hit_solid->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
 				    hit_solid->should_collide(solid_ptr) &&
-				    impact_speed + dot(wake_dv, pair_normal) > deactivate_speed_) {
+				    impact_speed + dot(wake_dv, pair_normal) > config_.deactivate_speed) {
 					hit_solid->activate();
 				}
 			}
@@ -1344,10 +1231,10 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				sub(left_over, temp);
 			}
 
-			if (too_small(left_over, epsilon_)) {
+			if (too_small(left_over, config_.epsilon)) {
 				new_pos.set(old_pos);
 				break;
-			} else if (loop >= max_collision_iterations_) {
+			} else if (loop >= config_.max_collision_iterations) {
 				// Hit the sub-step budget for resolving this body's motion this
 				// tick. Each iteration snaps to one contact and slides the
 				// remainder on, so a body crossing many colliders in a single
@@ -1357,7 +1244,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// against. Push out along the last contact normal rather than
 				// zeroing motion (zeroing causes permanent overlap when two
 				// dynamic bodies collide at the limit) and give up for this tick.
-				mul(temp, c.normal, epsilon_ * tr::four());
+				mul(temp, c.normal, config_.epsilon * tr::four());
 				add(new_pos, old_pos, temp);
 				break;
 			} else {
@@ -1377,7 +1264,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 
 // Deactivation/sleep decision, shared by update_solid and commit_solid.
 template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, const vec3<T> & new_pos, T dt) {
-	if (deactivate_count_ > 0 && solid_ptr->deactivate_count_ >= 0) {
+	if (config_.deactivate_count > 0 && solid_ptr->deactivate_count_ >= 0) {
 		// The motion this tick is what the rest test judges, not velocity_: the
 		// swept-collision snap can leave a residual velocity in a body whose
 		// position never drifts.
@@ -1394,7 +1281,7 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 				for (int k = 0; k < solid_ptr->touch_count_; ++k) {
 					// Only a genuinely load-bearing contact counts as support, not
 					// mere proximity. Margin-shell discovery (speculative pipeline)
-					// records touches for neighbours up to spec_margin_ away; without
+					// records touches for neighbours up to speculative_margin away; without
 					// this gap check a body merely *near* another would be deemed
 					// supported and sleep mid-air. Default-pipeline touches always
 					// have separation <= 0 (post-push-out), so they still qualify.
@@ -1413,7 +1300,7 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 					// One corner of a manifold under load holds the body up just as a
 					// single contact used to.
 					for (int q = 0; q < slot.point_count; ++q) {
-						if (slot.points[q].separation <= spec_slop_ || slot.points[q].accum_n > T {}) {
+						if (slot.points[q].separation <= config_.speculative_slop || slot.points[q].accum_n > T {}) {
 							supported = true;
 							break;
 						}
@@ -1428,7 +1315,7 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 
 			if (supported) {
 				solid_ptr->deactivate_count_++;
-				if (solid_ptr->deactivate_count_ > deactivate_count_) {
+				if (solid_ptr->deactivate_count_ > config_.deactivate_count) {
 					int j;
 					for (j = static_cast<int>(solid_ptr->constraints_.size()) - 1; j >= 0; --j) {
 						auto * con = solid_ptr->constraints_[j];
@@ -1438,11 +1325,11 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 						// endpoints can sleep at non-equilibrium and freeze the system.
 						// is_loaded's argument is a *distance* tolerance (how far the
 						// constraint may sit from rest and still count as unloaded), so
-						// it must be a small length — epsilon_, not deactivate_speed_.
-						// deactivate_speed_ is a velocity; feeding it here let a spring
-						// freeze a full deactivate_speed_ away from rest (e.g. 0.2 m
+						// it must be a small length — epsilon, not deactivate_speed.
+						// deactivate_speed is a velocity; feeding it here let a spring
+						// freeze a full deactivate_speed away from rest (e.g. 0.2 m
 						// past a 2 m rest length) before its endpoints went to sleep.
-						if (con->is_loaded(epsilon_))
+						if (con->is_loaded(config_.epsilon))
 							break;
 						// Never deactivate a body constrained to a static/infinite-mass
 						// body — the constraint represents a persistent external force
@@ -1450,12 +1337,12 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 						if (start != solid_ptr) {
 							if (start->mass_ == solid<T>::infinite_mass())
 								break;
-							if (start->active_ && start->deactivate_count_ <= deactivate_count_)
+							if (start->active_ && start->deactivate_count_ <= config_.deactivate_count)
 								break;
 						} else if (end) {
 							if (end->mass_ == solid<T>::infinite_mass())
 								break;
-							if (end->active_ && end->deactivate_count_ <= deactivate_count_)
+							if (end->active_ && end->deactivate_count_ <= config_.deactivate_count)
 								break;
 						}
 					}
@@ -1499,7 +1386,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	vec3<T> dv;
 	mul(dv, accel, dt);
 	add(v, dv);
-	cap_vec3(v, max_velocity_component_);
+	cap_vec3(v, config_.max_velocity_component);
 	// What external acceleration added this tick, measured after the cap so it is the
 	// real change. solve_contacts subtracts it back out of the velocity restitution is
 	// computed from — see the restitution target there.
@@ -1521,7 +1408,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// Predicted motion this frame (pre-solve), used only to aim the discovery
 	// sweep — the body is NOT moved here.
 	vec3<T> old_pos(solid_ptr->position_);
-	cap_vec3(old_pos, max_position_component_);
+	cap_vec3(old_pos, config_.max_position_component);
 	vec3<T> delta;
 	mul(delta, v, dt);
 
@@ -1530,7 +1417,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// position_ == old_pos here) — the un-rotated local_bound_ this once used omits
 	// the solid's orientation and underspans an oriented solid's true extent, missing
 	// contacts under its rotated faces.
-	T reach = tr::max_val(tr::abs(delta.x), tr::max_val(tr::abs(delta.y), tr::abs(delta.z))) + spec_margin_ + epsilon_;
+	T reach = tr::max_val(tr::abs(delta.x), tr::max_val(tr::abs(delta.y), tr::abs(delta.z))) + config_.speculative_margin + config_.epsilon;
 	reach += spin_broadphase_reach(solid_ptr, dt); // cover a spinner's swept surface (0 if not spinning)
 	aa_box<T> box(solid_ptr->world_bound_);
 	box.mins.x -= reach;
@@ -1562,7 +1449,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 	// Turn the narrowphase's report of `col` against `partner` into manifold points.
 	// The signed gap along the normal is recovered per point: shapes were inflated by
-	// spec_margin_, so an overlap of the inflated shapes (time == 0) means the true
+	// speculative_margin, so an overlap of the inflated shapes (time == 0) means the true
 	// surfaces are within the margin and the real gap is (margin - inflated_depth) — 0
 	// when touching, negative when truly penetrating, positive within the shell. A
 	// contact reached only by sweeping this tick (time > 0) is a fast approach; its gap
@@ -1585,7 +1472,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		if (col.depth <= zero && col.time > zero) {
 			vec3<T> travel;
 			mul(travel, delta, col.time);
-			const T reach = spec_margin_ + epsilon_;
+			const T reach = config_.speculative_margin + config_.epsilon;
 			worth_clipping = length_squared(travel) <= reach * reach;
 		}
 		// The partner may already have clipped this pair's manifold this tick, and it is
@@ -1608,7 +1495,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		}
 		if (manifold_count == 0 && worth_clipping) {
 			manifold_count = hop::manifold_for_solids(manifold, max_manifold_points, col,
-			                                          solid_ptr, partner, spec_margin_, epsilon_);
+			                                          solid_ptr, partner, config_.speculative_margin, config_.epsilon);
 			// Only a clipped manifold may be mirrored: the fallback below carries this
 			// body's own closing distance, which means nothing to the partner.
 			manifold_is_shared = manifold_count > 0 && partner != nullptr;
@@ -1620,7 +1507,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			manifold[0].normal.set(col.normal);
 			manifold[0].id = 0;  // one contact against this partner; nothing to distinguish
 			if (col.time <= zero) {
-				manifold[0].separation = spec_margin_ - col.depth;
+				manifold[0].separation = config_.speculative_margin - col.depth;
 			} else {
 				vec3<T> to_contact;
 				sub(to_contact, col.point, old_pos);
@@ -1696,7 +1583,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		// On the approach the bodies actually had, not the one this tick's gravity
 		// just manufactured. A body resting on a floor re-acquires g·dt of closing
 		// speed every single tick — 0.33 m/s at 60Hz and 20 m/s², well over
-		// deactivate_speed_ — so a settled body and the floor under it woke each
+		// deactivate_speed — so a settled body and the floor under it woke each
 		// other forever and neither could ever sleep. (n runs partner→solid, so the
 		// external increment's contribution to the approach is -dot(ext_dv, n).)
 		vec3<T> wake_dv(solid_ptr->ext_dv_);
@@ -1705,7 +1592,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		const T wake_speed = impact_speed + dot(wake_dv, n);
 		if (!partner_is_world &&
 		    (partner->collide_with_scope_ & solid_ptr->collision_scope_) != 0 &&
-		    partner->should_collide(solid_ptr) && wake_speed > deactivate_speed_) {
+		    partner->should_collide(solid_ptr) && wake_speed > config_.deactivate_speed) {
 			partner->activate();
 		}
 	};
@@ -1721,7 +1608,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 		col.reset();
 		col.time = one;
-		test_solid(col, solid_ptr, path, s2, spec_margin_);
+		test_solid(col, solid_ptr, path, s2, config_.speculative_margin);
 		if (col.time >= one && col.depth <= zero)
 			continue; // not within the inflated shell and not swept into this tick
 
@@ -1741,7 +1628,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	if (manager_) {
 		col.reset();
 		col.time = one;
-		manager_->trace_solid(col, solid_ptr, path, bits, spec_margin_);
+		manager_->trace_solid(col, solid_ptr, path, bits, config_.speculative_margin);
 		if (col.time < one || col.depth > zero) {
 			// No owning solid: resolve against the immovable world anchor. If the
 			// manager attached a real collider, prefer it as the partner. The manager
@@ -1759,7 +1646,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 // adding energy.
 template <typename T> bool simulator<T>::correction_quat(const solid<T> * s, quat<T> & dq) const {
 	const T angle = length(s->rot_correction_);
-	if (angle <= epsilon_)
+	if (angle <= config_.epsilon)
 		return false;
 	vec3<T> axis;
 	mul(axis, s->rot_correction_, tr::one() / angle);
@@ -1769,13 +1656,13 @@ template <typename T> bool simulator<T>::correction_quat(const solid<T> * s, qua
 
 template <typename T> void simulator<T>::commit_solid(solid<T> * solid_ptr, T dt) {
 	vec3<T> old_pos(solid_ptr->position_);
-	cap_vec3(old_pos, max_position_component_);
+	cap_vec3(old_pos, config_.max_position_component);
 	vec3<T> delta;
 	mul(delta, solid_ptr->velocity_, dt);
 	vec3<T> new_pos;
 	add(new_pos, old_pos, delta);
 	add(new_pos, solid_ptr->pos_correction_);  // NGS pseudo-position correction
-	cap_vec3(new_pos, max_position_component_);
+	cap_vec3(new_pos, config_.max_position_component);
 
 	try_deactivate(solid_ptr, new_pos, dt);
 	solid_ptr->set_position_direct(new_pos);
@@ -1819,7 +1706,7 @@ template <typename T> void simulator<T>::correct_positions() {
 			r.b->rot_correction_.reset();
 		}
 	}
-	for (int iter = 0; iter < spec_pos_iters_; ++iter) {
+	for (int iter = 0; iter < config_.position_iterations; ++iter) {
 		// With unchanged pseudo-positions, a later NGS pass would visit the
 		// exact same separations. Once a full pass applies no correction, the
 		// remaining iterations cannot make progress.
@@ -1866,10 +1753,10 @@ template <typename T> void simulator<T>::correct_positions() {
 			}
 			T cur_sep = p.separation + dot(rel, p.normal);
 			// Only penetration beyond the slop band is corrected.
-			T pen = -cur_sep - spec_slop_;
+			T pen = -cur_sep - config_.speculative_slop;
 			if (pen <= zero)
 				continue;
-			T corr = pen * spec_pos_baumgarte_;
+			T corr = pen * config_.position_baumgarte;
 			if (corr <= zero)
 				continue;
 			corrected = true;
@@ -1981,7 +1868,7 @@ template <typename T> void simulator<T>::correct_positions() {
 				}
 			}
 			sub(err, anchor_b, anchor_a);
-			if (length_squared(err) <= epsilon_ * epsilon_)
+			if (length_squared(err) <= config_.epsilon * config_.epsilon)
 				continue;
 			// The same K the velocity sweep uses — the response of the anchor pair to a
 			// push is the response to an impulse, read as displacement. Full-strength
@@ -2020,7 +1907,7 @@ template <typename T> void simulator<T>::correct_positions() {
 	}
 }
 
-// Joint projection; see set_joint_projection for what it is for. Over constraints_ rather
+// Joint projection; see simulator_config::joint_projection for what it is for. Over constraints_ rather
 // than joint_rows_, because build_joint_rows drops a row with both ends asleep and a rig
 // that settled stretched and went quiet is one of the states this repairs.
 //
@@ -2037,7 +1924,7 @@ template <typename T> void simulator<T>::correct_positions() {
 // rig cannot tell this exists — asserted as bit equality in test_simulator.cpp.
 template <typename T> void simulator<T>::project_joints() {
 	const T zero = T {};
-	if (joint_projection_ <= zero)
+	if (config_.joint_projection <= zero)
 		return;
 	// An end this pass can move now. A sweep_slide body placed itself in Pass A and never
 	// folds pos_correction_, an infinite-mass body is the scene rather than a thing in it,
@@ -2090,9 +1977,9 @@ template <typename T> void simulator<T>::project_joints() {
 			T span = length(c->local_anchor_a_);
 			if (end)
 				span += length(c->local_anchor_b_);
-			const T tolerance = span * joint_projection_;
+			const T tolerance = span * config_.joint_projection;
 			if (tolerance <= zero)
-				continue;  // no length to measure a stretch against; see set_joint_projection
+				continue;  // no length to measure a stretch against; see simulator_config::joint_projection
 
 			vec3<T> a_world, b_world, err;
 			anchor_now(start, c->local_anchor_a_, a_world);
@@ -2214,14 +2101,14 @@ void simulator<T>::trace_segment_with_current_spacials(collision<T> & result,
 		if (s2 != ignore && (collide_with_bits & s2->collision_scope_) != 0) {
 			col.time = tr::one();
 			test_segment(col, seg, s2);
-			hop::merge_collision(result, col, epsilon_, average_normals_);
+			hop::merge_collision(result, col, config_.epsilon, config_.average_normals);
 		}
 	}
 
 	if (manager_) {
 		col.time = tr::one();
 		manager_->trace_segment(col, seg, collide_with_bits);
-		hop::merge_collision(result, col, epsilon_, average_normals_);
+		hop::merge_collision(result, col, config_.epsilon, config_.average_normals);
 	}
 
 	if (result.time == tr::one()) {
@@ -2246,14 +2133,14 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 		    s2->should_collide(s)) {
 			col.time = tr::one();
 			test_solid(col, s, seg, s2);
-			hop::merge_collision(result, col, epsilon_, average_normals_, &solid_trace_pair_normal_);
+			hop::merge_collision(result, col, config_.epsilon, config_.average_normals, &solid_trace_pair_normal_);
 		}
 	}
 
 	if (manager_) {
 		col.time = tr::one();
 		manager_->trace_solid(col, s, seg, collide_with_bits, T {});  // exact: swept query / public API
-		hop::merge_collision(result, col, epsilon_, average_normals_, &solid_trace_pair_normal_);
+		hop::merge_collision(result, col, config_.epsilon, config_.average_normals, &solid_trace_pair_normal_);
 	}
 
 	if (result.time == tr::one()) {
@@ -2521,7 +2408,7 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 	// REFUSE it, where a pseudo-position simply teleports through and drives the corpse
 	// across the floor. The cap is what keeps it from being a catapult.
 	const T inv_dt = (dt > zero) ? tr::one() / dt : zero;
-	const T max_recover = limit_recovery_max_;
+	const T max_recover = config_.limit_recovery_max;
 	for (auto & held : constraints_) {
 		constraint<T> * c = held.get();
 		if (!c || !c->is_active() || c->type_ != constraint<T>::type::rigid)
@@ -2591,7 +2478,7 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 			subtract_angular(a, r.r_a);
 		if (r.b_rotates)
 			subtract_angular(b, r.r_b);
-		// Zero threshold, not epsilon_: epsilon_ is a LENGTH, and K's determinant scales
+		// Zero threshold, not epsilon: epsilon is a LENGTH, and K's determinant scales
 		// with the cube of inverse mass, so a pair of heavy bodies has a legitimately
 		// tiny determinant that an epsilon test would reject as singular.
 		if (!invert(r.eff_inv, k, zero))
@@ -2617,7 +2504,7 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 			                           b ? &b->get_orientation_quat() : nullptr, c->frame_b_);
 			T swing {}, twist {};
 			vec3<T> swing_axis;
-			decompose_swing_twist(q_rel, swing, swing_axis, twist, epsilon_);
+			decompose_swing_twist(q_rel, swing, swing_axis, twist, config_.epsilon);
 			T softness = c->limit_softness_;
 			if (softness < zero)
 				softness = zero;
@@ -3023,7 +2910,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 							for (int axis = 0; axis < 3; ++axis) {
 								const T lo = tr::abs(partner_bound.mins[axis]);
 								const T hi = tr::abs(partner_bound.maxs[axis]);
-								reach[axis] = (lo > hi ? lo : hi) + spec_margin_ + epsilon_;
+								reach[axis] = (lo > hi ? lo : hi) + config_.speculative_margin + config_.epsilon;
 							}
 							if (length_squared(partner_r) > length_squared(reach))
 								support(partner_r, partner_bound, pt.normal);
@@ -3164,7 +3051,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// Existing penetration is removed positionally by correct_positions (NGS),
 		// not here, so the velocity solve adds no energy.
 		const T gap = p.separation;
-		if (-vn_rest > micro_collision_threshold_) {
+		if (-vn_rest > config_.micro_collision_threshold) {
 			// Genuine closing collision: bounce at cor times the inbound speed even
 			// when a speculative gap still remains. Withholding restitution until
 			// gap<=slop (as this once did) let the approach cap below bleed off the
@@ -3173,8 +3060,8 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			// so restitution stays dissipative; the micro threshold lets a slow,
 			// settling body fall through to the cap.
 			p.target = -p.cor * vn_rest;
-		} else if (gap > spec_slop_) {
-			p.target = -(gap - spec_slop_) * inv_dt;
+		} else if (gap > config_.speculative_slop) {
+			p.target = -(gap - config_.speculative_slop) * inv_dt;
 		} else {
 			p.target = zero_val;
 		}
@@ -3192,7 +3079,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			mul(vn_vec, p.normal, p.vn0);
 			sub(vt0, vrel0, vn_vec);
 			vec3<T> t0;
-			if (!normalize_carefully(t0, vt0, epsilon_)) {
+			if (!normalize_carefully(t0, vt0, config_.epsilon)) {
 				// |n.x| < 0.7 ⇒ (1,0,0)×n = (0, n.z, -n.y); else (0,1,0)×n = (-n.z, 0, n.x).
 				if (std::abs(tr::to_float(p.normal.x)) < 0.7f)
 					t0.set(zero_val, p.normal.z, -p.normal.y);
@@ -3336,7 +3223,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// floor). impact_speed is still recorded for wake/callback logic; it must not
 	// drive the restitution target.
 	const int npairs = static_cast<int>(contact_pairs_.size());
-	for (int iter = 0; iter < solver_iterations_; ++iter) {
+	for (int iter = 0; iter < config_.solver_iterations; ++iter) {
 		// Normal sweep (flip direction each tick — see the build-loop comment).
 		// eff_n == inv_m_sum on the non-angular path, so the guard/solve are
 		// bit-identical there; the angular path folds in the lever-arm mass.
@@ -3378,7 +3265,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			T scale_t = p.friction_scale_t;
 			if (p.has_angular) {
 				vec3<T> t_hat(vt);
-				if (normalize_carefully(t_hat, epsilon_)) {
+				if (normalize_carefully(t_hat, config_.epsilon)) {
 					const T eff_t = angular_eff_mass<T>(p, t_hat);
 					if (eff_t > zero_val)
 						scale_t = -one / eff_t;
@@ -3433,7 +3320,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		vec3<T> wrel;
 		sub(wrel, sb.angular_velocity, sa.angular_velocity);
 		vec3<T> axis(wrel);
-		if (!normalize_carefully(axis, epsilon_))
+		if (!normalize_carefully(axis, config_.epsilon))
 			continue;
 		// The angular mass the pair presents about that axis, and the lever the contact
 		// acts at — for a sphere its radius, which is what makes the bound the textbook
@@ -3489,7 +3376,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// gas has no stacking chain to propagate, so skip it).
 	const bool have_gravity =
 	    gravity_.x != zero_val || gravity_.y != zero_val || gravity_.z != zero_val;
-	if (has_speculative && spec_shock_iters_ > 0 && npairs > 0 && have_gravity) {
+	if (has_speculative && config_.shock_iterations > 0 && npairs > 0 && have_gravity) {
 		// A body is a standing anchor from the outset if it can't move (static /
 		// infinite mass) or is asleep (a settled lower layer supporting the rest).
 		auto pre_frozen = [zero_val](const solid<T> * s, T inv_m) {
@@ -3531,7 +3418,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// stays deterministic (fixed-point included).
 		std::stable_sort(shock_order_.begin(), shock_order_.end(),
 		                 [this](int i, int j) { return shock_key_[i] > shock_key_[j]; });
-		for (int pass = 0; pass < spec_shock_iters_ && nshock > 0; ++pass) {
+		for (int pass = 0; pass < config_.shock_iterations && nshock > 0; ++pass) {
 			// Re-seed the freeze state each pass: only the standing anchors start
 			// frozen; the support-end-first walk re-freezes the rest against the
 			// updated velocities.
@@ -3592,23 +3479,23 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// the (sleeping) members never re-enter update_solid to notice their new
 	// velocity. Both run over the same pair list, so do them in one walk; capping
 	// first means the wake threshold reads the final (capped) velocity.
-	const bool do_cap = max_velocity_component_ > zero_val;
-	const bool do_cap_w = max_angular_velocity_component_ > zero_val;
+	const bool do_cap = config_.max_velocity_component > zero_val;
+	const bool do_cap_w = config_.max_angular_velocity_component > zero_val;
 	auto finalize = [this, do_cap, do_cap_w, dt](solid<T> * s, int index, T inv_m) {
 		if (inv_m <= T{})
 			return;
 		solver_body & state = solver_bodies_[index];
 		if (do_cap)
-			cap_vec3(state.velocity, max_velocity_component_);
+			cap_vec3(state.velocity, config_.max_velocity_component);
 		// Cap solver-induced spin for the same reason the linear cap exists: a
 		// Gauss–Seidel overshoot in a dense pile (amplified by a small moment of
 		// inertia) can drive ω unbounded — integrate_angular only caps at the NEXT
 		// tick's integration, a full tick too late to stop it shipping into Pass B
 		// and, in the worst case, running away to inf/NaN. Gated by its own configurable
-		// bound (max_angular_velocity_component_, 0 = off), the rotational twin of the
+		// bound (max_angular_velocity_component, 0 = off), the rotational twin of the
 		// linear knob. No-op for the non-rotating default (inv_inertia == 0).
 		if (do_cap_w && s->rotates_dynamically())
-			cap_vec3(state.angular_velocity, max_angular_velocity_component_);
+			cap_vec3(state.angular_velocity, config_.max_angular_velocity_component);
 		// Wake on spin as well as translation. A contact can torque a sleeping body
 		// without shifting it — a ball landing on the end of a resting plank — and
 		// without this it would keep the spin, be committed with it below, and neither

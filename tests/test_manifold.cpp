@@ -191,7 +191,9 @@ struct world {
 	// traceable geometry (see make_traceable_floor) with nothing else differing.
 	explicit world(std::shared_ptr<solid<T>> on = make_floor()) {
 		sim.set_gravity(v(0, -20, 0));
-		sim.set_default_contact_mode(contact_mode::speculative);
+		auto config = sim.get_config();
+		config.default_contact_mode = contact_mode::speculative;
+		sim.set_config(config);
 		floor = std::move(on);
 		sim.add_solid(floor);
 		floor->set_collision_scope(1);
@@ -328,7 +330,7 @@ static void test_a_dynamic_stack_is_a_known_limitation() {
 // covers far more thoroughly.
 static void test_two_dynamic_boxes_survive_the_shock_phase() {
 	world w;
-	assert(w.sim.get_shock_iterations() > 0 && "shock propagation is on by default");
+	assert(w.sim.get_config().shock_iterations > 0 && "shock propagation is on by default");
 	const auto boxes = settle_a_stack(w, 2);
 	const double off = std::fabs((double)boxes[1]->get_position().y - 0.3);
 	assert(off < 0.01 && "the top box is still on the bottom one after 20 s");

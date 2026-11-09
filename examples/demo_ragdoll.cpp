@@ -643,7 +643,9 @@ int run_tables() {
 		for (int drop = 0; drop < kDrops; ++drop) {
 			simulator<T> s5;
 			s5.set_gravity(vec3<T>(0.0f, -20.0f, 0.0f));
-			s5.set_joint_projection(projection);
+			auto config = s5.get_config();
+			config.joint_projection = projection;
+			s5.set_config(config);
 			add_floor(s5);
 			ragdoll d = drop_spread(s5, drop, true);
 			for (int tick = 0; tick < 180; ++tick)
@@ -795,7 +797,9 @@ struct scene {
 void drop(scene & sc, int throw_index, bool limited, float projection) {
 	sc.sim = std::make_unique<simulator<T>>();
 	sc.sim->set_gravity(vec3<T>(0.0f, -20.0f, 0.0f));
-	sc.sim->set_joint_projection(projection);
+	auto config = sc.sim->get_config();
+	config.joint_projection = projection;
+	sc.sim->set_config(config);
 	add_floor(*sc.sim);
 	// Throw 0 is Table 1's; the rest are the spread Tables 4 and 5 average over.
 	sc.doll = throw_index == 0
@@ -832,7 +836,9 @@ void run_view() {
 		}
 		if (IsKeyPressed(KEY_P)) {
 			projection = projection > 0.0f ? 0.0f : 1.0f;
-			sc.sim->set_joint_projection(projection);
+			auto config = sc.sim->get_config();
+			config.joint_projection = projection;
+			sc.sim->set_config(config);
 		}
 		if (IsKeyDown(KEY_LEFT)) cam_angle -= 1.5f * GetFrameTime();
 		if (IsKeyDown(KEY_RIGHT)) cam_angle += 1.5f * GetFrameTime();

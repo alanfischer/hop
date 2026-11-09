@@ -149,7 +149,9 @@ struct World {
 		sim.set_gravity(vec(0, -GRAVITY, 0));
 		// hop-godot gives every dynamic body speculative contacts, so the demo must too
 		// or it is not reproducing the game's path.
-		sim.set_default_contact_mode(hop::contact_mode::speculative);
+		auto config = sim.get_config();
+		config.default_contact_mode = hop::contact_mode::speculative;
+		sim.set_config(config);
 
 		bsp = use_bsp;
 		floor = std::make_shared<hop::solid<T>>();
@@ -230,7 +232,7 @@ struct World {
 		// the deactivation counter every step and nothing ever sleeps.
 		for (auto &g : gibs) {
 			if (!g.solid->rotates_dynamically()) continue;
-			if (hop::length(g.solid->get_angular_velocity()) < sim.get_deactivate_speed())
+			if (hop::length(g.solid->get_angular_velocity()) < sim.get_config().deactivate_speed)
 				continue;
 			V w = g.solid->get_angular_velocity();
 			hop::mul(w, (T)std::fmax(0.0, 1.0 - ANGULAR_DAMP * DT));

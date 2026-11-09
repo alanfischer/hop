@@ -174,7 +174,9 @@ static void table_one() {
 static double land(const body_spec & s, V spin, hop::contact_mode mode, double sphere_r) {
 	hop::simulator<T> sim;
 	sim.set_gravity(vec(0, -GRAVITY, 0));
-	sim.set_default_contact_mode(mode);
+	auto config = sim.get_config();
+	config.default_contact_mode = mode;
+	sim.set_config(config);
 
 	auto floor = std::make_shared<hop::solid<T>>();
 	floor->set_infinite_mass();

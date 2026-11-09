@@ -21,7 +21,9 @@ int main() {
     sim.set_gravity({ 0, 0, -10.0f });
     
     // Increased iterations for the dense pile
-    sim.set_solver_iterations(32);
+    auto config = sim.get_config();
+    config.solver_iterations = 32;
+    sim.set_config(config);
 
     // 1. Create the Box (Floor + 4 Walls)
     auto create_wall = [&](hop::vec3<T> mins, hop::vec3<T> maxs) {

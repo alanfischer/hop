@@ -39,7 +39,7 @@ enum class restitution_combine { average, minimum, multiply, maximum };
 // so it is pushed by speculative bodies normally; only its *positioning* differs.
 // The two can be mixed per body (e.g. a sweep_slide character among speculative
 // balls). See simulator::update.
-//  - inherit: whatever the simulator's default is (simulator::set_default_contact_mode).
+//  - inherit: whatever the simulator's default is (simulator_config::default_contact_mode).
 //    A new solid starts here, and add_solid resolves it; a body never runs as inherit.
 enum class contact_mode { speculative, sweep_slide, inherit };
 
@@ -188,13 +188,13 @@ public:
 	int get_trigger_scope() const { return trigger_scope_; }
 
 	// Contact-resolution strategy for this body (see contact_mode). New bodies
-	// inherit the simulator's default (simulator::set_default_contact_mode) when
+	// inherit the simulator's default (simulator_config::default_contact_mode) when
 	// added; call this to override an individual body — e.g. a sweep_slide
 	// character moving among speculative balls. The choice holds whether it is made
 	// before or after add_solid, and survives a move to another simulator. inherit
 	// on a body already in a simulator takes that simulator's default at once.
 	void set_contact_mode(contact_mode m) {
-		contact_mode_ = m == contact_mode::inherit && simulator_ ? simulator_->get_default_contact_mode() : m;
+		contact_mode_ = m == contact_mode::inherit && simulator_ ? simulator_->get_config().default_contact_mode : m;
 	}
 	contact_mode get_contact_mode() const { return contact_mode_; }
 	// True when this body is resolved by the speculative solve: its position is

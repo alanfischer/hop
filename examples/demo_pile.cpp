@@ -60,7 +60,6 @@ template <typename T> static void run() {
 	hop::simulator<T> sim;
 	hop::bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
-	sim.set_deactivate_count(32);
 
 	T half  = fi(ROOM_HALF);
 	T hgt   = fi(ROOM_HEIGHT);
@@ -140,8 +139,11 @@ template <typename T> static void run() {
 
 		if (IsKeyPressed(KEY_SPACE)) paused = !paused;
 		if (IsKeyPressed(KEY_R))     spawn_pile();
-		if (IsKeyPressed(KEY_I))     sim.set_solver_iterations(std::max(1, sim.get_solver_iterations() - 1));
-		if (IsKeyPressed(KEY_K))     sim.set_solver_iterations(sim.get_solver_iterations() + 1);
+		if (IsKeyPressed(KEY_I) || IsKeyPressed(KEY_K)) {
+			auto config = sim.get_config();
+			config.solver_iterations += IsKeyPressed(KEY_K) ? 1 : -1;
+			sim.set_config(config);
+		}
 		if (IsKeyPressed(KEY_G)) {
 			gravity_on = !gravity_on;
 			if (gravity_on) {
@@ -192,7 +194,7 @@ template <typename T> static void run() {
 		DrawText(TextFormat("Objects:    %d  (sleep: %d)", COUNT, sleeping), 12, 38, 22, WHITE);
 		Color pc = phys_ms < 8.0f ? GREEN : phys_ms < 16.0f ? YELLOW : RED;
 		DrawText(TextFormat("Physics:    %.1f ms", (double)phys_ms),      12, 64, 22, pc);
-		DrawText(TextFormat("Iterations: %d", sim.get_solver_iterations()), 12, 90, 22, WHITE);
+		DrawText(TextFormat("Iterations: %d", sim.get_config().solver_iterations), 12, 90, 22, WHITE);
 		DrawText(TextFormat("Gravity:    %s", gravity_on ? "ON" : "OFF"),  12, 116, 22, WHITE);
 
 		if (paused)

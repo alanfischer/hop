@@ -298,7 +298,9 @@ template <typename T> static void bench_compound_narrow(const char * label) {
 template <typename T> static void setup_pile_scene(simulator<T> & sim, int per_side, int layers) {
 	using tr = scalar_traits<T>;
 	sim.set_gravity({ T {}, T {}, -tr::from_int(20) });
-	sim.set_default_contact_mode(contact_mode::speculative);
+	auto config = sim.get_config();
+	config.default_contact_mode = contact_mode::speculative;
+	sim.set_config(config);
 
 	auto floor_solid = std::make_shared<solid<T>>();
 	floor_solid->set_infinite_mass();

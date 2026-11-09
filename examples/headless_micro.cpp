@@ -61,7 +61,9 @@ static void test_single_drop() {
 static void test_stack(int N) {
 	printf("\n=== vertical stack settle: %d balls, COR=0.5, r=0.4 ===\n", N);
 	hop::simulator<T> sim;
-	sim.set_solver_iterations(32);
+	auto config = sim.get_config();
+	config.solver_iterations = 32;
+	sim.set_config(config);
 	floor_solid(sim);
 	std::vector<std::shared_ptr<hop::solid<T>>> bs;
 	for (int i = 0; i < N; ++i) bs.push_back(ball(sim, {0,0,0.4f + i*0.85f + 0.5f}, 0.4f, 0.5f));
@@ -96,7 +98,7 @@ static void box_walls(hop::simulator<T> & sim, float half, float h) {
 static void test_box(int n, float cor) {
 	float r=0.28f, spacing=r*2.2f; int half=3; float h=8;
 	printf("\n=== dense box: %d^3 grid, COR=%.2f, r=%.2f ===\n", n, cor, r);
-	hop::simulator<T> sim; sim.set_deactivate_count(32);
+	hop::simulator<T> sim;
 	box_walls(sim, half, h);
 	std::vector<std::shared_ptr<hop::solid<T>>> bs;
 	int i=0;

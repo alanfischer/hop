@@ -139,7 +139,9 @@ template <typename T> static void test_speculative_manager_floor(const char * la
 	manager_floor<T> floor;
 	auto sim = std::make_shared<simulator<T>>();
 	sim->set_gravity({ T {}, T {}, -tr::from_milli(9810) });
-	sim->set_default_contact_mode(hop::contact_mode::speculative);
+	auto config = sim->get_config();
+	config.default_contact_mode = hop::contact_mode::speculative;
+	sim->set_config(config);
 	sim->set_manager(&floor);
 
 	auto ball = std::make_shared<solid<T>>();
@@ -179,7 +181,9 @@ template <typename T> static void test_bouncy_ball_settles(const char * label) {
 	manager_floor<T> floor;
 	auto sim = std::make_shared<simulator<T>>();
 	sim->set_gravity({ T {}, T {}, -tr::from_milli(9810) });
-	sim->set_default_contact_mode(hop::contact_mode::speculative);
+	auto config = sim->get_config();
+	config.default_contact_mode = hop::contact_mode::speculative;
+	sim->set_config(config);
 	sim->set_manager(&floor);
 
 	auto ball = std::make_shared<solid<T>>();
@@ -236,7 +240,9 @@ template <typename T> static void test_resting_body_sleeps(const char * label, f
 	// body's re-manufactured closing speed into a wake-up. Under ~12.5 m/s2 the tick's
 	// increment stays below the threshold and nothing here has anything to prove.
 	sim->set_gravity({ T {}, T {}, -tr::from_int(20) });
-	sim->set_default_contact_mode(hop::contact_mode::speculative);
+	auto config = sim->get_config();
+	config.default_contact_mode = hop::contact_mode::speculative;
+	sim->set_config(config);
 
 	// Static floor, top face at z=0, asleep as a static body is.
 	auto floor_solid = std::make_shared<solid<T>>();
@@ -282,7 +288,7 @@ template <typename T> static void test_at_rest_is_one_shape(const char * label) 
 
 	auto sim = std::make_shared<simulator<T>>();
 	const T dt = tr::from_milli(16);
-	const T speed = sim->get_deactivate_speed();
+	const T speed = sim->get_config().deactivate_speed;
 	const vec3<T> still {};
 
 	auto spinner = std::make_shared<solid<T>>();
@@ -331,7 +337,9 @@ template <typename T> static void test_speculative_manager_response(const char *
 	claiming_floor<T> floor;
 	auto sim = std::make_shared<simulator<T>>();
 	sim->set_gravity({ T {}, T {}, -tr::from_milli(9810) });
-	sim->set_default_contact_mode(hop::contact_mode::speculative);
+	auto config = sim->get_config();
+	config.default_contact_mode = hop::contact_mode::speculative;
+	sim->set_config(config);
 	sim->set_manager(&floor);
 
 	auto ball = std::make_shared<solid<T>>();
@@ -940,7 +948,9 @@ template <typename T> static void test_shock_angular_mass(const char * label) {
 	for (int s = 0; s < 3; ++s) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, -grav, z));
-		sim.set_default_contact_mode(contact_mode::speculative);
+		auto config = sim.get_config();
+		config.default_contact_mode = contact_mode::speculative;
+		sim.set_config(config);
 		auto floor = std::make_shared<solid<T>>();
 		floor->set_infinite_mass();
 		floor->set_coefficient_of_gravity(z);
@@ -989,7 +999,9 @@ template <typename T> static void test_contact_arm_not_face_centre(const char * 
 	auto land = [&](T extra, int spin_idx, vec3<T> & end_pos, T & end_speed) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
-		sim.set_default_contact_mode(contact_mode::speculative);
+		auto config = sim.get_config();
+		config.default_contact_mode = contact_mode::speculative;
+		sim.set_config(config);
 		auto floor = std::make_shared<solid<T>>();
 		floor->set_infinite_mass();
 		floor->set_coefficient_of_gravity(z);
@@ -1114,7 +1126,9 @@ template <typename T> static void test_friction_tangent_mass(const char * label)
 	for (int s = 0; s < 3; ++s) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, -grav, z));
-		sim.set_default_contact_mode(contact_mode::speculative);
+		auto config = sim.get_config();
+		config.default_contact_mode = contact_mode::speculative;
+		sim.set_config(config);
 		auto floor = std::make_shared<solid<T>>();
 		floor->set_infinite_mass();
 		floor->set_coefficient_of_gravity(z);
@@ -1249,7 +1263,9 @@ template <typename T> static void test_angular_substep_ccd(const char * label) {
 	auto run = [&](int substeps) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, z, z));
-		sim.set_angular_substeps_max(substeps);
+		auto config = sim.get_config();
+		config.angular_substeps_max = substeps;
+		sim.set_config(config);
 		auto blade = std::make_shared<solid<T>>(); // thin ±2 blade, pinned, spun fast about z
 		blade->set_mass(tr::one());
 		blade->set_inertia(vec3<T>(tr::one(), tr::one(), tr::from_milli(200)));
@@ -1294,7 +1310,9 @@ template <typename T> static void test_angular_substep_ccd(const char * label) {
 	auto passes = [&](int substeps) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, z, z));
-		sim.set_angular_substeps_max(substeps);
+		auto config = sim.get_config();
+		config.angular_substeps_max = substeps;
+		sim.set_config(config);
 		auto blade = std::make_shared<solid<T>>();
 		blade->set_mass(tr::one());
 		blade->set_inertia(vec3<T>(tr::one(), tr::one(), tr::from_milli(200)));
@@ -1435,7 +1453,9 @@ template <typename T> static void test_joint_projection_bounds_carry(const char 
 	auto carry = [&](T projection, float & penetration_out) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
-		sim.set_joint_projection(projection);
+		auto config = sim.get_config();
+		config.joint_projection = projection;
+		sim.set_config(config);
 		// The slab the corpse is lying on: top face at y = 0.
 		auto floor = std::make_shared<solid<T>>();
 		floor->set_infinite_mass();
@@ -1514,7 +1534,9 @@ template <typename T> static void test_joint_projection_wakes_a_quiet_rig(const 
 	auto run = [&](T projection) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, z, z));  // nothing to fall: this is about the pass alone
-		sim.set_joint_projection(projection);
+		auto config = sim.get_config();
+		config.joint_projection = projection;
+		sim.set_config(config);
 		auto body = [&](T y) {
 			auto s = joint_body(sim, tr::from_milli(40), half, y);
 			s->set_collide_with_scope(0);
@@ -1555,7 +1577,9 @@ template <typename T> static void test_joint_projection_silent_when_satisfied(co
 	auto run = [&](T projection, vec3<T> & tail_out) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
-		sim.set_joint_projection(projection);
+		auto config = sim.get_config();
+		config.joint_projection = projection;
+		sim.set_config(config);
 		std::vector<std::shared_ptr<solid<T>>> links;
 		for (int i = 0; i < 4; ++i) {
 			auto s = joint_body(sim, tr::from_milli(100), half, -half - tr::from_int(i));
@@ -1991,7 +2015,9 @@ template <typename T> static void test_impact_reported_once(const char * label) 
 	for (contact_mode mode : { contact_mode::speculative, contact_mode::sweep_slide }) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, z, z));
-		sim.set_default_contact_mode(mode);
+		auto config = sim.get_config();
+		config.default_contact_mode = mode;
+		sim.set_config(config);
 		auto make = [&](T x, T vx) {
 			auto s = std::make_shared<solid<T>>();
 			s->set_mass(tr::one());
@@ -2030,7 +2056,9 @@ template <typename T> static void test_sweep_contact_left_behind(const char * la
 	const T z {};
 	simulator<T> sim;
 	sim.set_gravity(vec3<T>(z, z, z));
-	sim.set_default_contact_mode(contact_mode::sweep_slide);
+	auto config = sim.get_config();
+	config.default_contact_mode = contact_mode::sweep_slide;
+	sim.set_config(config);
 	auto make = [&](T mass, T x, T half, T vx) {
 		auto s = std::make_shared<solid<T>>();
 		if (mass > z)
@@ -2098,7 +2126,9 @@ template <typename T> static void test_contact_mode_survives_add_solid(const cha
 
 	// A body moved to another simulator keeps its mode; a new one takes that default.
 	simulator<T> other;
-	other.set_default_contact_mode(contact_mode::speculative);
+	auto config = other.get_config();
+	config.default_contact_mode = contact_mode::speculative;
+	other.set_config(config);
 	sim.remove_solid(left);
 	other.add_solid(left);
 	assert(left->get_contact_mode() == contact_mode::sweep_slide);

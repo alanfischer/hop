@@ -57,12 +57,14 @@ template <typename T> struct blocks {
 
 	blocks(double ratio, hop::contact_mode mode, bool tuned, double small_mass = 1) {
 		sim.set_gravity({ T {}, T {}, T {} });
-		sim.set_default_contact_mode(mode);
+		auto config = sim.get_config();
+		config.default_contact_mode = mode;
 		if (tuned) {
-			sim.set_micro_collision_threshold(T {});
+			config.micro_collision_threshold = T {};
 			// The small block peaks at v0 * sqrt(ratio); fixed16 tops out near 32768.
-			sim.set_max_velocity_component(num<T>(std::is_same_v<T, hop::fixed16> ? 30000 : 1e6));
+			config.max_velocity_component = num<T>(std::is_same_v<T, hop::fixed16> ? 30000 : 1e6);
 		}
+		sim.set_config(config);
 		wall = add(0, -1, 1);
 		small = add(small_mass, 1, small_half);
 		big = add(ratio * small_mass, 3, big_half);
