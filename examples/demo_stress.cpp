@@ -80,7 +80,6 @@ template <typename T> static void run(bool headless, int steps, bool fixed_label
 	hop::simulator<T> sim;
 	hop::bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
-	sim.set_deactivate_count(32);
 	// Resolve every body with the speculative contact mode (discover -> solve ->
 	// integrate, with the NGS position solver). It removes the sweep_slide path's
 	// structural energy injection, so the pile actually dissipates and settles
@@ -88,7 +87,9 @@ template <typename T> static void run(bool headless, int steps, bool fixed_label
 	// drain the slosh, dropping the old viscous-damping crutch (which glued balls to
 	// the walls). Set as the simulator default so every sphere and wall added below
 	// inherits it (see solid::set_contact_mode for the per-body override).
-	sim.set_default_contact_mode(hop::contact_mode::speculative);
+	auto config = sim.get_config();
+	config.default_contact_mode = hop::contact_mode::speculative;
+	sim.set_config(config);
 
 	T half  = fi<T>(ROOM_HALF);
 	T hgt   = fi<T>(ROOM_HEIGHT);

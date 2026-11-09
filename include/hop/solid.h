@@ -39,7 +39,7 @@ enum class restitution_combine { average, minimum, multiply, maximum };
 // so it is pushed by speculative bodies normally; only its *positioning* differs.
 // The two can be mixed per body (e.g. a sweep_slide character among speculative
 // balls). See simulator::update.
-//  - inherit: whatever the simulator's default is (simulator::set_default_contact_mode).
+//  - inherit: whatever the simulator's default is (simulator_config::default_contact_mode).
 //    A new solid starts here, and add_solid resolves it; a body never runs as inherit.
 enum class contact_mode { speculative, sweep_slide, inherit };
 
@@ -188,13 +188,13 @@ public:
 	int get_trigger_scope() const { return trigger_scope_; }
 
 	// Contact-resolution strategy for this body (see contact_mode). New bodies
-	// inherit the simulator's default (simulator::set_default_contact_mode) when
+	// inherit the simulator's default (simulator_config::default_contact_mode) when
 	// added; call this to override an individual body — e.g. a sweep_slide
 	// character moving among speculative balls. The choice holds whether it is made
 	// before or after add_solid, and survives a move to another simulator. inherit
 	// on a body already in a simulator takes that simulator's default at once.
 	void set_contact_mode(contact_mode m) {
-		contact_mode_ = m == contact_mode::inherit && simulator_ ? simulator_->get_default_contact_mode() : m;
+		contact_mode_ = m == contact_mode::inherit && simulator_ ? simulator_->get_config().default_contact_mode : m;
 	}
 	contact_mode get_contact_mode() const { return contact_mode_; }
 	// True when this body is resolved by the speculative solve: its position is
@@ -286,7 +286,7 @@ public:
 	// times per tick, but orientation is fixed for the duration of the contact
 	// solve — so we build M once here (from set_inertia and the orientation
 	// writers) and the hot path reduces to a single mat3×vec3. Zero for a
-	// non-rotating body (inv_inertia == 0 ⇒ M == 0), matching the old per-call math.
+	// non-rotating body (inv_inertia == 0 ⇒ M == 0).
 	const mat3<T> & get_inv_inertia_world() const { return inv_inertia_world_; }
 	void update_inv_inertia_world() {
 		mat3<T> d; // diag(inv_inertia_); default-constructed to identity, so clear it
@@ -327,10 +327,9 @@ public:
 	// Resistance to SPIN at a contact, for the shapes a manifold cannot help. A sphere
 	// resting on a floor touches at exactly one point and always will; no clipping
 	// scheme changes that, and that single point hands out a corner-lever impulse every
-	// tick just as a tilted box's corner used to. This is the standard treatment and the
-	// only thing that stops a ball rolling forever on flat ground: a torque opposing the
-	// relative spin at the contact, bounded by mu_roll*N*r and able only to REMOVE spin,
-	// never reverse it. Zero by default, so nothing existing changes.
+	// tick. This is the standard treatment and the only thing that stops a ball rolling
+	// forever on flat ground: a torque opposing the relative spin at the contact, bounded
+	// by mu_roll*N*r and able only to REMOVE spin, never reverse it. Zero by default.
 	void set_coefficient_of_rolling_friction(T c) { coefficient_of_rolling_friction_ = c; }
 	T get_coefficient_of_rolling_friction() const { return coefficient_of_rolling_friction_; }
 	void set_coefficient_of_effective_drag(T c) { coefficient_of_effective_drag_ = c; }
@@ -379,7 +378,7 @@ public:
 	// solid's current position (a swept query box, a mesh-local query box). Note this
 	// is NOT local_bound_, which is the shape extent before the solid's orientation;
 	// adding that raw to a moved anchor is a broad-phase box too small and pointing
-	// the wrong way for any rotated solid, which is a bug this has been three times.
+	// the wrong way for any rotated solid.
 	void get_bound_about_position(aa_box<T> & out) const {
 		out.set(world_bound_.mins, world_bound_.maxs);
 		sub(out, position_);
@@ -435,8 +434,7 @@ public:
 		velocity_.reset();
 		// The same, for spin. The sleep test tolerates ω up to deactivate_speed_, so a
 		// body that settles while still turning slightly freezes that turn and reads as
-		// moving forever after — and until contact manifolds landed, nothing resting
-		// ever slept, so the residual had no way to show. A body only spins dynamically
+		// moving forever after. A body only spins dynamically
 		// if it has inertia; the kinematic carry ω a game scripts is written every tick
 		// and simply reasserted, so clearing it here costs it nothing.
 		if (rotates_dynamically())
@@ -480,7 +478,7 @@ private:
 	}
 
 	// world_bound_ = AABB enclosing (orientation_ · local_bound_) + position_.
-	// Identity orientation reproduces the old translate-only bound exactly.
+	// Under identity orientation this is local_bound_ translated, exactly.
 	void recompute_world_bound() {
 		rotate_aabb(world_bound_, local_bound_, orientation_);
 		add(world_bound_, position_);

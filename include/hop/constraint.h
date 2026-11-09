@@ -291,18 +291,18 @@ public:
 	// How many consecutive ticks a limit may fail to make any progress on its violation
 	// before the solver calls it SETTLED: its way back into its cone is BLOCKED — by a
 	// floor, by the pile the corpse landed in, by the weight of the chain hanging off it —
-	// and no amount of pushing is going to move it. Before this it did not stop trying: it
-	// shoved at up to the recovery cap every tick for as long as the joint existed, which
-	// is what made a landed ragdoll shiver where it lay and never sleep.
+	// and no amount of pushing is going to move it. Without the rule a limit never stops
+	// trying: it shoves at up to the recovery cap every tick for as long as the joint
+	// exists, and a landed ragdoll shivers where it lies and never sleeps.
 	//
 	// A settled limit keeps its stop — it still refuses to let the joint open any further.
 	// What it gives up is the RECOVERY past where it settled, and its claim on the sleep
 	// test, which is exactly how hop already treats a body resting on a floor: held, but not
 	// working. It still winds back to the angle it settled at, because the limit is solved
 	// only at the velocity level and every position pass rotates the pair behind its back;
-	// with no recovery at all a settled joint drifted ten degrees further open.
+	// with no recovery at all a settled joint drifts ten degrees further open.
 	//
-	// Zero disables the rule, which is what hop did before this existed.
+	// Zero disables the rule.
 	void set_settle_ticks(int t) { settle_ticks_ = t > 0 ? t : 0; }
 	int get_settle_ticks() const { return settle_ticks_; }
 	bool limit_settled() const { return limit_watch_.settled; }

@@ -36,8 +36,8 @@ template <typename T> class solid;
 //                   the penetration depth — the distance the solid must move
 //                   along `result.normal` to reach the surface.  The simulator
 //                   uses this for position correction.  Leaving it at 0 falls
-//                   back to the old epsilon-nudge behaviour, which is safe but
-//                   slower to resolve deep penetrations.
+//                   back to an epsilon nudge, which is safe but slower to
+//                   resolve deep penetrations.
 //
 //                   `margin` (default 0 = exact surface) Minkowski-inflates the
 //                   geometry outward by that distance, so a solid whose surface
@@ -49,16 +49,16 @@ template <typename T> class solid;
 //                   the simulator recovers the true signed gap as
 //                   (margin - depth).  Swept hits (t > 0) should likewise stop
 //                   at the inflated surface.  Treat margin == 0 as the exact
-//                   mesh so existing (non-speculative) callers are unaffected.
+//                   mesh; sweep_slide bodies and public queries pass it.
 //
 //                   CONTACT POINT: on a hit, set `result.impact` to the world
 //                   contact point ON THE TRACEABLE's surface (not the mover).
 //                   `result.point` is the mover's origin at impact; `result.impact`
 //                   is the witness point on the mesh/plane, which lever-arm math
 //                   (kinematic angular carry, angular impulse response) needs as
-//                   `r = impact - solid_position`.  collide.h no longer fabricates
-//                   one for traceables (it used to copy point), so a trace that
-//                   leaves impact unset reports the origin (0,0,0).  The built-in
+//                   `r = impact - solid_position`.  collide.h does not fabricate
+//                   one for traceables, so a trace that leaves impact unset
+//                   reports the origin (0,0,0).  The built-in
 //                   traceables fill it; see HopTrimeshTraceable / HopPlaneTraceable.
 template <typename T> class traceable {
 public:

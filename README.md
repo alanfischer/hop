@@ -14,7 +14,7 @@ Supports `float`, `double`, `fixed16`, and `fixed32` scalar types via template p
 
 ## Design Philosophy
 
-Hop began as a **translation-only** physics engine — and that fast, predictable core is still its heart: continuous swept-collision detection, deterministic fixed-point support, and zero-allocation simulation. It was designed for the [toadlet](https://github.com/alanfischer/toadlet) game engine, where gameplay objects (characters, projectiles, pickups, triggers, vehicles on terrain) need solid collision response without the cost of a full rigid-body solver on every body.
+Hop began as a **translation-only** physics engine — and that fast, predictable core is still its heart: continuous swept-collision detection, deterministic fixed-point support, and a tick that allocates nothing once warm. Solids, shapes and constraints are `shared_ptr`-owned and allocated when the scene is built; `update()` reuses its scratch, growing it only when a scene reaches a new high-water mark (`tests/test_alloc.cpp` holds it to that). It was designed for the [toadlet](https://github.com/alanfischer/toadlet) game engine, where gameplay objects (characters, projectiles, pickups, triggers, vehicles on terrain) need solid collision response without the cost of a full rigid-body solver on every body.
 
 **Rotation is now supported, and it is opt-in by construction.** A solid carries an orientation, angular velocity, and a principal-axis inertia, but every rotational term is gated behind a runtime *identity fast path*: a solid with identity orientation and zero inertia takes exactly the original translation-only code path, bit-for-bit (including fixed-point replay). There is **no template flag and no global switch** — you pay for rotation only on the bodies that use it:
 
@@ -23,20 +23,20 @@ Hop began as a **translation-only** physics engine — and that fast, predictabl
 - Call `set_inertia(...)` to opt a body into **dynamic rotation**: it then spins under torque, tumbles off off-center collisions, rolls via friction, and is torqued by off-center constraint anchors.
 - Kinematic platforms carry their riders' velocity through `set_angular_velocity(...)` (a spinning `func_rotating`-style mover) with no inertia required.
 
-Orientation is snapshot per frame (one trace at a fixed orientation), which is enough for ordinary spin and rotating platforms. For a fast, thin spinner that could sweep *through* a small obstacle between frames (a blade trap), `set_angular_substeps_max(n)` opts that body into angular continuous-collision — its frame is subdivided into up to `n` fixed-orientation sub-traces. Default is one snapshot, so nothing else pays for it.
+Orientation is snapshot per frame (one trace at a fixed orientation), which is enough for ordinary spin and rotating platforms. For a fast, thin spinner that could sweep *through* a small obstacle between frames (a blade trap), `simulator_config::angular_substeps_max = n` opts that body into angular continuous-collision — its frame is subdivided into up to `n` fixed-orientation sub-traces. Default is one snapshot, so nothing else pays for it.
 
 See `docs/rotation_plan.md` for the full roadmap and the per-phase design notes.
 
 ## Features
 
 - **Swept collision detection** (continuous collision detection) for sphere, capsule, box, and convex solid shapes
-- **GJK closest-point narrowphase** for rounded-vs-polytope pairs — correct edge/vertex contact normals (a capsule rides up a thin ledge instead of catching on a fabricated wall) and vertex-bounded; switchable to a cheaper plane-inflation path via `set_accurate_narrowphase`
+- **GJK closest-point narrowphase** for rounded-vs-polytope pairs — correct edge/vertex contact normals (a capsule rides up a thin ledge instead of catching on a fabricated wall) and vertex-bounded; switchable to a cheaper plane-inflation path via `simulator_config::accurate_narrowphase`
 - **Multiple numerical integrators**: Euler, Improved Euler, Heun (default), Runge-Kutta
 - **Collision response** with coefficient of restitution, conservation of momentum, and friction
 - **Opt-in rigid-body rotation** — static orientation honored by the narrowphase and traceables, dynamic spin under torque (drift-free exponential quaternion integration), lever-arm angular impulse response (off-center hits tumble, friction rolls), kinematic angular carry for spinning platforms, and torque from off-center constraint anchors. Gated behind an identity fast path so non-rotating bodies stay bit-identical, fixed-point included
-- **Stacking contact solver** — a post-integration Gauss–Seidel pass over the touched-pair graph (warm-started, with restitution targets and Coulomb-cone friction at the velocity level) lets resting piles transmit load and settle; iteration count is tunable via `set_solver_iterations`
+- **Stacking contact solver** — a post-integration Gauss–Seidel pass over the touched-pair graph (warm-started, with restitution targets and Coulomb-cone friction at the velocity level) lets resting piles transmit load and settle; iteration count is tunable via `simulator_config::solver_iterations`
 - **Constraint system** with spring constants, damping, and distance thresholds; anchors live in each body's local frame and rotate with it, so an off-center anchor torques a dynamic body through its lever arm
-- **Rigid joints** — ball-socket pins with optional cone-twist angular limits, solved as velocity impulses plus a mass-weighted position pass, which is enough to hang a 21-body ragdoll off 20 of them. A mass-weighted pass cannot close a joint whose ends are BOTH held, though, and nothing else bounds how far a pin may be pried open, so `set_joint_projection` adds a last-resort geometric pass that moves the dependent end of an over-stretched joint by the excess — bounded error, bought with penetration
+- **Rigid joints** — ball-socket pins with optional cone-twist angular limits, solved as velocity impulses plus a mass-weighted position pass, which is enough to hang a 21-body ragdoll off 20 of them. A mass-weighted pass cannot close a joint whose ends are BOTH held, though, and nothing else bounds how far a pin may be pried open, so `simulator_config::joint_projection` adds a last-resort geometric pass that moves the dependent end of an over-stretched joint by the excess — bounded error, bought with penetration
 - **Deactivation/sleeping** for inactive solids
 - **BVH spatial acceleration** — bounding volume hierarchy for broad-phase collision queries via `bvh_manager`
 - **Collision scopes** — bitmask filtering for selective collision groups, plus `trigger_scope` for damage-zone / sensor-volume tagging
@@ -109,10 +109,10 @@ Traceable-vs-Traceable is not supported. Segment traces (raycasting) work agains
 
 ### Narrowphase: accurate (GJK) vs cheap (inflation)
 
-For pairs where one shape is **rounded** (sphere/capsule) and the other a **polytope** (box/convex_solid), hop offers two narrowphase methods, selected per-simulator with `set_accurate_narrowphase(bool)` (default `true`):
+For pairs where one shape is **rounded** (sphere/capsule) and the other a **polytope** (box/convex_solid), hop offers two narrowphase methods, selected per-simulator with `simulator_config::accurate_narrowphase` (default `true`):
 
 - **Accurate** — GJK closest-point distance + conservative advancement, working from the polytope's **support function** (its vertex hull). The contact normal is the true direction between the closest features, so it is correct at **edges and vertices**: a capsule sweeping a ledge gets an up-and-out normal and rides over it, rather than the fabricated vertical-wall normal a face-based method reports. It is also inherently **bounded** — an ill-formed or unbounded plane set still has a finite vertex hull, so it can't phantom-block from afar.
-- **Cheap** — the legacy path: inflate the convex's planes (or expand the box's AABB) by the rounded shape's support, then ray-trace. Exact on faces and slightly faster, but **face-normals-only** at edges (no ride-up). `set_accurate_narrowphase(false)` forces this globally.
+- **Cheap** — the legacy path: inflate the convex's planes (or expand the box's AABB) by the rounded shape's support, then ray-trace. Exact on faces and slightly faster, but **face-normals-only** at edges (no ride-up). `accurate_narrowphase = false` forces this globally.
 
 `gjk_eligible_pair()` in `collide.h` names the eligible set. Two classes of pair are intentionally **not** routed through GJK:
 
@@ -134,14 +134,14 @@ The visible symptom is in `examples/demo_stress.cpp` (~6859 spheres). It never f
 
 **Knobs for the default pipeline** (symptomatic — they hide the churn, they don't remove its source):
 
-- `set_deactivate_speed(s)` / `set_deactivate_count(n)` — how slow, and for how many consecutive ticks, before a body sleeps. Raising the speed / lowering the count sleeps far more of the pile (a sweep took the stress demo from ~55s to ~40s at `speed≈1.0, count=16` with no visible change, and to ~5s if pushed hard) — but past a point it *freezes bodies mid-motion*, leaving the pile puffed up with frozen-in voids. It buys speed by trading away settling accuracy.
-- `set_solver_iterations(n)` — Pass B Gauss–Seidel sweeps (default 16). Lower is correct for shallow/single contacts; deep stacks need the full count. Note this is **not** a performance fast path: the bottleneck is the swept narrow-phase, not the solver, and fewer iterations leave the pile churning so *more* bodies stay awake — in practice lowering it makes the stress scene slower, not faster.
+- `deactivate_speed` / `deactivate_count` — how slow, and for how many consecutive ticks, before a body sleeps. Raising the speed / lowering the count sleeps far more of the pile (a sweep took the stress demo from ~55s to ~40s at `speed≈1.0, count=16` with no visible change, and to ~5s if pushed hard) — but past a point it *freezes bodies mid-motion*, leaving the pile puffed up with frozen-in voids. It buys speed by trading away settling accuracy.
+- `solver_iterations` — Pass B Gauss–Seidel sweeps (default 16). Lower is correct for shallow/single contacts; deep stacks need the full count. Note this is **not** a performance fast path: the bottleneck is the swept narrow-phase, not the solver, and fewer iterations leave the pile churning so *more* bodies stay awake — in practice lowering it makes the stress scene slower, not faster.
 
 **What an actual fix would require — the pipeline reorder.** To let a large pile dissipate to true rest (and then sleep at the default threshold, for free), hop would need to move to the standard order: integrate to a *predicted* position, build contacts against that prediction, solve the velocity constraints, and only then commit the position — i.e. **speculative/swept-reconciled contacts** rather than the current integrate-then-snap-then-solve. This is the reconciliation that mainstream engines use to combine continuous collision with a sequential-impulse solver.
 
 This is feasible for hop precisely because it already owns the expensive half. The swept query that answers "where would I go and what would I hit on the way" is exactly what speculative contacts need; most engines have to bolt continuous collision *on* to get it, whereas here it is the core primitive. Replacing the per-tick TOI *snap* with a velocity *clamp* (remove only enough approach speed to close the remaining gap) is still pure arithmetic, so it does **not** threaten the fixed-point determinism.
 
-**Both strategies now ship as a per-body choice — `contact_mode`, not a global switch.** Each `solid` selects how its position is resolved (`solid::set_contact_mode`, before or after `add_solid`; a body that never chooses gets `simulator::set_default_contact_mode` when it is added):
+**Both strategies now ship as a per-body choice — `contact_mode`, not a global switch.** Each `solid` selects how its position is resolved (`solid::set_contact_mode`, before or after `add_solid`; a body that never chooses gets `simulator_config::default_contact_mode` when it is added):
 
 - **`contact_mode::sweep_slide`** (the default) — the integrate → snap → slide path described above: exact TOI placement, the distinctive never-penetrate behavior, and crisp collide-and-slide movement. Ideal for a player/character and the single- or few-body game-object case hop targets.
 - **`contact_mode::speculative`** — the reorder: discover → solve → integrate, with margin-shell contact discovery and an iterative NGS position solver. On `demo_stress` it removes the energy injection (~50× less residual KE), keeps a deep pile off the floor, and — with real Coulomb friction — settles a centered, drift-free pile. Ideal for dynamic debris/balls that need to pile and sleep.
@@ -222,6 +222,15 @@ for (int i = 0; i < 100; ++i) {
 	sim->update(0.01f);
 }
 // s->get_position().z is now ~5.1 (freefall: 10 - 0.5 * 9.81 * 1^2)
+```
+
+Tuning lives in one `simulator_config` (in `simulator.h`), each field with its default and what
+it does; most scenes touch only its first group. Pass it to the constructor, or change it later:
+
+```cpp
+auto config = sim->get_config();
+config.default_contact_mode = contact_mode::speculative;
+sim->set_config(config);
 ```
 
 For deterministic fixed-point simulation, substitute `fixed16` for `float`:

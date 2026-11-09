@@ -213,9 +213,10 @@ template <typename T> inline void support(vec3<T> & result, const shape<T> & sh,
 
 // Support point in the OWNING SOLID's frame: the shape's own support carried through
 // its local_rotation and local_position. The support() above is intrinsic by design
-// (see the local_position / local_rotation setters), and every caller that forgot to
-// compose them has been a bug — reach for this one unless you specifically want the
-// raw geometry. Identity pose degenerates to the intrinsic call exactly.
+// (see the local_position / local_rotation setters), and a caller that forgets to
+// compose them is wrong for every posed shape — reach for this one unless you
+// specifically want the raw geometry. Identity pose degenerates to the intrinsic call
+// exactly.
 template <typename T> inline void support_in_solid(vec3<T> & result, const shape<T> & sh, const vec3<T> & d) {
 	const mat3<T> identity;
 	const mat3<T> & R = sh.get_local_rotation();

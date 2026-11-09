@@ -58,13 +58,13 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 		// box-vs-box pair (via the Minkowski sum below), so a body separating from a
 		// surface it overlaps would otherwise be handed to the solver as
 		// penetration-at-frame-start and pushed along the contact normal while it was
-		// already leaving. Removing it on consistency grounds wedged riders into the
-		// walls of ww_golem's rotating cockpit and lifted them.
+		// already leaving. Without it, riders in a rotating cockpit wedge into its walls
+		// and are lifted.
 		//
 		// A ZERO-length segment skips the test, so it costs point queries nothing --
 		// which is the only thing intersect_point ever needed from this branch.
 		// Set before the guard below: the flag says the segment BEGAN here, which is true
-		// whichever way it is now heading. Putting it after made it mean "began here and I
+		// whichever way it is now heading. After the guard it would mean "began here and I
 		// chose to report it", which is not what collision::started_inside documents and
 		// would silently mislead a caller using it as a containment test.
 		c.started_inside = true;
@@ -336,6 +336,7 @@ void build_convex_box_minkowski(convex_solid<T> & out,
                                 const convex_solid<T> & convex,
                                 const vec3<T> & box_half) {
 	const aa_box<T> box(-box_half.x, -box_half.y, -box_half.z, box_half.x, box_half.y, box_half.z);
+	out.vertices.clear();
 	out.planes = convex.planes;
 	out.planes.reserve(convex.planes.size() + 6);
 	vec3<T> sup;
@@ -352,6 +353,27 @@ void build_convex_box_minkowski(convex_solid<T> & out,
 	for (int i = 0; i < 6; ++i) {
 		support(sup, convex, axes[i]);
 		out.planes.push_back(plane<T>(axes[i], dot(sup, axes[i]) + half_along[i]));
+	}
+}
+
+// The configuration-space obstacle b ⊕ (−a) into `out`: b's faces pushed out by a's
+// support against each normal, then a's faces, negated, pushed out by b's.
+template <typename T>
+void build_convex_convex_minkowski(convex_solid<T> & out, const convex_solid<T> & a, const convex_solid<T> & b) {
+	out.vertices.clear();
+	out.planes = b.planes;
+	out.planes.reserve(b.planes.size() + a.planes.size());
+	vec3<T> sup;
+	vec3<T> neg_n;
+	for (auto & p : out.planes) {
+		neg(neg_n, p.normal);
+		support(sup, a, neg_n);
+		p.distance = p.distance + dot(sup, neg_n);
+	}
+	for (const auto & p1 : a.planes) {
+		neg(neg_n, p1.normal);
+		support(sup, b, neg_n);
+		out.planes.push_back(plane<T>(neg_n, p1.distance + dot(sup, neg_n)));
 	}
 }
 
@@ -425,8 +447,7 @@ void trace_inverted_convex(collision<T> & col,
 // margin, and — for a capsule — the per-plane support of its spine direction
 // max(0, nw·D_world). Handing the resulting world-oriented planes to the
 // translate-only trace_forward/inverted_convex is what lets the fallback respect
-// an oriented convex (the axis-aligned version silently dropped it). Identity Rc
-// reproduces the old local-plane inflation exactly.
+// an oriented convex. Identity Rc is plain local-plane inflation, exactly.
 template <typename T>
 inline void inflate_convex_world(convex_solid<T> & out, const convex_solid<T> & in,
                                  const mat3<T> & Rc, T radius, bool is_capsule,
@@ -466,8 +487,8 @@ inline void convex_from_box(convex_solid<T> & out, const aa_box<T> & b) {
 
 // The polytope geometry of a box-or-convex shape. A box is materialised into the
 // caller's scratch (six planes); a convex_solid is returned as-is. Lets the rounded
-// backstops below serve both, so a rotated BOX gets the same orientation-aware
-// treatment a rotated convex already had.
+// backstops below serve both, so a rotated box and a rotated convex get the same
+// orientation-aware treatment.
 template <typename T>
 inline const convex_solid<T> & polytope_of(const shape<T> * sh, convex_solid<T> & scratch) {
 	if (sh->get_type() == shape_type::box) {
@@ -484,8 +505,8 @@ inline const convex_solid<T> & polytope_of(const shape<T> * sh, convex_solid<T> 
 // rotate the convex into world orientation (inflate_convex_world) and place every
 // reference point through the solids' orientations, mirroring trace_pair_gjk's
 // placement (Ri = solid_orientation · shape_local_rotation; base = solid_position
-// + solid_orientation · local_position). Identity orientations are bit-identical
-// to the old translate-only placement.
+// + solid_orientation · local_position). Under identity orientations this is
+// translation alone, bit for bit.
 template <typename T>
 void trace_rounded_convex_forward(collision<T> & col, const segment<T> & seg,
                                   solid<T> * s1, solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
@@ -499,7 +520,7 @@ void trace_rounded_convex_forward(collision<T> & col, const segment<T> & seg,
 	vec3<T> D_world;
 	if (is_capsule)
 		mul(D_world, R1, sh1->get_capsule().direction);
-	convex_solid<T> cs, box_scratch;
+	thread_local convex_solid<T> cs, box_scratch;
 	inflate_convex_world(cs, polytope_of(sh2, box_scratch), Rc, radius, is_capsule, D_world, margin);
 	// Primitive reference offset from s1's position: s1_orientation·lp1 + R1·prim_origin.
 	vec3<T> sh1_offset, ro;
@@ -525,7 +546,7 @@ void trace_rounded_convex_inverted(collision<T> & col, const segment<T> & seg,
 	vec3<T> D_world;
 	if (is_capsule)
 		mul(D_world, R2, sh2->get_capsule().direction);
-	convex_solid<T> cs, box_scratch;
+	thread_local convex_solid<T> cs, box_scratch;
 	inflate_convex_world(cs, polytope_of(sh1, box_scratch), Rc, radius, is_capsule, D_world, margin);
 	// lp_delta in world: s2_orientation·lp2 − s1_orientation·lp1 (trace_inverted_convex
 	// adds it to s2_position − s1_position to reach the convex's local frame).
@@ -790,7 +811,7 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 	using tr = scalar_traits<T>;
 	// Each shape's world rotation = solid_orientation · shape_local_rotation; its
 	// world origin = solid_position + solid_orientation · local_position. (For
-	// identity orientations this is exactly the old translate-only placement.)
+	// identity orientations this is exactly translation alone.)
 	mat3<T> Ra, Rb;
 	mul(Ra, s1->get_orientation(), sh1->get_local_rotation());
 	mul(Rb, s2->get_orientation(), sh2->get_local_rotation());
@@ -1075,13 +1096,14 @@ inline void trace_pair_oriented_polytope(collision<T> & col, const segment<T> & 
 	sub(rel, s2->get_position(), seg.origin);
 	add(base2, rel);
 
-	world_polytope<T> A, B;
+	// Per-thread scratch: clear() keeps capacity, so a warm tick allocates nothing.
+	thread_local world_polytope<T> A, B;
+	thread_local convex_solid<T> cso;
 	build_world_polytope(A, sh1, R1, base1, epsilon);
 	build_world_polytope(B, sh2, R2, base2, epsilon);
 	if (A.verts.empty() || B.verts.empty())
 		return; // malformed convex — leave col untouched (no hit)
 
-	convex_solid<T> cso;
 	build_polytope_cso(cso, A, B, epsilon);
 	if (margin > T {})
 		for (auto & p : cso.planes)
@@ -1127,7 +1149,7 @@ inline void trace_pair_oriented_polytope(collision<T> & col, const segment<T> & 
 
 // True when any of the pair's solid orientations or shape local rotations is
 // non-identity, i.e. the axis-aligned fast paths would be wrong. Cheap (4 matrix
-// compares) so the identity polytope path is not regressed.
+// compares) so the identity polytope path stays cheap.
 template <typename T>
 inline bool pair_is_oriented(const solid<T> * s1, const solid<T> * s2,
                              const shape<T> * sh1, const shape<T> * sh2) {
@@ -1927,8 +1949,8 @@ inline int manifold_for_solids(contact_point<T> * out, int max_out, const collis
 	// support()-derived, and support() on a body whose contact normal is no longer an
 	// exact axis snaps to a CORNER, so the moment the lower body acquires any tilt at
 	// all the contact above it gains a lever arm it does not have and the pair runs
-	// away faster. The old stability was not stability — it was a single point at the
-	// face centre being unable to torque anything at all.
+	// away faster. A single point at the face centre looks stable only because it
+	// cannot torque anything at all.
 	//
 	// Nothing in WizardWars is exposed to this: a ragdoll's bones and a gib both carry
 	// collision_mask = WORLD and nothing else, so they only ever rest on static
@@ -2076,9 +2098,9 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 		// Place the shape: its world rotation is solid_orientation · local_rotation, and
 		// its frame origin is solid_position + solid_orientation · local_position. Every
 		// primitive below traces against geometry in that frame, so the segment is carried
-		// in and the hit carried back out. They used to be handed world-space copies of
-		// the geometry instead, which silently answered for the UNROTATED shape — a yawed
-		// box/capsule/convex was invisible to rays and point queries.
+		// in and the hit carried back out. A world-space copy of the geometry would
+		// silently answer for the UNROTATED shape, leaving a yawed box/capsule/convex
+		// invisible to rays and point queries.
 		mat3<T> R;
 		vec3<T> base;
 		if (solid_oriented) {
@@ -2094,7 +2116,7 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 
 		// Segment in the shape's own frame. Unrotated this is just the translation, which
 		// is why there is one code path here and not two: R == I makes the rotations below
-		// the identity, and the old separate translate-only arm rotated local_position by
+		// the identity, and a separate translate-only arm would rotate local_position by
 		// nothing at all — wrong for a turning solid whose shape counter-rotates.
 		segment<T> lseg;
 		vec3<T> rel;
@@ -2290,8 +2312,8 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			//   polytope×polytope → Minkowski-CSO sweep
 			//   rounded×polytope  → the plane-inflation backstop GJK falls through to,
 			//                       with a box materialised as six planes like any other
-			//                       polytope (a sphere deep inside a yawed box used to
-			//                       report nothing while its surface shell reported fine)
+			//                       polytope, so a sphere deep inside a yawed box reports
+			//                       as its surface shell does)
 			// Identity pairs skip all of it and take the cheaper exact AA paths. The type
 			// tests come first so an unrotated pair never pays for pair_is_oriented.
 			else if (is_polytope_shape(sh1->get_type()) && is_polytope_shape(sh2->get_type())
@@ -2336,7 +2358,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				vec3<T> half;
 				sub(half, sh1->get_box().maxs, sh1->get_box().mins);
 				mul(half, tr::half());
-				convex_solid<T> cs;
+				thread_local convex_solid<T> cs;
 				build_convex_box_minkowski(cs, sh2->get_convex_solid(), half);
 				vec3<T> sh1_offset;
 				add(sh1_offset, sh1->get_box().mins, sh1->get_box().maxs);
@@ -2438,7 +2460,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				vec3<T> half;
 				sub(half, sh2->get_box().maxs, sh2->get_box().mins);
 				mul(half, tr::half());
-				convex_solid<T> cs;
+				thread_local convex_solid<T> cs;
 				build_convex_box_minkowski(cs, sh1->get_convex_solid(), half);
 				vec3<T> sh2_offset;
 				add(sh2_offset, sh2->get_box().mins, sh2->get_box().maxs);
@@ -2462,23 +2484,8 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// unbounded along sh1's face normals, the same false-positive static
 			// overlap that box-vs-convex hits without its axis planes.
 			else if (sh1->get_type() == shape_type::convex_solid && sh2->get_type() == shape_type::convex_solid) {
-				const auto & a = sh1->get_convex_solid();
-				const auto & b = sh2->get_convex_solid();
-				convex_solid<T> cs;
-				cs.planes = b.planes;
-				cs.planes.reserve(b.planes.size() + a.planes.size());
-				vec3<T> sup;
-				vec3<T> neg_n;
-				for (auto & p : cs.planes) {
-					neg(neg_n, p.normal);
-					support(sup, a, neg_n);
-					p.distance = p.distance + dot(sup, neg_n);
-				}
-				for (const auto & p1 : a.planes) {
-					neg(neg_n, p1.normal);
-					support(sup, b, neg_n);
-					cs.planes.push_back(plane<T>(neg_n, p1.distance + dot(sup, neg_n)));
-				}
+				thread_local convex_solid<T> cs;
+				build_convex_convex_minkowski(cs, sh1->get_convex_solid(), sh2->get_convex_solid());
 				inflate_planes(cs);
 				trace_forward_convex(col, seg, s2->get_position(), lp2, cs, lp1, epsilon);
 			}

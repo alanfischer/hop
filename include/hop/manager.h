@@ -26,10 +26,10 @@ template <typename T> class solid;
 //      bvh_manager) leave them as no-ops.
 //
 //      trace_solid takes a `margin` (0 = exact). Under the speculative-contacts
-//      pipeline the simulator passes spec_margin during discovery so near-resting
+//      pipeline the simulator passes speculative_margin during discovery so near-resting
 //      contacts against external geometry are found the same way primitive pairs
 //      are; report result.depth against the inflated surface (the caller recovers
-//      the true gap as margin - depth). The legacy swept path and the public
+//      the true gap as margin - depth). The sweep_slide path and the public
 //      trace_solid query pass margin 0. A hit with no owning solid
 //      (result.collider == nullptr) is treated as a contact against an immovable
 //      world anchor.
