@@ -127,7 +127,7 @@ public:
 		ticks_since_dynamic_rebuild_ = 0;
 		refits_since_dynamic_rebuild_ = 0;
 
-		// Not built from this tree any more (see rebuild_iteration_order) — but an
+		// The order is not taken from this tree (see rebuild_iteration_order), but an
 		// add or a remove is what usually brings us here, so keep it in step.
 		if (order_dirty_)
 			rebuild_iteration_order();
@@ -143,18 +143,18 @@ public:
 	// this order is the solids' solve_id_ order — a pure function of WHICH
 	// solids exist, never of when this manager last touched its trees.
 	//
-	// It used to be the dynamic BVH's DFS leaf order, for cache locality on the
-	// update pass. That made the order a function of the tree's TOPOLOGY, which
-	// is rebuilt on an add/remove or every dynamic_rebuild_period ticks and only
-	// refit in between — so the same solids in the same places iterated in a
+	// Not the dynamic BVH's DFS leaf order, tempting as that is for cache
+	// locality: it is a function of the tree's TOPOLOGY, which is rebuilt on an
+	// add/remove or every dynamic_rebuild_period ticks and only refit in
+	// between, so the same solids in the same places would iterate in a
 	// different order depending on when they were added relative to the last
 	// rebuild. A Gauss-Seidel solve is order-dependent, so that is a different
 	// simulation: two peers running one jointed ragdoll from byte-identical
-	// inputs came out 0.3m apart in a single tick, because one built its bones
+	// inputs come out 0.3m apart in a single tick when one builds its bones
 	// inside a physics tick (rebuild, then throw) and the other between two
 	// (throw, then rebuild). Order is the one thing a solver must not take from
-	// history. The BVH still accelerates every broad-phase query — it just no
-	// longer decides who is solved first.
+	// history. The BVH accelerates every broad-phase query; it does not decide
+	// who is solved first.
 	void rebuild_iteration_order() {
 		iteration_order_.clear();
 		iteration_order_.reserve(dynamic_solids_.size() + static_solids_.size());
@@ -265,7 +265,7 @@ public:
 	void pre_update(T dt) override {
 		if (static_cast<int>(dynamic_solids_.size()) < linear_scan_threshold)
 			return;
-		// The order follows adds and removes and nothing else now, so it is
+		// The order follows adds and removes and nothing else, so it is
 		// refreshed on its own dirty flag rather than off the back of a rebuild
 		// (see rebuild_iteration_order).
 		if (order_dirty_)

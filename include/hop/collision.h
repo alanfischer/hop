@@ -104,8 +104,8 @@ template <typename T> struct collision {
 	// The report IS the start overlap, rather than something crossed later. Both halves are
 	// needed and neither implies the other: a segment can begin inside a non-convex collidee
 	// and still report a crossing further along (time > 0), and a contact at time 0 can be a
-	// surface simply met with no distance to travel. Named because four query-layer filters
-	// were spelling it out, and a fifth would have had to guess which half mattered.
+	// surface simply met with no distance to travel. Filter on this rather than spelling out
+	// one half.
 	bool is_start_overlap() const { return started_inside && time <= T {}; }
 
 	collision & set(const collision & c) {

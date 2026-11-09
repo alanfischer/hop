@@ -230,7 +230,7 @@ public:
 		// solids_, ignore it for this tick and iterate solids_ directly. A stale
 		// order would otherwise skip bodies (release) or dereference a dangling
 		// solid pointer (use-after-free) — both far worse than losing locality
-		// for one tick. (Was an assert(); promoted to a graceful fallback.)
+		// for one tick.
 		if (order && order->size() != solids_.size())
 			order = nullptr;
 
@@ -253,7 +253,7 @@ public:
 		// contacts at its frame-start position without moving — its position is
 		// committed in Pass B. `any_speculative` records whether the NGS position
 		// pass and shock propagation have work to do; a scene with no speculative
-		// body behaves exactly as the legacy swept pipeline did.
+		// body skips both.
 		bool any_speculative = false;
 		for (size_t ii = 0; ii < num; ++ii) {
 			solid<T> * s = select(ii);
@@ -365,7 +365,7 @@ private:
 	// only a call that owns the whole tick can measure that share. The
 	// angular-CCD loop calls this N times at dt/N and keeps sub-stepping AFTER a contact
 	// is recorded, adding increments and motion no single sub-step's fraction accounts
-	// for; crediting there injects energy (float grew unboundedly, 2.5x over 425 bounces).
+	// for; crediting there injects energy (float grows unboundedly, 2.5x over 425 bounces).
 	// Those bodies leave the share at 1 and pay the full, conservative subtraction.
 	// Crediting them properly needs Pass A to accumulate the earned increment itself.
 	void update_solid(solid<T> * solid_ptr, T dt, bool whole_tick = true);
@@ -397,19 +397,18 @@ private:
 
 public:
 	// The one "is this body at rest?" test, asked by both the sleep decision
-	// (try_deactivate) and the solver's wake decision (solve_contacts). The two used
-	// to phrase it differently — sleep bounded length(ω), wake bounded each axis of ω
-	// against the same number — so ω = (0.15, 0.15, 0.15) was still to one and moving
+	// (try_deactivate) and the solver's wake decision (solve_contacts). Both must
+	// phrase it the same way: were sleep to bound length(ω) and wake each axis of ω
+	// against the same number, ω = (0.15, 0.15, 0.15) would be still to one and moving
 	// to the other, and a body could fall asleep holding a spin nothing would wake it
 	// to shed.
 	//
 	// disp is the body's translation over one tick, so a caller holding a velocity
 	// passes v · dt. deactivate_speed is a speed, so the displacement it permits
 	// scales with dt. Comparing a raw displacement against deactivate_speed directly
-	// (as the sleep test once did) made the effective velocity threshold 1/dt times
-	// too large — at dt = 16 ms a body drifting at ~12 m/s still counted as "still"
-	// and could be frozen in mid-air the instant it brushed a neighbour (the classic
-	// "ball hanging in the air").
+	// would make the effective velocity threshold 1/dt times too large — at dt = 16 ms
+	// a body drifting at ~12 m/s would count as "still" and could be frozen in mid-air
+	// the instant it brushed a neighbour (the classic "ball hanging in the air").
 	bool at_rest(const solid<T> * s, const vec3<T> & disp, const vec3<T> & w, T dt) const {
 		const T deactivate_disp = config_.deactivate_speed * dt;
 		if (tr::abs(disp.x) >= deactivate_disp || tr::abs(disp.y) >= deactivate_disp ||
@@ -740,16 +739,15 @@ private:
 		// boundary, clamped accumulator so it never pulls.
 		//
 		// It is solved ONLY at the velocity level, and that is the whole difference
-		// between a corpse that settles and one that writhes. A limit also had a position
-		// pass once — a pseudo-rotation into rot_correction_, the way the pin has one —
-		// and a pseudo-position cannot be argued with: a limb pinned under a torso
-		// against the floor is outside its cone and CANNOT get back in, so the position
-		// pass re-corrected it every tick forever and teleported the corpse a couple of
-		// centimetres a tick while it did. Measured over 32 thrown corpses, that was
-		// 0.20 m of crawl per half-second against a pin-only corpse's 0.035 m, and two in
-		// twelve ever came to rest. Deleting it took the crawl to 0.025 m — BELOW the
-		// pin-only corpse — and left the joints no worse held: an impulse can be refused
-		// by the contact that is in the way, and that is exactly the property wanted.
+		// between a corpse that settles and one that writhes. A position pass — a
+		// pseudo-rotation into rot_correction_, the way the pin has one — cannot be
+		// argued with: a limb pinned under a torso against the floor is outside its cone
+		// and CANNOT get back in, so the pass would re-correct it every tick forever and
+		// teleport the corpse a couple of centimetres a tick. Measured over 32 thrown
+		// corpses, such a pass gives 0.20 m of crawl per half-second and two in twelve
+		// ever come to rest; without it the crawl is 0.025 m, below a pin-only corpse's
+		// 0.035 m, and the joints are no worse held: an impulse can be refused by the
+		// contact that is in the way, and that is exactly the property wanted.
 		struct limit_row {
 			bool on = false;
 			// World, and pointing the way the violation is RELIEVED — the same convention
@@ -798,7 +796,7 @@ inline void apply_inv_inertia_world(const solid<T> * s, const vec3<T> & v, vec3<
 	// duration of the contact solve, so the tensor is cached on the body (rebuilt
 	// once per tick by the orientation writers) and this hot path — called per
 	// angular pair × solver iterations, plus on every angular impulse — is a single
-	// mat3×vec3 instead of the transpose + two matrix multiplies it used to do.
+	// mat3×vec3 rather than a transpose and two matrix multiplies.
 	mul(out, s->get_inv_inertia_world(), v);
 }
 
@@ -1034,12 +1032,12 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 
 		// Use the cached world AABB (world_bound_ = rotate_aabb(local_bound_,
 		// orientation_) + position_, refreshed on every move/reorient), shifted by the
-		// frame's motion to centre on new_pos. The un-rotated local_bound_ this once
-		// used does NOT include the solid's orientation, so an oriented solid (e.g. a
-		// box balanced on a rotated edge, reaching √2·half past its AABB) queried a box
-		// too small to reach the geometry its oriented narrowphase would collide
-		// against — and tunnelled until it sank far enough for the un-rotated box to
-		// reach. (`temp` already holds new_pos − old_pos from the motion calc above.)
+		// frame's motion to centre on new_pos. The un-rotated local_bound_ does NOT
+		// include the solid's orientation, so an oriented solid (e.g. a box balanced on
+		// a rotated edge, reaching √2·half past its AABB) would query a box too small to
+		// reach the geometry its oriented narrowphase collides against, and tunnel until
+		// it sank far enough for the un-rotated box to reach. (`temp` already holds
+		// new_pos − old_pos from the motion calc above.)
 		aa_box<T> box(solid_ptr->world_bound_);
 		add(box, temp);
 		box.mins.x -= m;
@@ -1098,18 +1096,17 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// the full overlap depth. Against a dynamic partner the correction
 				// is split — but it must be applied to BOTH bodies here, in one
 				// shot, rather than each body pushing only itself by half during
-				// its own update. The old self-only split was order dependent: the
-				// body updated second saw an already-reduced overlap and pushed
-				// less, so the pair's center of mass crept toward whichever body
-				// updated first. Over a grid of contacts that fixed iteration order
-				// summed into a steady lateral drift (a settling pile sliding into
-				// one corner). Moving both bodies ±depth/2 is center-of-mass
-				// preserving and order-independent, killing the drift at its source.
+				// its own update. A self-only split is order dependent: the body
+				// updated second sees an already-reduced overlap and pushes less, so
+				// the pair's center of mass creeps toward whichever body updated
+				// first. Over a grid of contacts that fixed iteration order sums into
+				// a steady lateral drift (a settling pile sliding into one corner).
+				// Moving both bodies ±depth/2 is center-of-mass preserving and
+				// order-independent.
 				// Distribute the push-out by which bodies can actually move. An
-				// infinite-mass body must never be relocated by recovery — the old
-				// code only checked the partner's mass and silently moved an
-				// infinite-mass MOVER (a static floor pushing itself out of a resting
-				// oriented box, sinking the whole world). Split half/half only when
+				// infinite-mass body must never be relocated by recovery, the mover
+				// included: a static floor pushing itself out of a resting oriented
+				// box sinks the whole world. Split half/half only when
 				// both are movable (center-of-mass preserving, order-independent);
 				// otherwise the single movable body takes the full correction.
 				const bool self_movable = !solid_ptr->has_infinite_mass();
@@ -1173,7 +1170,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// already been snapped/pushed to the contact, so this is 0 at a clean
 				// TOI touch and -depth when separating an existing overlap. Because
 				// gap <= slop, the unified velocity target in solve_contacts reduces to
-				// the legacy restitution response for this contact (the speculative
+				// the plain restitution response for this contact (the speculative
 				// gap-clamp branch only fires on a positive, margin-discovered gap).
 				T separation = (c.time == T{} && c.depth > T{}) ? -c.depth : T{};
 				consumed += (one - consumed) * c.time;
@@ -1190,7 +1187,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// The swept path resolves one contact at a time by construction — it
 				// snaps to the earliest TOI and slides — so its manifold is the one point
 				// it just stopped against. A sweep_slide body positions itself
-				// geometrically and never had a settling problem to fix.
+				// geometrically and has no settling problem to fix.
 				contact_point<T> cp;
 				cp.impact.set(c.impact);
 				cp.normal.set(pair_normal);
@@ -1223,8 +1220,8 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			}
 
 			// Project leftover motion onto the tangent plane as well.
-			// Conserving the full magnitude of left_over (as the previous
-			// implementation did) injects energy during angled hits.
+			// Conserving the full magnitude of left_over injects energy during
+			// angled hits.
 			T dn = dot(left_over, c.normal);
 			if (dn < T {}) {
 				mul(temp, c.normal, dn);
@@ -1298,7 +1295,7 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 						continue;
 					// A body is supported if ANY point of a fresh slot is load-bearing.
 					// One corner of a manifold under load holds the body up just as a
-					// single contact used to.
+					// single contact does.
 					for (int q = 0; q < slot.point_count; ++q) {
 						if (slot.points[q].separation <= config_.speculative_slop || slot.points[q].accum_n > T {}) {
 							supported = true;
@@ -1365,7 +1362,7 @@ template <typename T> void simulator<T>::try_deactivate(solid<T> * solid_ptr, co
 // found via the broad phase plus manager-injected external geometry (queried at
 // the end, recorded against the world anchor). Every contact passes through the
 // manager's collision_response hook, which can claim it (excluding it from the
-// solver) exactly as in the legacy update_solid path.
+// solver) exactly as in update_solid.
 template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid_ptr, T dt) {
 	const T zero = T {};
 	const T one = tr::one();
@@ -1414,7 +1411,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 	// Broad phase over the swept motion plus the speculative margin. Use the cached
 	// world AABB (already rotate_aabb(local_bound_, orientation_) + position_, and
-	// position_ == old_pos here) — the un-rotated local_bound_ this once used omits
+	// position_ == old_pos here) — the un-rotated local_bound_ omits
 	// the solid's orientation and underspans an oriented solid's true extent, missing
 	// contacts under its rotated faces.
 	T reach = tr::max_val(tr::abs(delta.x), tr::max_val(tr::abs(delta.y), tr::abs(delta.z))) + config_.speculative_margin + config_.epsilon;
@@ -1525,7 +1522,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// normal/collider/point); `partner` is the touch partner — a real solid, or
 	// static_world_ for manager geometry with no owning solid.
 	//
-	// collision_response mirrors the legacy update_solid hook: when the manager
+	// collision_response mirrors the update_solid hook: when the manager
 	// claims the contact it is NOT recorded, so Pass B applies no impulse — the
 	// manager has taken responsibility and may mutate the solid's velocity/position
 	// directly. The `position` out-param is honored as a relocation (commit_solid
@@ -1534,7 +1531,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// the *solved* velocity, so there is no slide remainder to consume. (A manager
 	// that relocates the body this way should zero its velocity too if it wants it
 	// to stay put. Contacts discovered later this tick are not re-traced from the
-	// new position, unlike the legacy slide loop, so claim-and-relocate is intended
+	// new position, unlike update_solid's slide loop, so claim-and-relocate is intended
 	// for the destroy / single-contact cases.)
 	auto record_contact = [&](solid<T> * partner) {
 		const vec3<T> & n = col.normal;
@@ -1731,8 +1728,8 @@ template <typename T> void simulator<T>::correct_positions() {
 			// re-penetrates on the next tick, and the velocity solve is left fighting a
 			// position pass that keeps recreating the tilt. Sandwich such a body between
 			// two others and the fight compounds into a rocking that grows until the
-			// stack falls through itself. (The joint rows below have had the angular
-			// half from the start, and for the same reason.)
+			// stack falls through itself. (The joint rows below carry the angular half
+			// for the same reason.)
 			const bool spin_a = a_free && p.a_rotates;
 			const bool spin_b = b_free && p.b_rotates;
 			const bool angular = spin_a || spin_b;
@@ -1936,8 +1933,8 @@ template <typename T> void simulator<T>::project_joints() {
 	// The anchor where the commit will leave it, which needs the pseudo-rotation as a real
 	// quaternion and NOT as correct_positions' r + d×r. That linearisation asks for
 	// rotations that cannot exist once a pin's error is large against its lever arm — 2.5
-	// to 3.4 radians, measured — and reads as if the anchor had arrived, which had this
-	// pass see 0.14 m on a joint 0.49 m open and do nothing at all.
+	// to 3.4 radians, measured — and reads as if the anchor had arrived, so this pass
+	// would see 0.14 m on a joint 0.49 m open and do nothing at all.
 	auto anchor_now = [this](const solid<T> * s, const vec3<T> & local, vec3<T> & out) {
 		vec3<T> lever;
 		anchor_lever(lever, s, local);
@@ -1966,8 +1963,8 @@ template <typename T> void simulator<T>::project_joints() {
 			const bool start_free = settable(*start);
 			const bool end_free = end && settable(*end);
 			// A world point counts as a held end. Decided before anything is measured: each
-			// constraint is visited twice and handled once, so measuring first threw half of
-			// every tick's spans and anchors away.
+			// constraint is visited twice and handled once, so measuring first would throw
+			// half of every tick's spans and anchors away.
 			const bool anchored = !start_free || !end_free;
 			if (anchored != held_pass)
 				continue;
@@ -2074,7 +2071,7 @@ void simulator<T>::trace_solid(collision<T> & result, solid<T> * s, const segmen
 	aa_box<T> box;
 	box.set(seg.origin, seg.origin);
 	box.merge(end);
-	// Grow by the mover's ORIENTED extent. Adding local_bound_ raw (as this did) gives a
+	// Grow by the mover's ORIENTED extent. Adding local_bound_ raw gives a
 	// rotated solid a box too small and pointing the wrong way, so a shape whose contact
 	// sits away from the trace origin is rejected before the oriented narrowphase ever
 	// sees it — the same mistake the per-tick sweep above already avoids.
@@ -2164,8 +2161,8 @@ bool simulator<T>::constraint_force_on(constraint<T> * c,
 	if (c->type_ == constraint<T>::type::rigid)
 		return false;
 
-	// Lever arm = orientation-rotated local anchor (zero anchor → zero lever, so
-	// center-anchored constraints behave exactly as before). The endpoint's world
+	// Lever arm = orientation-rotated local anchor (zero anchor → zero lever, so a
+	// center-anchored constraint applies no torque). The endpoint's world
 	// position and rigid velocity (v + ω×r) follow from it. `other` is the far end.
 	solid<T> * other = nullptr;
 	const vec3<T> * other_local = nullptr;
@@ -2271,9 +2268,8 @@ void simulator<T>::update_acceleration(vec3<T> & result, solid<T> * s, const vec
 	if (s->mass_ != zero_val) {
 		constraint_link(constraint_force, s, x, v);
 		add(constraint_force, s->force_);
-		// Contact friction is no longer applied here as a force during
-		// integration. It now lives in solve_contacts as a velocity-level
-		// constraint with full Coulomb cone clamping (see solve_contacts).
+		// Contact friction is not a force here; it is a velocity-level
+		// constraint with Coulomb cone clamping in solve_contacts.
 		sub(fluid_force, fluid_velocity_, v);
 		mul(fluid_force, s->coefficient_of_effective_drag_);
 		add(constraint_force, fluid_force);
@@ -2445,9 +2441,8 @@ void simulator<T>::build_joint_rows(int nsolids, T dt) {
 		// A SLEEPING endpoint is an anchor, not a free body: zero inverse mass, no spin
 		// response. correct_positions and the shock phase already read it that way, and
 		// the velocity sweep must agree or it hands a body it has decided is at rest a
-		// fresh impulse every tick — which, before resting bodies could sleep at all,
-		// was unreachable, and the moment they could showed up as corpses lying still
-		// with bones turning at 2.5 rad/s inside them.
+		// fresh impulse every tick: corpses lying still with bones turning at 2.5 rad/s
+		// inside them.
 		const bool a_free = a->active_;
 		const bool b_free = b && b->active_;
 		r.a_rotates = a_free && a->rotates_dynamically();
@@ -2950,11 +2945,11 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				// here mean exactly "a/b has a nonzero (kinematic) ω" — the pairs that need
 				// the bias. The angular path carries kinematic spin via ω×r instead.
 				if (!p.has_angular && (p.a_kinematic_carry || p.b_kinematic_carry)) {
-					// This carry path keeps the legacy (slot.impact − position) arm rather
+					// This carry path uses the (slot.impact − position) arm rather
 					// than the sweep-free slot.lever the angular path uses: here the arm only
 					// feeds a kinematic surface-velocity bias (fixed ω, no impulse), so the
 					// sweep contamination is a negligible velocity error, not a fabricated
-					// torque. Left as-is to avoid shifting the kinematic-carry baselines.
+					// torque.
 					vec3<T> ra, rb, term_a, term_b;
 					sub(ra, pt.impact, a->position_);
 					sub(rb, pt.impact, b->position_);
@@ -3039,7 +3034,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// Unified speculative target, by collision class. It is mode-agnostic: a
 		// sweep_slide body has already been snapped to its contact, so its recorded
 		// gap is <= slop and only the first and third branches can fire — exactly the
-		// legacy `(-vn0 > micro) ? -cor*vn0 : 0` target. A speculative body can also
+		// `(-vn0 > micro) ? -cor*vn0 : 0` target. A speculative body can also
 		// carry a positive gap (margin-shell discovery) and take the middle branch.
 		//  - genuinely closing (vn0 below -micro): restitution bounce, even with a
 		//    gap still remaining (discovery is speculative, so a fast body is found
@@ -3054,9 +3049,9 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		if (-vn_rest > config_.micro_collision_threshold) {
 			// Genuine closing collision: bounce at cor times the inbound speed even
 			// when a speculative gap still remains. Withholding restitution until
-			// gap<=slop (as this once did) let the approach cap below bleed off the
-			// entire inbound velocity first, so the body reached the surface with
-			// ~zero closing speed and never bounced. cor<=1 keeps |target|<=|vn_rest|,
+			// gap<=slop would let the approach cap below bleed off the entire
+			// inbound velocity first, so the body would reach the surface with
+			// ~zero closing speed and never bounce. cor<=1 keeps |target|<=|vn_rest|,
 			// so restitution stays dissipative; the micro threshold lets a slow,
 			// settling body fall through to the cap.
 			p.target = -p.cor * vn_rest;
@@ -3171,7 +3166,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// reuses the precomputed p.ang_n_{a,b} (= I⁻¹(r×n)) scaled by `effective`
 	// instead of recomputing cross + mat3×vec3 per visit. The a_rotates/b_rotates
 	// gate matches apply_pair_impulse's, so the shock phase (which zeroes a frozen
-	// anchor's inv mass but not its spin response) behaves as before.
+	// anchor's inv mass but not its spin response) sees the same response through both.
 	auto apply_normal_impulse = [this, &apply_linear](contact_pair & p, T effective, T inv_a, T inv_b) {
 		solver_body & sa = solver_bodies_[p.index_a];
 		solver_body & sb = solver_bodies_[p.index_b];

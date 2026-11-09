@@ -169,8 +169,8 @@ template <> struct scalar_traits<fixed16> {
 	// and the raw of that is sqrt(r) * 256. When r ≈ 2^n (n = highest set bit),
 	// sqrt(r) ≈ 2^(n/2), so sqrt_raw ≈ 2^(n/2 + 8). That initial guess is
 	// within a factor of √2 of the true answer, so Newton converges to
-	// <1e-6 relative error in 4 iterations — versus the previous 8 iterations
-	// from the flat (v + 1.0) / 2 guess.
+	// <1e-6 relative error in 4 iterations, where a flat (v + 1.0) / 2 guess
+	// needs 8.
 	static fixed16 sqrt(fixed16 v) {
 		if (v.raw <= 0)
 			return zero();
