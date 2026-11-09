@@ -407,6 +407,7 @@ public:
 			manager_->post_update(dt);
 	}
 
+private:
 	// whole_tick: does this call span the entire tick? ext_dv_unearned_ records the share
 	// of ext_dv_ the body has NOT earned by travelling, and ext_dv_ spans the tick — so
 	// only a call that owns the whole tick can measure that share. The
@@ -442,6 +443,7 @@ public:
 	// default and speculative pipelines.
 	void try_deactivate(solid<T> * solid_ptr, const vec3<T> & new_pos, T dt);
 
+public:
 	// The one "is this body at rest?" test, asked by both the sleep decision
 	// (try_deactivate) and the solver's wake decision (solve_contacts). The two used
 	// to phrase it differently — sleep bounded length(ω), wake bounded each axis of ω
@@ -525,7 +527,15 @@ public:
 		hop::test_solid(result, s1, seg, s2, epsilon_, margin, accurate_narrowphase_, mode);
 	}
 
-	// Utility
+	int count_active_solids() const {
+		int n = 0;
+		for (auto & s : solids_)
+			if (s->active_)
+				n++;
+		return n;
+	}
+
+private:
 	void cap_vec3(vec3<T> & v, T value) const {
 		v.x = tr::cap(v.x, value);
 		v.y = tr::cap(v.y, value);
@@ -584,15 +594,6 @@ public:
 		return x < epsilon && x > -epsilon && y < epsilon && y > -epsilon && z < epsilon && z > -epsilon;
 	}
 
-	int count_active_solids() const {
-		int n = 0;
-		for (auto & s : solids_)
-			if (s->active_)
-				n++;
-		return n;
-	}
-
-private:
 	void init_epsilon_defaults() {
 		if constexpr (is_fixed_scalar_v<T>) {
 			set_epsilon_bits(tr::default_epsilon_bits());
