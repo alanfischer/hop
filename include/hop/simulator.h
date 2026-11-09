@@ -466,7 +466,12 @@ public:
 	                   const segment<T> & seg,
 	                   int collide_with_bits = -1,
 	                   solid<T> * ignore = nullptr);
-	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits = -1);
+	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits = -1) {
+		trace_solid(result, s, seg, collide_with_bits, config_.average_normals);
+	}
+	// average_normals overrides the config for this query alone.
+	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits,
+	                 bool average_normals);
 	void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s) {
 		hop::test_segment(result, seg, s, config_.epsilon);
 	}
@@ -553,7 +558,8 @@ private:
 	void trace_solid_with_current_spacials(collision<T> & result,
 	                                       solid<T> * s,
 	                                       const segment<T> & seg,
-	                                       int collide_with_bits);
+	                                       int collide_with_bits,
+	                                       bool average_normals);
 
 	void constraint_link(vec3<T> & result, solid<T> * s, const vec3<T> & solid_pos, const vec3<T> & solid_vel);
 	// Force one active constraint exerts on `s` at the given trial pos/vel, plus the
@@ -1081,7 +1087,7 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		}
 
 		path.set_start_end(old_pos, new_pos);
-		trace_solid_with_current_spacials(c, solid_ptr, path, solid_ptr->collide_with_scope_);
+		trace_solid_with_current_spacials(c, solid_ptr, path, solid_ptr->collide_with_scope_, config_.average_normals);
 
 		if (c.time < one) {
 			sub(left_over, c.point, old_pos);
@@ -2065,7 +2071,8 @@ void simulator<T>::trace_segment(collision<T> & result,
 }
 
 template <typename T>
-void simulator<T>::trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits) {
+void simulator<T>::trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int collide_with_bits,
+                               bool average_normals) {
 	vec3<T> end;
 	seg.get_end_point(end);
 	aa_box<T> box;
@@ -2081,7 +2088,7 @@ void simulator<T>::trace_solid(collision<T> & result, solid<T> * s, const segmen
 	add(box.maxs, lb.maxs);
 	num_spacial_collection_ =
 	    find_solids_in_aa_box(box, spacial_collection_.data(), static_cast<int>(spacial_collection_.size()));
-	trace_solid_with_current_spacials(result, s, seg, collide_with_bits);
+	trace_solid_with_current_spacials(result, s, seg, collide_with_bits, average_normals);
 }
 
 
@@ -2118,7 +2125,8 @@ template <typename T>
 void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
                                                      solid<T> * s,
                                                      const segment<T> & seg,
-                                                     int collide_with_bits) {
+                                                     int collide_with_bits,
+                                                     bool average_normals) {
 	result.reset();
 	if (collide_with_bits == 0)
 		return;
@@ -2130,14 +2138,14 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 		    s2->should_collide(s)) {
 			col.time = tr::one();
 			test_solid(col, s, seg, s2);
-			hop::merge_collision(result, col, config_.epsilon, config_.average_normals, &solid_trace_pair_normal_);
+			hop::merge_collision(result, col, config_.epsilon, average_normals, &solid_trace_pair_normal_);
 		}
 	}
 
 	if (manager_) {
 		col.time = tr::one();
 		manager_->trace_solid(col, s, seg, collide_with_bits, T {});  // exact: swept query / public API
-		hop::merge_collision(result, col, config_.epsilon, config_.average_normals, &solid_trace_pair_normal_);
+		hop::merge_collision(result, col, config_.epsilon, average_normals, &solid_trace_pair_normal_);
 	}
 
 	if (result.time == tr::one()) {

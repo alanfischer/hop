@@ -52,10 +52,9 @@ static std::shared_ptr<shape<T>> make_shape(int i) {
 // Allocations over `ticks` warm ticks of a tumbling, jointed pile: every shape type, or
 // spheres alone.
 static long warm_allocations(contact_mode mode, int count, bool spheres, int ticks) {
-	simulator<T> sim(v(0, -20, 0));
-	auto config = sim.get_config();
+	simulator_config<T> config;
 	config.default_contact_mode = mode;
-	sim.set_config(config);
+	simulator<T> sim(v(0, -20, 0), config);
 	bvh_manager<T> bvh;
 	sim.set_manager(&bvh);
 

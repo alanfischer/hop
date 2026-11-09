@@ -356,6 +356,27 @@ void build_convex_box_minkowski(convex_solid<T> & out,
 	}
 }
 
+// The configuration-space obstacle b ⊕ (−a) into `out`: b's faces pushed out by a's
+// support against each normal, then a's faces, negated, pushed out by b's.
+template <typename T>
+void build_convex_convex_minkowski(convex_solid<T> & out, const convex_solid<T> & a, const convex_solid<T> & b) {
+	out.vertices.clear();
+	out.planes = b.planes;
+	out.planes.reserve(b.planes.size() + a.planes.size());
+	vec3<T> sup;
+	vec3<T> neg_n;
+	for (auto & p : out.planes) {
+		neg(neg_n, p.normal);
+		support(sup, a, neg_n);
+		p.distance = p.distance + dot(sup, neg_n);
+	}
+	for (const auto & p1 : a.planes) {
+		neg(neg_n, p1.normal);
+		support(sup, b, neg_n);
+		out.planes.push_back(plane<T>(neg_n, p1.distance + dot(sup, neg_n)));
+	}
+}
+
 // Dispatch helpers for test_solid's convex-vs-* branches. `inflated_cs` is
 // the target-side convex solid with its planes already inflated by the
 // Minkowski-sum amount for the opposing shape (scalar radius, or per-plane
@@ -2463,24 +2484,8 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// unbounded along sh1's face normals, the same false-positive static
 			// overlap that box-vs-convex hits without its axis planes.
 			else if (sh1->get_type() == shape_type::convex_solid && sh2->get_type() == shape_type::convex_solid) {
-				const auto & a = sh1->get_convex_solid();
-				const auto & b = sh2->get_convex_solid();
 				thread_local convex_solid<T> cs;
-				cs.vertices.clear();
-				cs.planes = b.planes;
-				cs.planes.reserve(b.planes.size() + a.planes.size());
-				vec3<T> sup;
-				vec3<T> neg_n;
-				for (auto & p : cs.planes) {
-					neg(neg_n, p.normal);
-					support(sup, a, neg_n);
-					p.distance = p.distance + dot(sup, neg_n);
-				}
-				for (const auto & p1 : a.planes) {
-					neg(neg_n, p1.normal);
-					support(sup, b, neg_n);
-					cs.planes.push_back(plane<T>(neg_n, p1.distance + dot(sup, neg_n)));
-				}
+				build_convex_convex_minkowski(cs, sh1->get_convex_solid(), sh2->get_convex_solid());
 				inflate_planes(cs);
 				trace_forward_convex(col, seg, s2->get_position(), lp2, cs, lp1, epsilon);
 			}

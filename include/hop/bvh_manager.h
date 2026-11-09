@@ -81,16 +81,14 @@ public:
 	void mark_dynamic_moved() { dynamic_moved_ = true; }
 
 	void rebuild() {
-		auto & entries = entries_;
-		entries.clear();
-
+		entries_.clear();
 		for (auto * s : static_solids_) {
 			if (s->get_shapes().empty())
 				continue;
-			entries.push_back({ s->get_world_bound(), s });
+			entries_.push_back({ s->get_world_bound(), s });
 		}
 
-		bvh_.build(entries);
+		bvh_.build(entries_);
 		dirty_ = false;
 	}
 
@@ -112,16 +110,14 @@ public:
 	// from their initial spatial clustering and queries are returning too
 	// many false positives.
 	void rebuild_dynamic() {
-		auto & entries = entries_;
-		entries.clear();
-
+		entries_.clear();
 		for (auto * s : dynamic_solids_) {
 			if (s->get_shapes().empty())
 				continue;
-			entries.push_back({ s->get_world_bound(), s });
+			entries_.push_back({ s->get_world_bound(), s });
 		}
 
-		dynamic_bvh_.build(entries);
+		dynamic_bvh_.build(entries_);
 		dynamic_dirty_ = false;
 		dynamic_moved_ = false;
 		ticks_since_dynamic_rebuild_ = 0;

@@ -225,9 +225,7 @@ for (int i = 0; i < 100; ++i) {
 ```
 
 Tuning lives in one `simulator_config` (in `simulator.h`), each field with its default and what
-it does. Most scenes touch only the first group: `default_contact_mode`, `solver_iterations`,
-`deactivate_speed` / `deactivate_count`, `micro_collision_threshold`, `accurate_narrowphase`,
-`angular_substeps_max` and `joint_projection`. Pass it to the constructor, or change it later:
+it does; most scenes touch only its first group. Pass it to the constructor, or change it later:
 
 ```cpp
 auto config = sim->get_config();
