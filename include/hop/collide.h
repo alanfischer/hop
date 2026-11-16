@@ -938,15 +938,39 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 // the mover's reference (seg.origin) so sup_*() stays in shape-local magnitudes,
 // keeping fixed16 dot products well inside range (N itself sits near the origin).
 
-// World-space (mover-relative) description of a polytope for the CSO build: its
-// vertices for support evaluation, outward face normals, and edge directions.
+// World-space (mover-relative) description of a polytope for the CSO build: what
+// its support heights are read from, its outward face normals, and its edge
+// directions. A convex carries its vertices. A box carries none: its height along d
+// is d·centre + Σ|d·axis_i|·half_i, four dot products where its eight corners
+// would be eight.
 template <typename T> struct world_polytope {
-	std::vector<vec3<T>> verts;
+	std::vector<vec3<T>> verts;   // convex only
 	std::vector<vec3<T>> normals; // outward face normals
-	std::vector<vec3<T>> edges;   // edge directions (need not be unit)
+	std::vector<vec3<T>> edges;   // edge directions (need not be unit); a box's three unit axes
+	bool is_box = false;
+	vec3<T> center, half;         // box only: centre, and half extents along edges[0..2]
 
-	// Support height in direction d: max over verts of d·v.
-	T support(const vec3<T> & d) const {
+	bool empty() const { return !is_box && verts.empty(); }
+
+	// Support heights along d and along −d. A box's two share everything but the
+	// sign of the centre term.
+	void support_pair(const vec3<T> & d, T & along, T & against) const {
+		using tr = scalar_traits<T>;
+		if (is_box) {
+			const T c = dot(d, center);
+			const T r = tr::abs(dot(d, edges[0])) * half.x + tr::abs(dot(d, edges[1])) * half.y +
+			            tr::abs(dot(d, edges[2])) * half.z;
+			along = r + c;
+			against = r - c;
+			return;
+		}
+		along = vertex_support(d);
+		against = vertex_support(-d);
+	}
+
+private:
+	// max over verts of d·v.
+	T vertex_support(const vec3<T> & d) const {
 		T best = dot(d, verts[0]);
 		for (size_t i = 1; i < verts.size(); ++i) {
 			T dp = dot(d, verts[i]);
@@ -958,10 +982,11 @@ template <typename T> struct world_polytope {
 };
 
 // Fill `wp` for a box or convex shape rotated by R and placed at `base` (already
-// mover-relative). For a box: 8 corners, the 6 ±axis face normals, and the 3 axes
-// as edge directions. For a convex: rotated vertices/plane-normals, and edge
-// directions as the deduplicated pairwise cross products of its face normals (a
-// safe superset of its true edge directions — see header note).
+// mover-relative). For a box: its centre and half extents, the 6 ±axis face
+// normals, and the 3 axes as edge directions. For a convex: rotated
+// vertices/plane-normals, and edge directions as the deduplicated pairwise cross
+// products of its face normals (a safe superset of its true edge directions — see
+// header note).
 template <typename T>
 inline void build_world_polytope(world_polytope<T> & wp, const shape<T> * sh,
                                  const mat3<T> & R, const vec3<T> & base, T epsilon) {
@@ -969,30 +994,22 @@ inline void build_world_polytope(world_polytope<T> & wp, const shape<T> * sh,
 	wp.verts.clear();
 	wp.normals.clear();
 	wp.edges.clear();
+	wp.is_box = sh->get_type() == shape_type::box;
 	const T eps2 = tr::epsilon_squared(epsilon);
-	// Map a shape-local point to a world vertex: R·local + base.
-	auto push_vert = [&](const vec3<T> & local) {
-		vec3<T> w;
-		mul(w, R, local);
-		add(w, base);
-		wp.verts.push_back(w);
-	};
 
-	if (sh->get_type() == shape_type::box) {
+	if (wp.is_box) {
 		const aa_box<T> & b = sh->get_box();
-		vec3<T> center, half;
+		vec3<T> center;
 		add(center, b.mins, b.maxs);
 		mul(center, tr::half());
-		sub(half, b.maxs, b.mins);
-		mul(half, tr::half());
+		sub(wp.half, b.maxs, b.mins);
+		mul(wp.half, tr::half());
+		mul(wp.center, R, center);
+		add(wp.center, base);
 		vec3<T> ax[3];
 		mul(ax[0], R, constants<T>::x_unit_vec3());
 		mul(ax[1], R, constants<T>::y_unit_vec3());
 		mul(ax[2], R, constants<T>::z_unit_vec3());
-		for (int s = 0; s < 8; ++s)
-			push_vert(vec3<T>(center.x + ((s & 1) ? half.x : -half.x),
-			                  center.y + ((s & 2) ? half.y : -half.y),
-			                  center.z + ((s & 4) ? half.z : -half.z)));
 		for (int i = 0; i < 3; ++i) {
 			wp.normals.push_back(ax[i]);
 			wp.normals.push_back(-ax[i]);
@@ -1004,8 +1021,12 @@ inline void build_world_polytope(world_polytope<T> & wp, const shape<T> * sh,
 	// convex_solid
 	const convex_solid<T> & cs = sh->get_convex_solid();
 	ensure_vertices(cs);
-	for (const auto & v : cs.vertices)
-		push_vert(v);
+	for (const auto & v : cs.vertices) {
+		vec3<T> w;
+		mul(w, R, v);
+		add(w, base);
+		wp.verts.push_back(w);
+	}
 	for (const auto & p : cs.planes) {
 		vec3<T> n;
 		mul(n, R, p.normal);
@@ -1050,26 +1071,68 @@ inline void build_polytope_cso(convex_solid<T> & out, const world_polytope<T> & 
 	// the strict "inside all other planes" test. Drop a normal we already carry at
 	// (near-)equal distance — same half-space, so the CSO is unchanged.
 	const T dist_tol = tr::from_milli(1);
-	auto add_plane = [&](const vec3<T> & n) {
-		T d = B.support(n) + A.support(-n);
+	const T same_normal = tr::from_milli(999);
+	// Add the tangent planes along n and −n, each unless one of the first `scan`
+	// planes already is it. One pass serves both signs: a plane's normal dotted
+	// with −n is that dot negated.
+	auto add_both = [&](const vec3<T> & n, bool negative_first, size_t scan) {
+		T a_along, a_against, b_along, b_against;
+		A.support_pair(n, a_along, a_against);
+		B.support_pair(n, b_along, b_against);
+		const T d_pos = b_along + a_against;
+		const T d_neg = b_against + a_along;
+		bool have_pos = false, have_neg = false;
+		for (size_t i = 0; i < scan; ++i) {
+			const plane<T> & p = out.planes[i];
+			const T c = dot(p.normal, n);
+			if (c > same_normal && tr::abs(p.distance - d_pos) <= dist_tol)
+				have_pos = true;
+			else if (-c > same_normal && tr::abs(p.distance - d_neg) <= dist_tol)
+				have_neg = true;
+		}
+		if (negative_first && !have_neg)
+			out.planes.push_back(plane<T>(-n, d_neg));
+		if (!have_pos)
+			out.planes.push_back(plane<T>(n, d_pos));
+		if (!negative_first && !have_neg)
+			out.planes.push_back(plane<T>(-n, d_neg));
+	};
+	auto add_one = [&](const vec3<T> & n) {
+		T a_along, a_against, b_along, b_against;
+		A.support_pair(n, a_along, a_against);
+		B.support_pair(n, b_along, b_against);
+		const T d = b_along + a_against;
 		for (const auto & p : out.planes) {
-			if (dot(p.normal, n) > tr::from_milli(999) && tr::abs(p.distance - d) <= dist_tol)
-				return; // duplicate half-space
+			if (dot(p.normal, n) > same_normal && tr::abs(p.distance - d) <= dist_tol)
+				return;
 		}
 		out.planes.push_back(plane<T>(n, d));
 	};
-	for (const auto & nb : B.normals)
-		add_plane(nb);
-	for (const auto & na : A.normals)
-		add_plane(-na);
+	// A box's face normals are its axes in both signs, in the order
+	// build_world_polytope pushed them, and no two of them can be the same plane:
+	// B's need no scan at all, A's only one over B's.
+	if (B.is_box) {
+		for (const auto & eb : B.edges)
+			add_both(eb, false, 0);
+	} else {
+		for (const auto & nb : B.normals)
+			add_one(nb);
+	}
+	if (A.is_box) {
+		const size_t b_planes = out.planes.size();
+		for (const auto & ea : A.edges)
+			add_both(ea, true, b_planes);
+	} else {
+		for (const auto & na : A.normals)
+			add_one(-na);
+	}
 	for (const auto & ea : A.edges) {
 		for (const auto & eb : B.edges) {
 			vec3<T> n;
 			cross(n, ea, eb);
 			if (!normalize_carefully(n, epsilon))
 				continue; // parallel edges — degenerate, skip (only loosens the bound)
-			add_plane(n);
-			add_plane(-n);
+			add_both(n, false, out.planes.size());
 		}
 	}
 }
@@ -1101,7 +1164,7 @@ inline void trace_pair_oriented_polytope(collision<T> & col, const segment<T> & 
 	thread_local convex_solid<T> cso;
 	build_world_polytope(A, sh1, R1, base1, epsilon);
 	build_world_polytope(B, sh2, R2, base2, epsilon);
-	if (A.verts.empty() || B.verts.empty())
+	if (A.empty() || B.empty())
 		return; // malformed convex — leave col untouched (no hit)
 
 	build_polytope_cso(cso, A, B, epsilon);
