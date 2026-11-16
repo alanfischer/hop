@@ -1,5 +1,7 @@
 #include "bench.h"
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <hop/hop.h>
 #include <memory>
 
@@ -378,7 +380,13 @@ template <typename T> static void bench_manifold_pile(const char * label) {
 
 // ----------------------------------------------------------------------------
 
-int main() {
+// `hop_bench [scenario [repeat]]` runs only the scenarios whose name contains
+// `scenario`, `repeat` times over — long enough to sit under a sampling profiler.
+int main(int argc, char ** argv) {
+	const char * only = argc > 1 ? argv[1] : "";
+	int repeat = argc > 2 ? std::atoi(argv[2]) : 1;
+	auto wanted = [&](const char * name) { return std::strstr(name, only) != nullptr; };
+
 	printf("hop bench\n");
 	printf("---------\n");
 	printf("sizeof(shape<float>) = %zu bytes\n", sizeof(shape<float>));
@@ -389,20 +397,22 @@ int main() {
 	printf("sizeof(simulator<float>) = %zu bytes\n", sizeof(simulator<float>));
 	printf("\n");
 
-	bench_narrow_phase<float>("float");
-	bench_narrow_phase<fixed16>("fixed16");
+	for (int i = 0; i < repeat; ++i) {
+		if (wanted("narrow_phase float")) bench_narrow_phase<float>("float");
+		if (wanted("narrow_phase fixed16")) bench_narrow_phase<fixed16>("fixed16");
 
-	bench_full_tick<float>("float");
-	bench_full_tick<fixed16>("fixed16");
+		if (wanted("full_tick float")) bench_full_tick<float>("float");
+		if (wanted("full_tick fixed16")) bench_full_tick<fixed16>("fixed16");
 
-	bench_stress<float>("float");
-	bench_stress<fixed16>("fixed16");
+		if (wanted("stress float")) bench_stress<float>("float");
+		if (wanted("stress fixed16")) bench_stress<fixed16>("fixed16");
 
-	bench_compound_narrow<float>("float");
-	bench_compound_narrow<fixed16>("fixed16");
+		if (wanted("compound_narrow float")) bench_compound_narrow<float>("float");
+		if (wanted("compound_narrow fixed16")) bench_compound_narrow<fixed16>("fixed16");
 
-	bench_manifold_pile<float>("float");
-	bench_manifold_pile<fixed16>("fixed16");
+		if (wanted("manifold_pile float")) bench_manifold_pile<float>("float");
+		if (wanted("manifold_pile fixed16")) bench_manifold_pile<fixed16>("fixed16");
+	}
 
 	printf("\ndone\n");
 	return 0;
