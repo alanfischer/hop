@@ -285,7 +285,7 @@ int main(int argc, char ** argv) {
 	for (int i = 1; i < argc; ++i) {
 		if (std::strcmp(argv[i], "--headless") == 0)
 			headless = true;
-		if (std::strcmp(argv[i], "--fixed") == 0)
+		else if (std::strcmp(argv[i], "--fixed") == 0)
 			fixed = true;
 		else
 			steps = std::atoi(argv[i]);

@@ -1927,6 +1927,10 @@ template <typename T> static void test_blocked_limit_gives_up(const char * label
 		bool loaded = true;
 		float swing = 0.0f;
 	};
+	// The sleep gate reads the pin a commit before the bodies stop, at the simulator's
+	// epsilon, so a rig that sleeps the tick the pin closes to it can come to rest a
+	// hair past. Twice the gate is still a closed pin.
+	const T closed = tr::from_milli(2);
 	auto run = [&](int standoff_ticks) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
@@ -1984,7 +1988,7 @@ template <typename T> static void test_blocked_limit_gives_up(const char * label
 		out.swing = tr::to_float(swing);
 		out.asleep = !child->active() && !parent->active();
 		out.standoff = c->limit_settled();
-		out.loaded = c->is_loaded(tr::from_milli(1));
+		out.loaded = c->is_loaded(closed);
 		return out;
 	};
 
@@ -1994,6 +1998,7 @@ template <typename T> static void test_blocked_limit_gives_up(const char * label
 	       forever.late_spin, forever.asleep ? 1 : 0, gives_up.late_spin,
 	       gives_up.asleep ? 1 : 0, gives_up.standoff ? 1 : 0, gives_up.loaded ? 1 : 0,
 	       gives_up.swing * 57.2958f);
+	fflush(stdout);
 	// The contrast is the point: the same rig, the same blocked limit, and only the rule
 	// differs. Without it the pair never stops working and never sleeps.
 	assert(forever.late_spin > 0.5f);
@@ -2188,6 +2193,246 @@ template <typename T> static void test_mode_set_before_add_settles(const char * 
 	printf("OK\n");
 }
 
+// A contact's accumulated impulse is this tick's, so the friction it allows is this
+// tick's too: a body that has rested a while still slides when pushed past mu*N.
+template <typename T> static void test_rested_body_still_slides(const char * label, contact_mode mode) {
+	using tr = scalar_traits<T>;
+	printf("  rested_body_still_slides[%s, %s]: ", label, mode == contact_mode::speculative ? "speculative" : "sweep_slide");
+	simulator<T> sim;
+	auto config = sim.get_config();
+	config.default_contact_mode = mode;
+	config.deactivate_count = 0;  // stay awake: the question is the solve, not sleep
+	sim.set_config(config);
+	auto floor = std::make_shared<solid<T>>();
+	floor->set_infinite_mass();
+	floor->set_coefficient_of_gravity(T {});
+	floor->set_coefficient_of_static_friction(tr::half());
+	floor->set_coefficient_of_dynamic_friction(tr::half());
+	floor->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-tr::from_int(20), -tr::from_int(20), -tr::one()), vec3<T>(tr::from_int(20), tr::from_int(20), T {}))));
+	sim.add_solid(floor);
+	auto s = std::make_shared<solid<T>>();
+	s->set_mass(tr::one());
+	s->set_coefficient_of_restitution(T {});
+	s->set_coefficient_of_static_friction(tr::half());
+	s->set_coefficient_of_dynamic_friction(tr::half());
+	s->add_shape(std::make_shared<shape<T>>(sphere<T>(tr::half())));
+	s->set_position(vec3<T>(T {}, T {}, tr::half()));
+	sim.add_solid(s);
+	for (int i = 0; i < 200; ++i)
+		sim.update(tr::from_milli(16));
+	// mu*N = 0.5 * 9.81 = 4.9 N. 8 N leaves 3.1 m/s^2: about 1.5 m in a second.
+	for (int i = 0; i < 62; ++i) {
+		s->add_force(vec3<T>(tr::from_int(8), T {}, T {}));
+		sim.update(tr::from_milli(16));
+	}
+	float x = tr::to_float(s->get_position().x);
+	printf("x = %.3f after 1 s of 8 N (expected ~1.5)\n", x);
+	assert(x > 1.0f && x < 2.0f);
+}
+
+// A speculative body that lands comes to rest on the surface, not on the discovery
+// shell a margin above it.
+template <typename T> static void test_landed_body_rests_on_surface(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  landed_body_rests_on_surface[%s]: ", label);
+	simulator<T> sim;
+	auto config = sim.get_config();
+	config.default_contact_mode = contact_mode::speculative;
+	sim.set_config(config);
+	auto floor = std::make_shared<solid<T>>();
+	floor->set_infinite_mass();
+	floor->set_coefficient_of_gravity(T {});
+	floor->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-tr::from_int(5), -tr::from_int(5), -tr::one()), vec3<T>(tr::from_int(5), tr::from_int(5), T {}))));
+	sim.add_solid(floor);
+	auto s = std::make_shared<solid<T>>();
+	s->set_mass(tr::one());
+	s->set_coefficient_of_restitution(T {});
+	s->add_shape(std::make_shared<shape<T>>(sphere<T>(tr::half())));
+	s->set_position(vec3<T>(T {}, T {}, tr::one()));
+	sim.add_solid(s);
+	for (int i = 0; i < 200; ++i)
+		sim.update(tr::from_milli(16));
+	float gap = tr::to_float(s->get_position().z) - 0.5f;
+	float margin = tr::to_float(sim.get_config().speculative_margin);
+	printf("gap %.4f (margin %.4f)\n", gap, margin);
+	assert(!s->active());
+	assert(gap > -margin * 0.25f && gap < margin * 0.5f);
+}
+
+// Shared by the sleeper tests: a floor, and balls with friction that can roll.
+template <typename T> struct sleeper_scene {
+	using tr = scalar_traits<T>;
+	simulator<T> sim;
+	T radius = tr::from_milli(280);
+	sleeper_scene(contact_mode mode) {
+		auto config = sim.get_config();
+		config.default_contact_mode = mode;
+		sim.set_config(config);
+		auto floor = std::make_shared<solid<T>>();
+		floor->set_infinite_mass();
+		floor->set_coefficient_of_gravity(T {});
+		floor->set_coefficient_of_static_friction(tr::half());
+		floor->set_coefficient_of_dynamic_friction(tr::half());
+		floor->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-tr::from_int(20), -tr::from_int(20), -tr::one()), vec3<T>(tr::from_int(20), tr::from_int(20), T {}))));
+		sim.add_solid(floor);
+	}
+	std::shared_ptr<solid<T>> ball(float x, float z) {
+		auto s = std::make_shared<solid<T>>();
+		s->set_mass(tr::one());
+		s->set_coefficient_of_restitution(T {});
+		s->set_coefficient_of_static_friction(tr::half());
+		s->set_coefficient_of_dynamic_friction(tr::half());
+		s->add_shape(std::make_shared<shape<T>>(sphere<T>(radius)));
+		T inertia = tr::from_milli(31);  // 2/5 m r^2
+		s->set_inertia(vec3<T>(inertia, inertia, inertia));
+		s->set_position(vec3<T>(tr::from_milli((int)(x * 1000)), T {}, tr::from_milli((int)(z * 1000))));
+		sim.add_solid(s);
+		return s;
+	}
+	void run(int ticks) {
+		for (int i = 0; i < ticks; ++i)
+			sim.update(tr::from_milli(16));
+	}
+};
+
+// A sleeper holds what rests on it, and stays asleep doing so.
+template <typename T> static void test_sleeper_holds_a_resting_body(const char * label, contact_mode mode) {
+	using tr = scalar_traits<T>;
+	printf("  sleeper_holds_a_resting_body[%s, %s]: ", label, mode == contact_mode::speculative ? "speculative" : "sweep_slide");
+	sleeper_scene<T> scene(mode);
+	auto lower = scene.ball(0.0f, 0.28f);
+	scene.run(100);
+	assert(!lower->active());
+	auto upper = scene.ball(0.0f, 0.841f);  // set down, not dropped: a knock would rightly wake it
+	int woke = 0;
+	for (int i = 0; i < 200; ++i) {
+		scene.run(1);
+		if (lower->active())
+			++woke;
+	}
+	float lz = tr::to_float(lower->get_position().z), uz = tr::to_float(upper->get_position().z);
+	printf("lower z %.4f, upper z %.4f, lower awake for %d ticks\n", lz, uz, woke);
+	assert(woke == 0);
+	assert(std::fabs(lz - 0.28f) < 0.004f);
+	assert(std::fabs(uz - 0.84f) < 0.01f);
+	assert(!upper->active());
+}
+
+// A steady push too gentle to wake a sleeper in one tick still wakes it.
+template <typename T> static void test_steady_push_wakes_a_sleeper(const char * label, contact_mode mode) {
+	using tr = scalar_traits<T>;
+	printf("  steady_push_wakes_a_sleeper[%s, %s]: ", label, mode == contact_mode::speculative ? "speculative" : "sweep_slide");
+	sleeper_scene<T> scene(mode);
+	auto sleeper = scene.ball(0.0f, 0.28f);
+	scene.run(100);
+	assert(!sleeper->active());
+	auto pusher = scene.ball(-0.57f, 0.28f);
+	for (int i = 0; i < 200; ++i) {
+		pusher->add_force(vec3<T>(tr::from_int(2), T {}, T {}));  // 0.03 m/s a tick, under deactivate_speed
+		scene.run(1);
+	}
+	float x = tr::to_float(sleeper->get_position().x);
+	printf("sleeper moved %.3f m\n", x);
+	assert(x > 0.5f);
+}
+
+// Removing what a sleeper rested on wakes it.
+template <typename T> static void test_sleeper_falls_when_support_is_removed(const char * label, contact_mode mode) {
+	using tr = scalar_traits<T>;
+	printf("  sleeper_falls_when_support_is_removed[%s, %s]: ", label, mode == contact_mode::speculative ? "speculative" : "sweep_slide");
+	sleeper_scene<T> scene(mode);
+	auto lower = scene.ball(0.0f, 0.28f);
+	auto upper = scene.ball(0.0f, 0.84f);
+	scene.run(150);
+	assert(!lower->active() && !upper->active());
+	scene.sim.remove_solid(lower);
+	scene.run(150);
+	float z = tr::to_float(upper->get_position().z);
+	printf("upper z %.3f\n", z);
+	assert(z < 0.3f);
+}
+
+// An awake body pressed against a sleeper it is not heading toward still collides with
+// it. Its own predicted motion is gravity's, straight down and away from a sleeper
+// above, so only the discovery re-test finds the pair.
+template <typename T> static void test_awake_body_collides_with_sleeper_above(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  awake_body_collides_with_sleeper_above[%s]: ", label);
+	sleeper_scene<T> scene(contact_mode::speculative);
+	auto lower = scene.ball(0.0f, 0.28f);
+	auto upper = scene.ball(0.3f, 0.725f);  // 0.537 apart: 23 mm into each other
+	upper->set_coefficient_of_gravity(T {});
+	upper->deactivate();
+	scene.run(4);
+	vec3<T> d;
+	sub(d, upper->get_position(), lower->get_position());
+	float overlap = 0.56f - tr::to_float(length(d));
+	printf("overlap %.4f after 4 ticks\n", overlap);
+	assert(overlap < 0.004f);
+}
+
+// A pile dropped into a pit comes to rest and stays there: asleep, not sinking, and
+// not frozen inside one another.
+template <typename T> static void test_pile_comes_to_rest(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  pile_comes_to_rest[%s]: ", label);
+	sleeper_scene<T> scene(contact_mode::speculative);
+	auto wall = [&](float x0, float y0, float x1, float y1) {
+		auto w = std::make_shared<solid<T>>();
+		w->set_infinite_mass();
+		w->set_coefficient_of_gravity(T {});
+		w->set_coefficient_of_static_friction(tr::half());
+		w->set_coefficient_of_dynamic_friction(tr::half());
+		w->add_shape(std::make_shared<shape<T>>(aa_box<T>(
+		    vec3<T>(tr::from_milli((int)(x0 * 1000)), tr::from_milli((int)(y0 * 1000)), T {}),
+		    vec3<T>(tr::from_milli((int)(x1 * 1000)), tr::from_milli((int)(y1 * 1000)), tr::from_int(20)))));
+		scene.sim.add_solid(w);
+	};
+	wall(-2.5f, -1.5f, -1.5f, 1.5f);
+	wall(1.5f, -1.5f, 2.5f, 1.5f);
+	wall(-1.5f, -2.5f, 1.5f, -1.5f);
+	wall(-1.5f, 1.5f, 1.5f, 2.5f);
+	std::vector<std::shared_ptr<solid<T>>> balls;
+	const int cols = 4, layers = 12;
+	for (int i = 0; i < cols * cols * layers; ++i) {
+		int layer = i / (cols * cols), col = i % cols, row = (i / cols) % cols;
+		auto s = scene.ball(0.0f, 0.0f);
+		// Jittered off the grid so the pile has to find its own packing.
+		float x = (col - 1.5f) * 0.62f + ((i * 7) % 5 - 2) * 0.01f;
+		float y = (row - 1.5f) * 0.62f + ((i * 13) % 5 - 2) * 0.01f;
+		s->set_position(vec3<T>(tr::from_milli((int)(x * 1000)), tr::from_milli((int)(y * 1000)), tr::from_milli(400 + layer * 620)));
+		balls.push_back(s);
+	}
+	auto mean_z = [&] {
+		float z = 0;
+		for (auto & s : balls)
+			z += tr::to_float(s->get_position().z);
+		return z / balls.size();
+	};
+	scene.run(500);
+	float settled = mean_z();
+	int asleep = 0;
+	for (auto & s : balls)
+		if (!s->active())
+			++asleep;
+	scene.run(250);
+	float later = mean_z();
+	float deepest = 0;
+	for (size_t i = 0; i < balls.size(); ++i)
+		for (size_t j = i + 1; j < balls.size(); ++j) {
+			vec3<T> d;
+			sub(d, balls[i]->get_position(), balls[j]->get_position());
+			float overlap = 0.56f - tr::to_float(length(d));
+			if (overlap > deepest)
+				deepest = overlap;
+		}
+	printf("%d/%d asleep after 8 s, mean height %.4f then %.4f, deepest overlap %.4f\n",
+	       asleep, (int)balls.size(), settled, later, deepest);
+	assert(asleep >= (int)balls.size() * 9 / 10);
+	assert(std::fabs(later - settled) < 0.005f);
+	assert(deepest < 0.008f);
+}
+
 int main() {
 	printf("test_simulator (float):\n");
 	test_gravity_drop<float>();
@@ -2230,6 +2475,16 @@ int main() {
 	test_contact_mode_survives_add_solid<float>("float");
 	test_mode_set_before_add_settles<float>("float");
 	test_dual_instantiation<float>();
+
+	for (auto mode : { contact_mode::speculative, contact_mode::sweep_slide }) {
+		test_rested_body_still_slides<float>("float", mode);
+		test_sleeper_holds_a_resting_body<float>("float", mode);
+		test_steady_push_wakes_a_sleeper<float>("float", mode);
+		test_sleeper_falls_when_support_is_removed<float>("float", mode);
+	}
+	test_landed_body_rests_on_surface<float>("float");
+	test_awake_body_collides_with_sleeper_above<float>("float");
+	test_pile_comes_to_rest<float>("float");
 
 	printf("test_simulator (fixed16):\n");
 	test_dual_instantiation<fixed16>();
@@ -2281,6 +2536,16 @@ int main() {
 	test_impact_reported_once<fixed16>("fixed16");
 	test_sweep_contact_left_behind<fixed16>("fixed16");
 	test_contact_mode_survives_add_solid<fixed16>("fixed16");
+
+	for (auto mode : { contact_mode::speculative, contact_mode::sweep_slide }) {
+		test_rested_body_still_slides<fixed16>("fixed16", mode);
+		test_steady_push_wakes_a_sleeper<fixed16>("fixed16", mode);
+		test_sleeper_falls_when_support_is_removed<fixed16>("fixed16", mode);
+	}
+	test_sleeper_holds_a_resting_body<fixed16>("fixed16", contact_mode::speculative);
+	test_landed_body_rests_on_surface<fixed16>("fixed16");
+	test_awake_body_collides_with_sleeper_above<fixed16>("fixed16");
+	test_pile_comes_to_rest<fixed16>("fixed16");
 
 	printf("ALL PASSED\n");
 	return 0;

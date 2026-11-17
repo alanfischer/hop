@@ -690,8 +690,9 @@ int run_tables() {
 		printf("  FAIL: projection left the worst pin %.3f m open\n", stray_pin[1]);
 		ok = false;
 	}
-	// And the corpse stays where it died.
-	if (stray_drag[1] > stray_drag[0]) {
+	// And the corpse stays where it died. To the millimetre: both settle within a few
+	// of them, and below that the two runs differ by which way the solve happened to go.
+	if (stray_drag[1] > stray_drag[0] + 0.001f) {
 		printf("  FAIL: projection dragged the body further (%.3f m against %.3f m)\n",
 		       stray_drag[1], stray_drag[0]);
 		ok = false;
