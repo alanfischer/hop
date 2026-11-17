@@ -734,6 +734,12 @@ private:
 		vec3<T> angular_velocity;
 	};
 	std::vector<solver_body> solver_bodies_;
+	struct position_body {          // correct_positions' working copy of a body
+		vec3<T> pos;                // pos_correction_
+		vec3<T> rot;                // rot_correction_
+		bool free = false;          // awake and speculative: takes correction
+	};
+	std::vector<position_body> position_bodies_;
 	// Pass-B rigid-joint working set, rebuilt each tick from constraints_.
 	// A row is a ball-socket between two anchors: all 3 DOF, no accumulator — the
 	// impulse clamp is per-iteration, so there is nothing to carry across ticks, and
@@ -1769,19 +1775,23 @@ template <typename T> void simulator<T>::correct_positions() {
 	// Start every participating body from a zero correction. Active bodies were
 	// already zeroed in Pass A; this additionally clears sleeping partners (skipped
 	// in Pass A) whose stale correction would otherwise corrupt the re-derivation.
+	// The pass runs on a dense copy indexed like solver_bodies_, not on the solids
+	// themselves (4 KB apiece), and is written back once at the end.
+	position_bodies_.resize(solver_bodies_.size());
+	auto start = [this](int i, const solid<T> * s) {
+		position_body & pb = position_bodies_[i];
+		pb.pos.reset();
+		pb.rot.reset();
+		pb.free = s->active_ && s->uses_speculative_solve();
+	};
 	for (auto & p : contact_pairs_) {
-		p.a->pos_correction_.reset();
-		p.a->rot_correction_.reset();
-		p.b->pos_correction_.reset();
-		p.b->rot_correction_.reset();
+		start(p.index_a, p.a);
+		start(p.index_b, p.b);
 	}
 	for (auto & r : joint_rows_) {
-		r.a->pos_correction_.reset();
-		r.a->rot_correction_.reset();
-		if (r.b) {
-			r.b->pos_correction_.reset();
-			r.b->rot_correction_.reset();
-		}
+		start(r.index_a, r.a);
+		if (r.b)
+			start(r.index_b, r.b);
 	}
 	for (int iter = 0; iter < config_.position_iterations; ++iter) {
 		// With unchanged pseudo-positions, a later NGS pass would visit the
@@ -1794,8 +1804,10 @@ template <typename T> void simulator<T>::correct_positions() {
 			// never folds pos_correction_ — it placed itself in Pass A — so giving it a
 			// share would silently drop that correction). Zero their inverse mass so a
 			// speculative body takes the whole correction against such a partner.
-			const bool a_free = p.a->active_ && p.a->uses_speculative_solve();
-			const bool b_free = p.b->active_ && p.b->uses_speculative_solve();
+			position_body & pa = position_bodies_[p.index_a];
+			position_body & pb = position_bodies_[p.index_b];
+			const bool a_free = pa.free;
+			const bool b_free = pb.free;
 			T inv_a = a_free ? p.inv_ma : zero;
 			T inv_b = b_free ? p.inv_mb : zero;
 			T inv_sum = inv_a + inv_b;
@@ -1816,15 +1828,15 @@ template <typename T> void simulator<T>::correct_positions() {
 			// Where the contact has been pushed to so far this pass. For the small angles
 			// at stake, R(d)*r ~ r + d x r.
 			vec3<T> rel;
-			sub(rel, p.b->pos_correction_, p.a->pos_correction_);
+			sub(rel, pb.pos, pa.pos);
 			if (angular) {
 				vec3<T> twist;
 				if (spin_b) {
-					cross(twist, p.b->rot_correction_, p.r_b);
+					cross(twist, pb.rot, p.r_b);
 					add(rel, twist);
 				}
 				if (spin_a) {
-					cross(twist, p.a->rot_correction_, p.r_a);
+					cross(twist, pa.rot, p.r_a);
 					sub(rel, twist);
 				}
 			}
@@ -1844,12 +1856,12 @@ template <typename T> void simulator<T>::correct_positions() {
 				if (inv_b > zero) {
 					vec3<T> d;
 					mul(d, p.normal, corr * (inv_b / inv_sum));
-					add(p.b->pos_correction_, d);
+					add(pb.pos, d);
 				}
 				if (inv_a > zero) {
 					vec3<T> d;
 					mul(d, p.normal, corr * (inv_a / inv_sum));
-					sub(p.a->pos_correction_, d);
+					sub(pa.pos, d);
 				}
 				continue;
 			}
@@ -1858,17 +1870,16 @@ template <typename T> void simulator<T>::correct_positions() {
 			// sweep uses — the response of the contact to an impulse IS its response to a
 			// push — minus the linear share of any end that cannot move.
 			T eff = p.eff_n - p.inv_m_sum + inv_sum;
+			// I⁻¹(r×n) is cached as ang_n_a/ang_n_b for every rotating end.
 			if (!spin_a && p.a_rotates) {
-				vec3<T> rxn, t;
+				vec3<T> rxn;
 				cross(rxn, p.r_a, p.normal);
-				apply_inv_inertia_world(p.a, rxn, t);
-				eff -= dot(rxn, t);
+				eff -= dot(rxn, p.ang_n_a);
 			}
 			if (!spin_b && p.b_rotates) {
-				vec3<T> rxn, t;
+				vec3<T> rxn;
 				cross(rxn, p.r_b, p.normal);
-				apply_inv_inertia_world(p.b, rxn, t);
-				eff -= dot(rxn, t);
+				eff -= dot(rxn, p.ang_n_b);
 			}
 			if (eff <= zero)
 				continue;
@@ -1876,26 +1887,22 @@ template <typename T> void simulator<T>::correct_positions() {
 			if (inv_b > zero) {
 				vec3<T> d;
 				mul(d, p.normal, lambda * inv_b);
-				add(p.b->pos_correction_, d);
+				add(pb.pos, d);
 			}
 			if (inv_a > zero) {
 				vec3<T> d;
 				mul(d, p.normal, lambda * inv_a);
-				sub(p.a->pos_correction_, d);
+				sub(pa.pos, d);
 			}
 			if (spin_b) {
-				vec3<T> imp, rxj, dw;
-				mul(imp, p.normal, lambda);
-				cross(rxj, p.r_b, imp);
-				apply_inv_inertia_world(p.b, rxj, dw);
-				add(p.b->rot_correction_, dw);
+				vec3<T> dw;
+				mul(dw, p.ang_n_b, lambda);
+				add(pb.rot, dw);
 			}
 			if (spin_a) {
-				vec3<T> imp, rxj, dw;
-				mul(imp, p.normal, lambda);
-				cross(rxj, p.r_a, imp);
-				apply_inv_inertia_world(p.a, rxj, dw);
-				sub(p.a->rot_correction_, dw);
+				vec3<T> dw;
+				mul(dw, p.ang_n_a, lambda);
+				sub(pa.rot, dw);
 			}
 		}
 		// Rigid joints, in the same sweep and against the same running corrections, so a
@@ -1918,8 +1925,10 @@ template <typename T> void simulator<T>::correct_positions() {
 		// and leaves the velocities alone, so there is nothing to feed back.
 		for (auto & r : joint_rows_) {
 			// Only an awake speculative body absorbs correction, exactly as above.
-			const bool a_free = r.a->active_ && r.a->uses_speculative_solve();
-			const bool b_free = r.b && r.b->active_ && r.b->uses_speculative_solve();
+			position_body & ja = position_bodies_[r.index_a];
+			position_body * jb = r.b ? &position_bodies_[r.index_b] : nullptr;
+			const bool a_free = ja.free;
+			const bool b_free = jb && jb->free;
 			if (!a_free && !b_free)
 				continue;
 			const T inv_a = a_free ? r.inv_ma : zero;
@@ -1931,16 +1940,16 @@ template <typename T> void simulator<T>::correct_positions() {
 			// R(δ)·r ≈ r + δ × r.
 			vec3<T> anchor_a, anchor_b, twist, err;
 			add(anchor_a, r.a->position_, r.r_a);
-			add(anchor_a, r.a->pos_correction_);
+			add(anchor_a, ja.pos);
 			if (spin_a) {
-				cross(twist, r.a->rot_correction_, r.r_a);
+				cross(twist, ja.rot, r.r_a);
 				add(anchor_a, twist);
 			}
 			anchor_b = r.anchor_b;
-			if (r.b) {
-				add(anchor_b, r.b->pos_correction_);
+			if (jb) {
+				add(anchor_b, jb->pos);
 				if (spin_b) {
-					cross(twist, r.b->rot_correction_, r.r_b);
+					cross(twist, jb->rot, r.r_b);
 					add(anchor_b, twist);
 				}
 			}
@@ -1959,28 +1968,41 @@ template <typename T> void simulator<T>::correct_positions() {
 			if (inv_a > zero) {
 				vec3<T> d;
 				mul(d, lambda, -inv_a);
-				add(r.a->pos_correction_, d);
+				add(ja.pos, d);
 			}
 			if (inv_b > zero) {
 				vec3<T> d;
 				mul(d, lambda, inv_b);
-				add(r.b->pos_correction_, d);
+				add(jb->pos, d);
 			}
 			if (spin_a) {
 				vec3<T> rxj, dw;
 				cross(rxj, r.r_a, lambda);
 				apply_inv_inertia_world(r.a, rxj, dw);
-				sub(r.a->rot_correction_, dw);
+				sub(ja.rot, dw);
 			}
 			if (spin_b) {
 				vec3<T> rxj, dw;
 				cross(rxj, r.r_b, lambda);
 				apply_inv_inertia_world(r.b, rxj, dw);
-				add(r.b->rot_correction_, dw);
+				add(jb->rot, dw);
 			}
 		}
 		if (!corrected)
 			break;
+	}
+	auto finish = [this](int i, solid<T> * s) {
+		s->pos_correction_.set(position_bodies_[i].pos);
+		s->rot_correction_.set(position_bodies_[i].rot);
+	};
+	for (auto & p : contact_pairs_) {
+		finish(p.index_a, p.a);
+		finish(p.index_b, p.b);
+	}
+	for (auto & r : joint_rows_) {
+		finish(r.index_a, r.a);
+		if (r.b)
+			finish(r.index_b, r.b);
 	}
 }
 
@@ -3234,6 +3256,31 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		}
 	};
 
+	// A friction impulse d1·t1 + d2·t2 through a rotating pair's rows.
+	auto apply_friction_rows = [this, &apply_linear](contact_pair & p, T d1, T d2) {
+		solver_body & sa = solver_bodies_[p.index_a];
+		solver_body & sb = solver_bodies_[p.index_b];
+		vec3<T> delta, c;
+		mul(delta, p.t1, d1);
+		mul(c, p.t2, d2);
+		add(delta, c);
+		apply_linear(sa, sb, delta, p.inv_ma, p.inv_mb);
+		if (p.a_rotates) {
+			vec3<T> dw;
+			mul(dw, p.ang_t1_a, d1);
+			mul(c, p.ang_t2_a, d2);
+			add(dw, c);
+			sub(sa.angular_velocity, dw);
+		}
+		if (p.b_rotates) {
+			vec3<T> dw;
+			mul(dw, p.ang_t1_b, d1);
+			mul(c, p.ang_t2_b, d2);
+			add(dw, c);
+			add(sb.angular_velocity, dw);
+		}
+	};
+
 	// --- 3. Warm-start ---
 	// Open the solve with last tick's impulses already applied. accum_n / accum_t then
 	// hold THIS tick's impulse, which is what the clamp (>= 0, no pull), the Coulomb
@@ -3250,12 +3297,17 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		if (p.eff_n <= zero_val) {
 			p.accum_n = zero_val;
 			p.accum_t.reset();
+			p.at1 = p.at2 = zero_val;
 			continue;
 		}
 		if (p.accum_n != zero_val)
 			apply_normal_impulse(p, p.accum_n, p.inv_ma, p.inv_mb);
-		if (length_squared(p.accum_t) > zero_val)
+		if (p.friction_rows) {
+			if (p.at1 != zero_val || p.at2 != zero_val)
+				apply_friction_rows(p, p.at1, p.at2);
+		} else if (length_squared(p.accum_t) > zero_val) {
 			apply_pair_impulse(p, p.accum_t, p.inv_ma, p.inv_mb);
+		}
 	}
 
 	// One clamped normal-constraint solve for a pair: drive the relative normal
@@ -3281,7 +3333,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// A rotating pair's friction visit, in its fixed rows (see build_friction_rows): the
 	// slip cancelled in one step by K⁻¹, the Coulomb clamp below on the 2D accumulator,
 	// and the change applied through the cached angular responses.
-	auto solve_friction_rows = [this, &apply_linear](contact_pair & p, const vec3<T> & vrel) {
+	auto solve_friction_rows = [&apply_friction_rows](contact_pair & p, const vec3<T> & vrel) {
 		const T v1 = dot(vrel, p.t1);
 		const T v2 = dot(vrel, p.t2);
 		const T c1 = p.at1;
@@ -3301,30 +3353,8 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		const T d2 = n2 - c2;
 		p.at1 = n1;
 		p.at2 = n2;
-		if (d1 == T {} && d2 == T {})
-			return;
-		vec3<T> c;
-		solver_body & sa = solver_bodies_[p.index_a];
-		solver_body & sb = solver_bodies_[p.index_b];
-		vec3<T> delta;
-		mul(delta, p.t1, d1);
-		mul(c, p.t2, d2);
-		add(delta, c);
-		apply_linear(sa, sb, delta, p.inv_ma, p.inv_mb);
-		if (p.a_rotates) {
-			vec3<T> dw;
-			mul(dw, p.ang_t1_a, d1);
-			mul(c, p.ang_t2_a, d2);
-			add(dw, c);
-			sub(sa.angular_velocity, dw);
-		}
-		if (p.b_rotates) {
-			vec3<T> dw;
-			mul(dw, p.ang_t1_b, d1);
-			mul(c, p.ang_t2_b, d2);
-			add(dw, c);
-			add(sb.angular_velocity, dw);
-		}
+		if (d1 != T {} || d2 != T {})
+			apply_friction_rows(p, d1, d2);
 	};
 
 	// Restitution note: p.target separates the pair at `cor` times the relative
