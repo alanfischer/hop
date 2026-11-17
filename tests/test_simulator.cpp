@@ -1927,6 +1927,10 @@ template <typename T> static void test_blocked_limit_gives_up(const char * label
 		bool loaded = true;
 		float swing = 0.0f;
 	};
+	// The sleep gate reads the pin a commit before the bodies stop, at the simulator's
+	// epsilon, so a rig that sleeps the tick the pin closes to it can come to rest a
+	// hair past. Twice the gate is still a closed pin.
+	const T closed = tr::from_milli(2);
 	auto run = [&](int standoff_ticks) {
 		simulator<T> sim;
 		sim.set_gravity(vec3<T>(z, -tr::from_int(20), z));
@@ -1984,7 +1988,7 @@ template <typename T> static void test_blocked_limit_gives_up(const char * label
 		out.swing = tr::to_float(swing);
 		out.asleep = !child->active() && !parent->active();
 		out.standoff = c->limit_settled();
-		out.loaded = c->is_loaded(tr::from_milli(1));
+		out.loaded = c->is_loaded(closed);
 		return out;
 	};
 
@@ -1994,6 +1998,7 @@ template <typename T> static void test_blocked_limit_gives_up(const char * label
 	       forever.late_spin, forever.asleep ? 1 : 0, gives_up.late_spin,
 	       gives_up.asleep ? 1 : 0, gives_up.standoff ? 1 : 0, gives_up.loaded ? 1 : 0,
 	       gives_up.swing * 57.2958f);
+	fflush(stdout);
 	// The contrast is the point: the same rig, the same blocked limit, and only the rule
 	// differs. Without it the pair never stops working and never sleeps.
 	assert(forever.late_spin > 0.5f);
