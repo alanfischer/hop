@@ -172,6 +172,10 @@ public:
 					++w;
 				}
 			}
+			// A body that was touching it may have been resting on it, and a sleeper
+			// would go on resting on nothing.
+			if (w != other->touch_count_)
+				other->activate();
 			other->touch_count_ = w;
 		}
 		s->touch_count_ = 0;
@@ -676,7 +680,7 @@ private:
 		vec3<T> accum_t;             // accumulated friction impulse (a-side convention)
 		T impact_speed {};           // approach speed at TOI, for restitution
 		T separation {};             // signed gap along normal (0 touching, <0 penetrating); for the speculative target
-		T vn0 {};                    // relative normal velocity entering the GS (after warm-start)
+		T vn0 {};                    // relative normal velocity entering the solve, before the warm start
 		T cor {};                    // combined restitution
 		T mu_s {};                   // combined static friction (cone limit while sticking)
 		T mu_d {};                   // combined dynamic friction (cone limit while sliding)
@@ -699,6 +703,8 @@ private:
 		// surface velocity, or the carry is lost once the rider gains dynamic spin.
 		bool a_kinematic_carry = false;
 		bool b_kinematic_carry = false;
+		bool a_asleep = false;       // a finite-mass body solved as an anchor because it is asleep
+		bool b_asleep = false;
 		// Rows this contact was split into: the authoritative slot's point_count, the
 		// same for every row of one manifold. Read by the shock phase — see the walk
 		// for why it wants single-point contacts. Capped at max_manifold_points (8),
@@ -715,6 +721,7 @@ private:
 		typename solid<T>::touch::point * slot_b = nullptr;
 	};
 	std::vector<contact_pair> contact_pairs_;
+	std::vector<solid<T> *> pushed_sleepers_;  // solve_contacts scratch: sleeping bodies an awake partner pressed on this tick
 	struct solver_body {
 		vec3<T> velocity;
 		vec3<T> angular_velocity;
@@ -1456,7 +1463,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// surfaces are within the margin and the real gap is (margin - inflated_depth) — 0
 	// when touching, negative when truly penetrating, positive within the shell. A
 	// contact reached only by sweeping this tick (time > 0) is a fast approach; its gap
-	// is the closing distance still to cover, and a swept hit is one TOI and therefore
+	// is the distance still to cover to the surface, and a swept hit is one TOI and therefore
 	// one point (see the manifold contract in traceable.h).
 	auto build_manifold = [&](solid<T> * partner) {
 		// Attempted for every contact, swept or resting, rather than only for a
@@ -1514,8 +1521,11 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			} else {
 				vec3<T> to_contact;
 				sub(to_contact, col.point, old_pos);
+				// col.point is where the path meets the INFLATED shape, so the surface
+				// itself lies a margin beyond it. Without that the body is stopped at the
+				// shell and comes to rest a margin clear of everything it lands on.
 				T gap = -dot(to_contact, col.normal);
-				manifold[0].separation = gap < zero ? zero : gap;
+				manifold[0].separation = (gap < zero ? zero : gap) + config_.speculative_margin;
 			}
 			manifold_count = 1;
 		}
@@ -1612,6 +1622,19 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		col.reset();
 		col.time = one;
 		test_solid(col, solid_ptr, path, s2, config_.speculative_margin);
+		if (col.time >= one && col.depth <= zero && !s2->active_ && s2->inv_mass_ > zero) {
+			// The narrowphase does not report an overlap the mover is heading out of,
+			// and between two awake bodies that loses nothing: the one heading in
+			// reports it. A sleeper reports nothing, so a body resting under one — its
+			// own predicted motion is gravity's, away — would have no contact with it
+			// at all and could be pressed into it without limit. Ask again where it
+			// stands; a zero-length path is reported whichever way it faces.
+			segment<T> here;
+			here.set_start_end(old_pos, old_pos);
+			col.reset();
+			col.time = one;
+			test_solid(col, solid_ptr, here, s2, config_.speculative_margin);
+		}
 		if (col.time >= one && col.depth <= zero)
 			continue; // not within the inflated shell and not swept into this tick
 
@@ -2846,8 +2869,14 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				p.mu_s = (a->coefficient_of_static_friction_ + b->coefficient_of_static_friction_) * tr::half();
 				p.mu_d = (a->coefficient_of_dynamic_friction_ + b->coefficient_of_dynamic_friction_) * tr::half();
 				p.mu_roll = (a->coefficient_of_rolling_friction_ + b->coefficient_of_rolling_friction_) * tr::half();
-				p.inv_ma = a->inv_mass_;
-				p.inv_mb = b->inv_mass_;
+				// A sleeping body is an anchor for the tick: it takes no gravity and its own
+				// supports are not in the solve, so a finite mass here would yield under a
+				// load it is in fact holding and the awake body on top would sink into it.
+				// What the solve hands it is tallied at the writeback, which decides its waking.
+				p.a_asleep = !a->active_ && a->inv_mass_ > T {};
+				p.b_asleep = !b->active_ && b->inv_mass_ > T {};
+				p.inv_ma = p.a_asleep ? T {} : a->inv_mass_;
+				p.inv_mb = p.b_asleep ? T {} : b->inv_mass_;
 				p.inv_m_sum = p.inv_ma + p.inv_mb;
 				p.slot_a = auth_is_a ? &pt : mate_writeback;
 				p.slot_b = auth_is_a ? mate_writeback : &pt;
@@ -2858,8 +2887,8 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				// the angular path the lever arms drive Δω and the effective normal mass
 				// picks up the angular term k_n = inv_m_sum + n·((Iₐ⁻¹(rₐ×n))×rₐ) +
 				// n·((I_b⁻¹(r_b×n))×r_b) (precomputed: orientation is fixed during the solve).
-				p.a_rotates = a->rotates_dynamically();
-				p.b_rotates = b->rotates_dynamically();
+				p.a_rotates = !p.a_asleep && a->rotates_dynamically();
+				p.b_rotates = !p.b_asleep && b->rotates_dynamically();
 				const vec3<T> no_spin {};
 				p.a_kinematic_carry = !p.a_rotates && !(a->angular_velocity_ == no_spin);
 				p.b_kinematic_carry = !p.b_rotates && !(b->angular_velocity_ == no_spin);
@@ -3095,29 +3124,6 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		}
 	}
 
-	// --- 3. Warm-start ---
-	// In hop bodies are stateful; their velocity already includes the effect of
-	// last tick's impulses. Warm-starting is therefore incremental: we keep
-	// p.accum_n / p.accum_t from the cache as GS starting points but DO NOT
-	// re-apply them to velocity (that would double-count).
-	//
-	// Exception: a pair that is *separating* this tick (vn0 > 0) carries no
-	// sustained load — typically the tick right after a bounce. The clamp
-	// new_acc >= 0 normally stops the normal constraint from pulling bodies
-	// together, but a non-zero warm-started accum_n gives the GS a budget it can
-	// spend pulling the pair back: with target 0 and a separating vn, lambda_n is
-	// negative, and as long as accum_n stays >= 0 that negative impulse is applied
-	// — cancelling the separation and freezing the body it just bounced off of.
-	// (Most visible in fixed-point, where the post-bounce snap can land a hair
-	// inside the contact, so it gets re-recorded while separating.) Drop the warm
-	// start for separating pairs so they can only push, never pull back.
-	for (auto & p : contact_pairs_) {
-		if (p.vn0 > zero_val) {
-			p.accum_n = zero_val;
-			p.accum_t.reset();
-		}
-	}
-
 	// --- 4. Gauss–Seidel sweeps ---
 	// Each iteration solves the normal constraint (clamped accumulated
 	// impulse ≥ 0 → no sticky pull) and then the friction constraint
@@ -3195,6 +3201,30 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		}
 	};
 
+	// --- 3. Warm-start ---
+	// Open the solve with last tick's impulses already applied. accum_n / accum_t then
+	// hold THIS tick's impulse, which is what the clamp (>= 0, no pull), the Coulomb
+	// cone and the rolling budget all read them as. It is also what settles a deep
+	// pile: Gauss–Seidel carries support up one layer per sweep, so the load a pile
+	// bears is found across ticks, not within one.
+	//
+	// Every carried impulse is applied, whichever way the pair is moving. A lateral
+	// contact in a resting pile closes at zero give or take solver noise, and starting
+	// the ones that read a hair positive cold throws away a real load each tick — the
+	// pile then never stops rebuilding it. What must not be carried is a bounce, and
+	// the writeback below never stores one.
+	for (auto & p : contact_pairs_) {
+		if (p.eff_n <= zero_val) {
+			p.accum_n = zero_val;
+			p.accum_t.reset();
+			continue;
+		}
+		if (p.accum_n != zero_val)
+			apply_normal_impulse(p, p.accum_n, p.inv_ma, p.inv_mb);
+		if (length_squared(p.accum_t) > zero_val)
+			apply_pair_impulse(p, p.accum_t, p.inv_ma, p.inv_mb);
+	}
+
 	// One clamped normal-constraint solve for a pair: drive the relative normal
 	// velocity to p.target, keep the accumulated impulse non-negative (no sticky
 	// pull), and apply the resulting split impulse. Shared by the Gauss–Seidel
@@ -3247,8 +3277,16 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			auto & p = contact_pairs_[flip ? npairs - 1 - k : k];
 			if (p.eff_n <= zero_val)
 				continue;
-			if (p.accum_n <= zero_val || (p.mu_s <= zero_val && p.mu_d <= zero_val))
+			if (p.accum_n <= zero_val || (p.mu_s <= zero_val && p.mu_d <= zero_val)) {
+				// No normal load, no grip: take back whatever the warm start applied.
+				if (length_squared(p.accum_t) > zero_val) {
+					vec3<T> undo;
+					neg(undo, p.accum_t);
+					p.accum_t.reset();
+					apply_pair_impulse(p, undo, p.inv_ma, p.inv_mb);
+				}
 				continue;
+			}
 			vec3<T> vrel;
 			contact_point_vrel(p, vrel);  // (v + ω×r) at the contact, or v_b−v_a+v_bias on the linear path
 			T vn = dot(vrel, p.normal);
@@ -3460,7 +3498,30 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// --- 5. Writeback ---
 	// Store the converged per-pair impulses back into both sides' cache slots
 	// so next tick's warm-start picks up where we left off.
+	// A bounce (target > 0) is stored as nothing: its impulse is the impact, not a load
+	// the pair goes on bearing, and applied again next tick it would throw the body off
+	// the surface it just left.
+	pushed_sleepers_.clear();
 	for (auto & p : contact_pairs_) {
+		if (p.a_asleep || p.b_asleep) {
+			// The impulse this row handed its sleeping side: +J on b, the reaction on a.
+			solid<T> * sleeper = p.a_asleep ? p.a : p.b;
+			vec3<T> push;
+			mul(push, p.normal, p.accum_n);
+			add(push, p.accum_t);
+			if (p.a_asleep)
+				neg(push);
+			if (sleeper->solve_push_tick_ != current_tick_) {
+				sleeper->solve_push_tick_ = current_tick_;
+				sleeper->solve_push_.reset();
+				pushed_sleepers_.push_back(sleeper);
+			}
+			add(sleeper->solve_push_, push);
+		}
+		if (p.target > zero_val) {
+			p.accum_n = zero_val;
+			p.accum_t.reset();
+		}
 		if (p.slot_a) {
 			p.slot_a->accum_n = p.accum_n;
 			neg(p.slot_a->accum_t, p.accum_t);
@@ -3471,7 +3532,86 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		}
 	}
 
-	// --- 6. Cap solver-mutated velocities, then wake perturbed partners ---
+	// --- 5a. Wake the sleepers that were pushed past what holds them ---
+	// A sleeper was an anchor all tick, so its velocity says nothing. What can move it is
+	// the impulse its awake partners handed it, plus its own weight, less whatever the
+	// contacts it rested on can answer: each can push along its normal, and together
+	// they grip within the Coulomb cone. The solve's impulses alone do not say. An awake
+	// body under an anchor has nothing to hold up and pushes on it not at all, and a
+	// pile's support paths are not unique, so the solve shifts them every tick; a test
+	// reading either would wake a sleeper for nothing and the pile would never rest. What
+	// the contacts cannot hold is carried in sleep_push_, so a steady shove adds up to a
+	// wake just as a knock does, and a sleeper whose support has left falls.
+	for (solid<T> * s : pushed_sleepers_) {
+		vec3<T> r;
+		mul(r, gravity_, s->coefficient_of_gravity_ * s->mass_ * dt);
+		add(r, s->solve_push_);
+		add(r, s->sleep_push_);
+		// The contacts s rested on: the ones in the solve on its last awake tick or
+		// since. Its own refresh stamps only the partners it was moving toward; one
+		// resting on it from above stamps the pair instead.
+		int rested_tick = -1;
+		for (int k = 0; k < s->touch_count_; ++k)
+			if (s->touches_[k].last_tick > rested_tick)
+				rested_tick = s->touches_[k].last_tick;
+		const T touching = config_.speculative_slop + config_.epsilon;
+		T held[solid<T>::max_touches * max_manifold_points] = {};
+		T grip = zero_val;
+		for (int pass = 0; pass < 4; ++pass) {
+			int h = 0;
+			for (int k = 0; k < s->touch_count_; ++k) {
+				const auto & slot = s->touches_[k];
+				bool holds = slot.partner && (slot.last_tick == rested_tick || slot.pair_built_tick >= rested_tick);
+				if (holds && slot.partner->active_ && slot.partner->inv_mass_ > zero_val) {
+					// An awake partner holds unless it is leaving.
+					const solver_body & sp = solver_bodies_[slot.partner->solver_body_index_];
+					holds = dot(sp.velocity, slot.normal) > -config_.deactivate_speed;
+				}
+				// Friction at a single point holds a body that cannot turn. One that can
+				// rolls about that point instead, so only a manifold grips it.
+				const bool grips = slot.point_count > 1 || !s->rotates_dynamically();
+				for (int q = 0; q < slot.point_count; ++q, ++h) {
+					const auto & pt = slot.points[q];
+					// Touching, to within the rounding a body resting at exactly the slop
+					// gap reads back with. An awake partner under an anchor carries no
+					// impulse, so the gap is the only evidence there is.
+					if (!holds || !(pt.separation <= touching || pt.accum_n > zero_val))
+						continue;
+					// Still there: s slept through whatever its partners did since.
+					if (slot.partner != &static_world_) {
+						const aa_box<T> & pb = slot.partner->world_bound_;
+						const T m = config_.speculative_margin;
+						if (pt.impact.x < pb.mins.x - m || pt.impact.x > pb.maxs.x + m ||
+						    pt.impact.y < pb.mins.y - m || pt.impact.y > pb.maxs.y + m ||
+						    pt.impact.z < pb.mins.z - m || pt.impact.z > pb.maxs.z + m)
+							continue;
+					}
+					T next = held[h] - dot(r, pt.normal);
+					if (next < zero_val)
+						next = zero_val;
+					vec3<T> d;
+					mul(d, pt.normal, next - held[h]);
+					add(r, d);
+					if (grips)
+						grip += next - held[h];
+					held[h] = next;
+				}
+			}
+		}
+		const T slip = length(r);
+		const T cone = s->coefficient_of_static_friction_ * grip;
+		if (slip <= cone)
+			r.reset();
+		else
+			mul(r, (slip - cone) / slip);
+		s->sleep_push_.set(r);
+		vec3<T> disp;
+		mul(disp, r, s->inv_mass_ * dt);
+		if (!at_rest(s, disp, vec3<T>(), dt))
+			s->activate();
+	}
+
+	// --- 6. Cap solver-mutated velocities ---
 	// Cap: the per-body velocity cap in update_solid runs at integration time —
 	// a full tick before it would catch anything solve_contacts produced here.
 	// Without it a Gauss–Seidel overshoot (deep/stiff pile, near-singular
@@ -3479,15 +3619,11 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// at full magnitude and can tunnel a body through geometry. Capping after the
 	// sweeps (rather than inside apply_pair_impulse, which runs per impulse) keeps
 	// the solver's output bounded like integration's for one cheap idempotent pass.
-	// Wake: a pile near rest can be perturbed by a single ball landing on top of
-	// it; without this the perturbed ball pushes the pile down via the solver but
-	// the (sleeping) members never re-enter update_solid to notice their new
-	// velocity. Both run over the same pair list, so do them in one walk; capping
-	// first means the wake threshold reads the final (capped) velocity.
 	const bool do_cap = config_.max_velocity_component > zero_val;
 	const bool do_cap_w = config_.max_angular_velocity_component > zero_val;
 	auto finalize = [this, do_cap, do_cap_w, dt](solid<T> * s, int index, T inv_m) {
-		if (inv_m <= T{})
+		// A sleeper was an anchor all tick: nothing to cap.
+		if (!s->active_ || inv_m <= T{})
 			return;
 		solver_body & state = solver_bodies_[index];
 		if (do_cap)
@@ -3501,17 +3637,6 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 		// linear knob. No-op for the non-rotating default (inv_inertia == 0).
 		if (do_cap_w && s->rotates_dynamically())
 			cap_vec3(state.angular_velocity, config_.max_angular_velocity_component);
-		// Wake on spin as well as translation. A contact can torque a sleeping body
-		// without shifting it — a ball landing on the end of a resting plank — and
-		// without this it would keep the spin, be committed with it below, and neither
-		// notice nor shed it. Asked through at_rest so waking and sleeping read the
-		// same bound, spin included.
-		if (!s->active_) {
-			vec3<T> disp;
-			mul(disp, state.velocity, dt);
-			if (!at_rest(s, disp, state.angular_velocity, dt))
-				s->activate();
-		}
 	};
 	for (auto & p : contact_pairs_) {
 		finalize(p.a, p.index_a, p.inv_ma);

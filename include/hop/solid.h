@@ -432,6 +432,7 @@ public:
 		// "resting" pile carry phantom kinetic energy and (b) inject it back the
 		// instant a neighbour wakes the body. Zero it so sleep means rest.
 		velocity_.reset();
+		sleep_push_.reset();
 		// The same, for spin. The sleep test tolerates ω up to deactivate_speed_, so a
 		// body that settles while still turning slightly freezes that turn and reads as
 		// moving forever after. A body only spins dynamically
@@ -502,6 +503,9 @@ private:
 	int projected_tick_ = -1;     // tick simulator::project_joints last moved this body (once per tick, so the chain is moved to it rather than fought over); -1 = never
 	vec3<T> ext_dv_;              // velocity this tick's integration added from external acceleration (gravity, drag, force_); solve_contacts subtracts it out of the restitution reference. Zero for a body that didn't integrate
 	T ext_dv_unearned_ {};        // share of ext_dv_ NOT yet paid for by travel, in [0,1]; solve_contacts scales ext_dv_ by it. 1 = body never moved this tick (subtract it all), 0 = it travelled the whole tick into its contact (subtract none). Set by update_solid's sweep; left 1 everywhere else
+	vec3<T> sleep_push_;          // while asleep: impulse awake partners have handed this body that its sleeping supports could not hold, carried across ticks. solve_contacts wakes it once that would move it
+	vec3<T> solve_push_;          // solve_contacts scratch: impulse awake partners handed this sleeping body this tick
+	int solve_push_tick_ = -1;    // tick solve_push_ belongs to
 	bool solve_frozen_ = false;   // shock-propagation scratch: treated as a rigid support for this tick's velocity solve
 	contact_mode contact_mode_ = contact_mode::inherit;  // positioning strategy (see contact_mode)
 	aa_box<T> world_bound_;       // broad phase reads this
