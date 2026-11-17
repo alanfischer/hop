@@ -689,8 +689,15 @@ private:
 		T inv_mb {};
 		T inv_m_sum {};              // inv_ma + inv_mb, precomputed once at build
 		T target {};                 // restitution target normal velocity, precomputed once
-		T friction_scale {};         // -1 / inv_m_sum (friction λ scale), precomputed once
-		T friction_scale_t {};       // cached tangent friction λ scale: -1 / eff_t
+		T friction_scale {};         // -1 / inv_m_sum: the linear path's friction λ scale
+		// Angular friction rows (built only for a rotating pair with friction): a fixed
+		// tangent basis, the inverse of the 2x2 tangent effective mass in it, and each
+		// body's angular response I⁻¹(r×t) per row.
+		vec3<T> t1, t2;
+		T kt11 {}, kt12 {}, kt22 {};
+		T at1 {}, at2 {};            // accum_t in the rows; accum_t itself is synced after the sweeps
+		bool friction_rows = false;
+		vec3<T> ang_t1_a, ang_t2_a, ang_t1_b, ang_t2_b;
 		// Angular response (only used when has_angular). Lever arms from each
 		// body's center to the contact point, and the effective normal mass including
 		// the angular term. has_angular gates the whole angular path: when false the
@@ -822,21 +829,65 @@ template <typename T> inline void set_skew(mat3<T> & m, const vec3<T> & r) {
 	m.set_at(2, 0, -r.y);  m.set_at(2, 1,  r.x);  m.set_at(2, 2, T {});
 }
 
-// Angular effective mass of a contact pair along a unit direction `dir` at the lever
-// arms r_a/r_b: 1/m_a + 1/m_b + dir·((Iₐ⁻¹(rₐ×dir))×rₐ) + dir·((I_b⁻¹(r_b×dir))×r_b).
-// The shared primitive for the normal solve (dir = contact normal) and friction
-// (dir = slip tangent); reduces to inv_m_sum when neither body has inertia.
+// A rotating pair's friction rows, fixed for the tick: a tangent basis, the inverse of
+// the 2x2 tangent effective mass K in it, and each body's I⁻¹(r×t) per row. The exact
+// inverse solves the slip in one step whatever direction it takes, so nothing has to be
+// re-derived per visit. K is inverted normalized by its larger diagonal so fixed-point
+// keeps the determinant of a heavy pair; a near-singular K falls back to its diagonal,
+// which for a 2x2 cannot over-relax.
 template <typename T, typename Pair>
-inline T angular_eff_mass(const Pair & p, const vec3<T> & dir) {
-	auto term = [&](const solid<T> * s, const vec3<T> & r) {
-		if (!s->rotates_dynamically())
-			return T{};
-		vec3<T> rxd, i;
-		cross(rxd, r, dir);
-		apply_inv_inertia_world(s, rxd, i);
-		return dot(rxd, i);
+inline void build_friction_rows(Pair & p) {
+	using tr = scalar_traits<T>;
+	const T zero {};
+	const vec3<T> & n = p.normal;
+	if (tr::abs(n.x) < tr::from_milli(700))
+		p.t1.set(zero, n.z, -n.y);
+	else
+		p.t1.set(-n.z, zero, n.x);
+	normalize(p.t1);
+	cross(p.t2, n, p.t1);
+	T k11 = p.inv_m_sum, k12 = zero, k22 = p.inv_m_sum;
+	auto body = [&](const solid<T> * s, bool rotates, const vec3<T> & r, vec3<T> & ang1, vec3<T> & ang2) {
+		if (!rotates) {
+			ang1.reset();
+			ang2.reset();
+			return;
+		}
+		vec3<T> rxt1, rxt2;
+		cross(rxt1, r, p.t1);
+		cross(rxt2, r, p.t2);
+		apply_inv_inertia_world(s, rxt1, ang1);
+		apply_inv_inertia_world(s, rxt2, ang2);
+		k11 += dot(rxt1, ang1);
+		k12 += dot(rxt1, ang2);
+		k22 += dot(rxt2, ang2);
 	};
-	return p.inv_m_sum + term(p.a, p.r_a) + term(p.b, p.r_b);
+	body(p.a, p.a_rotates, p.r_a, p.ang_t1_a, p.ang_t2_a);
+	body(p.b, p.b_rotates, p.r_b, p.ang_t1_b, p.ang_t2_b);
+	p.kt11 = p.kt12 = p.kt22 = zero;
+	const T s = k11 > k22 ? k11 : k22;
+	if (s <= zero)
+		return;
+	const T a = k11 / s, b = k12 / s, d = k22 / s;
+	const T det = a * d - b * b;
+	if (det > tr::from_milli(10)) {
+		const T inv = tr::one() / (det * s);
+		p.kt11 = d * inv;
+		p.kt12 = -b * inv;
+		p.kt22 = a * inv;
+	} else {
+		if (k11 > zero) p.kt11 = tr::one() / k11;
+		if (k22 > zero) p.kt22 = tr::one() / k22;
+	}
+}
+
+// accum_t from the rows' scalar accumulators.
+template <typename T, typename Pair>
+inline void sync_friction_rows(Pair & p) {
+	vec3<T> c;
+	mul(p.accum_t, p.t1, p.at1);
+	mul(c, p.t2, p.at2);
+	add(p.accum_t, c);
 }
 
 // Integrate angular velocity (Euler's equation, body frame) and orientation
@@ -2952,9 +3003,7 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 					// vectors I⁻¹(rₐ×n) / I⁻¹(r_b×n). A normal impulse is always along n, so
 					// I⁻¹(r×(λn)) = λ·I⁻¹(r×n): caching these here — orientation and lever
 					// arms are fixed for the whole solve — turns each GS normal apply from a
-					// cross + mat3×vec3 per body into one scaled add (the hot-loop win). This
-					// inlines angular_eff_mass(p, n): same terms in the same order (a then b),
-					// reusing r×n instead of recomputing it in apply_pair_impulse every visit.
+					// cross + mat3×vec3 per body into one scaled add (the hot-loop win).
 					if (p.a_rotates) {
 						vec3<T> rxn;
 						cross(rxn, p.r_a, p.normal);
@@ -3098,29 +3147,13 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			p.target = zero_val;
 		}
 		p.friction_scale = (p.inv_m_sum > zero_val) ? -one / p.inv_m_sum : zero_val;
-		// Tangent λ scale. The linear path reuses friction_scale; the angular path
-		// needs the tangent effective mass, but only when the pair actually has
-		// friction (the friction sweep below skips mu_s<=0 && mu_d<=0 pairs, so an
-		// angular-but-frictionless pair never reads friction_scale_t — leave it 0).
-		if (!p.has_angular) {
-			p.friction_scale_t = p.friction_scale;
-		} else if (p.mu_s > zero_val || p.mu_d > zero_val) {
-			// Tangent direction: the current slip, or — when the contact isn't
-			// sliding — an arbitrary unit perpendicular of n.
-			vec3<T> vt0, vn_vec;
-			mul(vn_vec, p.normal, p.vn0);
-			sub(vt0, vrel0, vn_vec);
-			vec3<T> t0;
-			if (!normalize_carefully(t0, vt0, config_.epsilon)) {
-				// |n.x| < 0.7 ⇒ (1,0,0)×n = (0, n.z, -n.y); else (0,1,0)×n = (-n.z, 0, n.x).
-				if (std::abs(tr::to_float(p.normal.x)) < 0.7f)
-					t0.set(zero_val, p.normal.z, -p.normal.y);
-				else
-					t0.set(-p.normal.z, zero_val, p.normal.x);
-				normalize(t0);
-			}
-			T eff_t = angular_eff_mass<T>(p, t0);
-			p.friction_scale_t = eff_t > zero_val ? -one / eff_t : zero_val;
+		if (p.has_angular && (p.mu_s > zero_val || p.mu_d > zero_val)) {
+			build_friction_rows<T>(p);
+			p.friction_rows = true;
+			// The carried impulse, in this tick's tangent plane.
+			p.at1 = dot(p.accum_t, p.t1);
+			p.at2 = dot(p.accum_t, p.t2);
+			sync_friction_rows<T>(p);
 		}
 	}
 
@@ -3245,6 +3278,55 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			apply_normal_impulse(p, effective, inv_a, inv_b);
 	};
 
+	// A rotating pair's friction visit, in its fixed rows (see build_friction_rows): the
+	// slip cancelled in one step by K⁻¹, the Coulomb clamp below on the 2D accumulator,
+	// and the change applied through the cached angular responses.
+	auto solve_friction_rows = [this, &apply_linear](contact_pair & p, const vec3<T> & vrel) {
+		const T v1 = dot(vrel, p.t1);
+		const T v2 = dot(vrel, p.t2);
+		const T c1 = p.at1;
+		const T c2 = p.at2;
+		T n1 = c1 - (p.kt11 * v1 + p.kt12 * v2);
+		T n2 = c2 - (p.kt12 * v1 + p.kt22 * v2);
+		const T mag = tr::sqrt(n1 * n1 + n2 * n2);
+		if (mag > p.mu_s * p.accum_n && mag > T {}) {
+			const T max_d = p.mu_d * p.accum_n;
+			if (max_d < mag) {
+				const T f = max_d / mag;
+				n1 = n1 * f;
+				n2 = n2 * f;
+			}
+		}
+		const T d1 = n1 - c1;
+		const T d2 = n2 - c2;
+		p.at1 = n1;
+		p.at2 = n2;
+		if (d1 == T {} && d2 == T {})
+			return;
+		vec3<T> c;
+		solver_body & sa = solver_bodies_[p.index_a];
+		solver_body & sb = solver_bodies_[p.index_b];
+		vec3<T> delta;
+		mul(delta, p.t1, d1);
+		mul(c, p.t2, d2);
+		add(delta, c);
+		apply_linear(sa, sb, delta, p.inv_ma, p.inv_mb);
+		if (p.a_rotates) {
+			vec3<T> dw;
+			mul(dw, p.ang_t1_a, d1);
+			mul(c, p.ang_t2_a, d2);
+			add(dw, c);
+			sub(sa.angular_velocity, dw);
+		}
+		if (p.b_rotates) {
+			vec3<T> dw;
+			mul(dw, p.ang_t1_b, d1);
+			mul(c, p.ang_t2_b, d2);
+			add(dw, c);
+			add(sb.angular_velocity, dw);
+		}
+	};
+
 	// Restitution note: p.target separates the pair at `cor` times the relative
 	// normal velocity it was *actually* closing at when the solver began (vn0,
 	// measured along this same pair normal). Because |target| = cor·|vn0| ≤ |vn0|
@@ -3279,6 +3361,10 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 				continue;
 			if (p.accum_n <= zero_val || (p.mu_s <= zero_val && p.mu_d <= zero_val)) {
 				// No normal load, no grip: take back whatever the warm start applied.
+				if (p.friction_rows) {
+					sync_friction_rows<T>(p);
+					p.at1 = p.at2 = zero_val;
+				}
 				if (length_squared(p.accum_t) > zero_val) {
 					vec3<T> undo;
 					neg(undo, p.accum_t);
@@ -3289,31 +3375,18 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 			}
 			vec3<T> vrel;
 			contact_point_vrel(p, vrel);  // (v + ω×r) at the contact, or v_b−v_a+v_bias on the linear path
+			if (p.has_angular) {
+				solve_friction_rows(p, vrel);
+				continue;
+			}
 			T vn = dot(vrel, p.normal);
 			vec3<T> vn_vec;
 			mul(vn_vec, p.normal, vn);
 			vec3<T> vt;
 			sub(vt, vrel, vn_vec);  // tangential relative velocity
-			// λ_t = −v_t / m_t. Non-angular: m_t = inv_m_sum (cached friction_scale).
-			// Angular: the tangent effective mass along the slip direction,
-			// so a tangential contact also torques the body (rolling).
-			// The tangent effective mass is DIRECTION-dependent once a lever arm is in
-			// play, and the slip direction rotates during the solve — so unlike the
-			// normal (whose direction is fixed for the whole solve, which is why its
-			// response vectors are cached), the tangent mass has to be re-derived at the
-			// live slip. Reusing the pre-solve one over-relaxes by the ratio between
-			// them, measured at 2.47x on a landing gib, and anything above 2 diverges.
-			T scale_t = p.friction_scale_t;
-			if (p.has_angular) {
-				vec3<T> t_hat(vt);
-				if (normalize_carefully(t_hat, config_.epsilon)) {
-					const T eff_t = angular_eff_mass<T>(p, t_hat);
-					if (eff_t > zero_val)
-						scale_t = -one / eff_t;
-				}
-			}
+			// λ_t = −v_t / m_t, m_t = inv_m_sum on the linear path.
 			vec3<T> lambda_t;
-			mul(lambda_t, vt, scale_t);
+			mul(lambda_t, vt, p.friction_scale);
 			vec3<T> new_accum_t;
 			add(new_accum_t, p.accum_t, lambda_t);
 			// Coulomb stick/slip: the contact holds (static) as long as the
@@ -3503,6 +3576,8 @@ void simulator<T>::solve_contacts(T dt, bool has_speculative) {
 	// the surface it just left.
 	pushed_sleepers_.clear();
 	for (auto & p : contact_pairs_) {
+		if (p.friction_rows)
+			sync_friction_rows<T>(p);
 		if (p.a_asleep || p.b_asleep) {
 			// The impulse this row handed its sleeping side: +J on b, the reaction on a.
 			solid<T> * sleeper = p.a_asleep ? p.a : p.b;

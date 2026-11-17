@@ -469,15 +469,15 @@ the real contact point with a lever arm, so a body bounces/tumbles off what it h
 - Lever arms `r_a/r_b = slot.impact − position` and an angular-aware **effective
   normal mass** `k_n = inv_m_sum + n·((Iₐ⁻¹(rₐ×n))×rₐ) + n·((I_b⁻¹(r_b×n))×r_b)`,
   precomputed per pair (orientation fixed during the solve). `apply_inv_inertia_world`
-  does the body-frame `R·(invI ∘ Rᵀ·v)` round-trip; the effective mass along any
-  direction (normal `k_n` and the per-sweep friction slip direction) shares one
-  `angular_eff_mass(pair, dir)` helper.
+  does the body-frame `R·(invI ∘ Rᵀ·v)` round-trip.
 - `apply_pair_impulse` now also torques each finite-inertia body:
   `ω_a −= Iₐ⁻¹(rₐ×J)`, `ω_b += I_b⁻¹(r_b×J)`. The relative velocity is the **live
   surface velocity** `v + ω×r` at the contact (recomputed each sweep), and `vn0` /
   restitution derive from it.
-- **Friction** uses the tangent effective mass along the live slip direction, so a
-  tangential contact torques the body (rolling).
+- **Friction** solves two tangent rows fixed for the tick (`build_friction_rows`): the
+  exact inverse of the 2x2 tangent effective mass cancels the slip in one step whatever
+  direction it takes, and each body's `I⁻¹(r×t)` is cached per row, so a tangential
+  contact torques the body (rolling) with no per-sweep inertia multiply.
 - The **Phase 6 kinematic carry is subsumed**: for an `inv_inertia==0` body ω is
   fixed, so `ω×r` *is* the old `v_bias` and the impulse changes no ω (infinite-inertia
   limit).
