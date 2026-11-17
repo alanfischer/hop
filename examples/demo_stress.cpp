@@ -240,10 +240,11 @@ template <typename T> static void run(bool headless, int steps, bool fixed_label
 			float   speed = tr::to_float(hop::length(s->get_velocity()));
 			Color   color = s->active() ? heat_color(speed) : GRAY;
 			DrawSphereEx(p, SPHERE_R, 4, 6, color);
-			// Body-fixed axle so the spin is visible: transform the local ±Z pole by
-			// the solid's orientation and draw a line through the sphere. A bare
-			// solid-colored sphere would hide rotation; this marker tumbles/rolls with
-			// the body once it picks up angular velocity from friction.
+		}
+		// Body-fixed axles so the spin is visible. A pass of their own: raylib opens a
+		// new draw call at every triangles/lines switch, so interleaving them with the
+		// spheres cost two draw calls per ball.
+		for (auto & s : spheres) {
 			const hop::mat3<T> & R = s->get_orientation();
 			hop::vec3<T> pole(T{}, T{}, ff<T>(SPHERE_R));
 			hop::vec3<T> axis;
