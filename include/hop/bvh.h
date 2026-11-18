@@ -22,6 +22,10 @@ namespace hop {
 //   tree.build(entries);
 //   tree.query_aabb(box, [](int item) { ... });
 //   tree.query_ray(origin, direction, [](int item, float &best_t) { ... });
+//
+// Built top-down with a binned surface-area heuristic, one item per leaf, and stored
+// depth-first: an internal node's left child is the node after it, so a node is a box
+// and two ints, and refit is one reverse pass. Queries walk an explicit stack.
 
 template <typename T, typename Item> class bvh {
 public:
@@ -29,58 +33,103 @@ public:
 
 	struct node {
 		aa_box<T> box;
-		int left = -1;
-		int right = -1;
-		Item item {};
-		bool is_leaf() const { return left == -1 && right == -1; }
+		int index = 0;     // a leaf's slot in items_; an internal node's right child
+		bool leaf = false;
+		bool is_leaf() const { return leaf; }
 	};
 
-	// Build from a list of (AABB, item) pairs. The input vector may be reordered.
+	// Build from a list of (AABB, item) pairs. The input vector is not modified.
 	void build(std::vector<std::pair<aa_box<T>, Item>> & entries) {
 		nodes_.clear();
+		items_.clear();
 		if (entries.empty())
 			return;
-		nodes_.reserve(entries.size() * 2);
-		build_recursive(entries, 0, static_cast<int>(entries.size()));
+		const int n = static_cast<int>(entries.size());
+		refs_.resize(n);
+		for (int i = 0; i < n; ++i) {
+			const aa_box<T> & b = entries[i].first;
+			refs_[i].index = i;
+			for (int a = 0; a < 3; ++a)
+				refs_[i].c[a] = (tr::to_float(b.mins[a]) + tr::to_float(b.maxs[a])) * 0.5f;
+		}
+		nodes_.reserve(2 * n - 1);
+		items_.reserve(n);
+		build_node(entries, 0, n, 0);
 	}
 
-	// Find all items whose AABBs overlap the given box.
 	template <typename Callback> void query_aabb(const aa_box<T> & box, Callback && cb) const {
-		if (nodes_.empty())
+		if (nodes_.empty() || !test_intersection(nodes_[0].box, box))
 			return;
-		query_aabb_recursive(0, box, cb);
+		int stack[max_stack];
+		int top = 0;
+		int idx = 0;
+		for (;;) {
+			const node & n = nodes_[idx];
+			if (n.leaf) {
+				cb(items_[n.index]);
+			} else {
+				// Children are tested from the parent, so each box is tested once.
+				const int l = idx + 1, r = n.index;
+				const bool hl = test_intersection(nodes_[l].box, box);
+				const bool hr = test_intersection(nodes_[r].box, box);
+				if (hl) {
+					if (hr)
+						stack[top++] = r;
+					idx = l;
+					continue;
+				}
+				if (hr) {
+					idx = r;
+					continue;
+				}
+			}
+			if (top == 0)
+				return;
+			idx = stack[--top];
+		}
 	}
 
-	// Update node AABBs from the items at the leaves without changing tree
-	// topology. `get_box(item)` returns the current AABB for a leaf's item;
-	// internal nodes become the union of their children. Cheaper than build()
-	// when items move but the partitioning doesn't need to change. Topology
-	// quality degrades over time as items drift away from their original
-	// clusters — call build() periodically to recover.
+	// Recompute every node's box from get_box(item) without changing the topology.
+	// Children follow their parent, so one reverse pass is bottom-up.
 	template <typename GetBox> void refit(GetBox && get_box) {
-		if (nodes_.empty())
-			return;
-		refit_recursive(0, get_box);
+		for (int idx = static_cast<int>(nodes_.size()) - 1; idx >= 0; --idx) {
+			node & n = nodes_[idx];
+			if (n.leaf) {
+				n.box = get_box(items_[n.index]);
+			} else {
+				n.box = nodes_[idx + 1].box;
+				n.box.merge(nodes_[n.index].box);
+			}
+		}
 	}
 
-	// Find items along a ray (segment). The callback receives (item, best_t)
-	// and should update best_t if it finds a closer hit, enabling early pruning.
+	// The callback may shrink best_t (the hit fraction along direction) to cull the rest.
 	template <typename Callback>
 	void query_ray(const vec3<T> & origin, const vec3<T> & direction, Callback && cb) const {
 		if (nodes_.empty())
 			return;
 		T best_t = tr::one();
-		query_ray_recursive(0, origin, direction, best_t, cb);
+		int stack[max_stack];
+		int top = 0;
+		stack[top++] = 0;
+		while (top > 0) {
+			const int idx = stack[--top];
+			const node & n = nodes_[idx];
+			if (!ray_hits_aabb(origin, direction, n.box, best_t))
+				continue;
+			if (n.leaf) {
+				cb(items_[n.index], best_t);
+				continue;
+			}
+			stack[top++] = n.index;
+			stack[top++] = idx + 1;
+		}
 	}
 
-	// Append leaf items to `out` in spatial-cluster order. build_recursive emits
-	// nodes pre-order DFS, so a linear scan of nodes_ yields leaves in the same
-	// left-to-right order the median split produced — adjacent leaves are
-	// spatially adjacent. Useful for driving update loops in cache-friendly order.
+	// Every item once, in leaf order (spatially clustered).
 	template <typename Out> void collect_leaves(Out & out) const {
-		for (const auto & n : nodes_)
-			if (n.is_leaf())
-				out.push_back(n.item);
+		for (const auto & it : items_)
+			out.push_back(it);
 	}
 
 	const std::vector<node> & get_nodes() const { return nodes_; }
@@ -88,157 +137,138 @@ public:
 	int size() const { return static_cast<int>(nodes_.size()); }
 
 private:
+	// Past this depth the build splits at the median, which halves the count, so no
+	// path is longer than sah_depth + log2(count) and the query stacks hold that.
+	static constexpr int sah_depth = 32;
+	static constexpr int max_stack = sah_depth + 40;
+	static constexpr int bins = 12;
+
+	struct ref {
+		float c[3];   // centroid; the build bins in float whatever T is
+		int index;    // into entries
+	};
+
 	std::vector<node> nodes_;
+	std::vector<Item> items_;
+	std::vector<ref> refs_; // build scratch
 
-	int build_recursive(std::vector<std::pair<aa_box<T>, Item>> & entries, int start, int end) {
-		int idx = static_cast<int>(nodes_.size());
+	static float half_area(const float mn[3], const float mx[3]) {
+		const float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
+		return dx * dy + dy * dz + dz * dx;
+	}
+
+	void build_node(const std::vector<std::pair<aa_box<T>, Item>> & entries, int start, int end, int depth) {
+		const int idx = static_cast<int>(nodes_.size());
 		nodes_.push_back({});
-
-		if (end - start == 1) {
-			// Leaf node — nodes_ won't reallocate here since we reserved 2x
-			nodes_[idx].box = entries[start].first;
-			nodes_[idx].item = entries[start].second;
-			return idx;
-		}
-
-		// Compute encompassing AABB
-		aa_box<T> total = entries[start].first;
-		for (int i = start + 1; i < end; i++) {
-			total.merge(entries[i].first);
+		aa_box<T> total = entries[refs_[start].index].first;
+		float cmin[3], cmax[3];
+		for (int a = 0; a < 3; ++a)
+			cmin[a] = cmax[a] = refs_[start].c[a];
+		for (int i = start + 1; i < end; ++i) {
+			total.merge(entries[refs_[i].index].first);
+			for (int a = 0; a < 3; ++a) {
+				cmin[a] = std::min(cmin[a], refs_[i].c[a]);
+				cmax[a] = std::max(cmax[a], refs_[i].c[a]);
+			}
 		}
 		nodes_[idx].box = total;
-
-		// Split axis: longest extent
-		T dx = total.maxs.x - total.mins.x;
-		T dy = total.maxs.y - total.mins.y;
-		T dz = total.maxs.z - total.mins.z;
-		int axis;
-		if (dx >= dy && dx >= dz)
-			axis = 0;
-		else if (dy >= dz)
-			axis = 1;
-		else
-			axis = 2;
-
-		// Sort by centroid on split axis
-		std::sort(entries.begin() + start,
-		          entries.begin() + end,
-		          [axis](const std::pair<aa_box<T>, Item> & a, const std::pair<aa_box<T>, Item> & b) {
-			          T ca = a.first.mins[axis] + a.first.maxs[axis];
-			          T cb = b.first.mins[axis] + b.first.maxs[axis];
-			          return ca < cb;
-		          });
-
-		int mid = (start + end) / 2;
-
-		// Note: recursive calls may grow nodes_, but we access nodes_[idx]
-		// by integer index after, so reallocation is safe.
-		int left = build_recursive(entries, start, mid);
-		int right = build_recursive(entries, mid, end);
-		nodes_[idx].left = left;
-		nodes_[idx].right = right;
-
-		return idx;
-	}
-
-	template <typename GetBox> void refit_recursive(int idx, GetBox && get_box) {
-		auto & n = nodes_[idx];
-		if (n.is_leaf()) {
-			n.box = get_box(n.item);
+		if (end - start == 1) {
+			nodes_[idx].leaf = true;
+			nodes_[idx].index = static_cast<int>(items_.size());
+			items_.push_back(entries[refs_[start].index].second);
 			return;
 		}
-		if (n.left >= 0)
-			refit_recursive(n.left, get_box);
-		if (n.right >= 0)
-			refit_recursive(n.right, get_box);
-		// Internal nodes always have both children in build_recursive, but be
-		// defensive in case a future builder produces a stub node.
-		if (n.left >= 0) {
-			n.box = nodes_[n.left].box;
-			if (n.right >= 0)
-				n.box.merge(nodes_[n.right].box);
-		} else if (n.right >= 0) {
-			n.box = nodes_[n.right].box;
+		int axis = 0;
+		for (int a = 1; a < 3; ++a)
+			if (cmax[a] - cmin[a] > cmax[axis] - cmin[axis])
+				axis = a;
+		const float extent = cmax[axis] - cmin[axis];
+		int mid = -1;
+		if (depth < sah_depth && extent > 0.0f)
+			mid = sah_split(entries, start, end, axis, cmin[axis], extent);
+		if (mid <= start || mid >= end) {
+			mid = (start + end) / 2;
+			std::nth_element(refs_.begin() + start, refs_.begin() + mid, refs_.begin() + end,
+			                 [axis](const ref & a, const ref & b) { return a.c[axis] < b.c[axis]; });
 		}
+		build_node(entries, start, mid, depth + 1);
+		nodes_[idx].index = static_cast<int>(nodes_.size());
+		build_node(entries, mid, end, depth + 1);
 	}
 
-	template <typename Callback> void query_aabb_recursive(int idx, const aa_box<T> & box, Callback && cb) const {
-		const auto & n = nodes_[idx];
-		if (!test_intersection(n.box, box))
-			return;
-
-		if (n.is_leaf()) {
-			cb(n.item);
-			return;
+	// Binned SAH along `axis`: partition at the bin boundary with the least
+	// area-weighted count and return the split, or -1 if every item fell in one bin.
+	int sah_split(const std::vector<std::pair<aa_box<T>, Item>> & entries, int start, int end, int axis, float lo,
+	              float extent) {
+		struct bin {
+			float mn[3] = { 1e30f, 1e30f, 1e30f };
+			float mx[3] = { -1e30f, -1e30f, -1e30f };
+			int n = 0;
+			void grow(const bin & o) {
+				for (int a = 0; a < 3; ++a) {
+					mn[a] = std::min(mn[a], o.mn[a]);
+					mx[a] = std::max(mx[a], o.mx[a]);
+				}
+				n += o.n;
+			}
+		} b[bins];
+		const float scale = bins / extent;
+		auto bin_of = [&](const ref & r) {
+			const int k = static_cast<int>((r.c[axis] - lo) * scale);
+			return k < 0 ? 0 : (k >= bins ? bins - 1 : k);
+		};
+		for (int i = start; i < end; ++i) {
+			bin & bb = b[bin_of(refs_[i])];
+			const aa_box<T> & box = entries[refs_[i].index].first;
+			for (int a = 0; a < 3; ++a) {
+				bb.mn[a] = std::min(bb.mn[a], tr::to_float(box.mins[a]));
+				bb.mx[a] = std::max(bb.mx[a], tr::to_float(box.maxs[a]));
+			}
+			++bb.n;
 		}
-		if (n.left >= 0)
-			query_aabb_recursive(n.left, box, cb);
-		if (n.right >= 0)
-			query_aabb_recursive(n.right, box, cb);
+		// right[k]: bins k.. merged.
+		bin right[bins];
+		right[bins - 1] = b[bins - 1];
+		for (int k = bins - 2; k > 0; --k) {
+			right[k] = right[k + 1];
+			right[k].grow(b[k]);
+		}
+		float best = 1e30f;
+		int best_k = -1;
+		bin left;
+		for (int k = 1; k < bins; ++k) {
+			left.grow(b[k - 1]);
+			if (left.n == 0 || right[k].n == 0)
+				continue;
+			const float cost = left.n * half_area(left.mn, left.mx) + right[k].n * half_area(right[k].mn, right[k].mx);
+			if (cost < best) {
+				best = cost;
+				best_k = k;
+			}
+		}
+		if (best_k < 0)
+			return -1;
+		auto it = std::partition(refs_.begin() + start, refs_.begin() + end,
+		                         [&](const ref & r) { return bin_of(r) < best_k; });
+		return static_cast<int>(it - refs_.begin());
 	}
 
-	// Ray-AABB slab test. Returns true if ray hits box before best_t.
-	// We use a dedicated slab test rather than hop's find_intersection(segment, aa_box)
-	// because we only need a boolean (no hit point/normal), making this faster for
-	// BVH traversal where we test many nodes but only care about pruning.
-	//
-	// Zero direction components are handled without a sentinel reciprocal: a
-	// "big" 1/d would overflow the fixed16 raw-multiply for modest distances.
-	// Instead, axes with zero direction contribute a pure containment check.
 	static bool ray_hits_aabb(const vec3<T> & origin, const vec3<T> & direction, const aa_box<T> & box, T best_t) {
 		T zero_val {};
 		T tmin = zero_val;
 		T tmax = best_t;
-
-		if (direction.x != zero_val) {
-			T inv = tr::one() / direction.x;
-			T t1 = (box.mins.x - origin.x) * inv;
-			T t2 = (box.maxs.x - origin.x) * inv;
-			tmin = tr::max_val(tmin, tr::min_val(t1, t2));
-			tmax = tr::min_val(tmax, tr::max_val(t1, t2));
-		} else if (origin.x < box.mins.x || origin.x > box.maxs.x) {
-			return false;
+		for (int a = 0; a < 3; ++a) {
+			if (direction[a] != zero_val) {
+				T inv = tr::one() / direction[a];
+				T t1 = (box.mins[a] - origin[a]) * inv;
+				T t2 = (box.maxs[a] - origin[a]) * inv;
+				tmin = tr::max_val(tmin, tr::min_val(t1, t2));
+				tmax = tr::min_val(tmax, tr::max_val(t1, t2));
+			} else if (origin[a] < box.mins[a] || origin[a] > box.maxs[a]) {
+				return false;
+			}
 		}
-
-		if (direction.y != zero_val) {
-			T inv = tr::one() / direction.y;
-			T t1 = (box.mins.y - origin.y) * inv;
-			T t2 = (box.maxs.y - origin.y) * inv;
-			tmin = tr::max_val(tmin, tr::min_val(t1, t2));
-			tmax = tr::min_val(tmax, tr::max_val(t1, t2));
-		} else if (origin.y < box.mins.y || origin.y > box.maxs.y) {
-			return false;
-		}
-
-		if (direction.z != zero_val) {
-			T inv = tr::one() / direction.z;
-			T t1 = (box.mins.z - origin.z) * inv;
-			T t2 = (box.maxs.z - origin.z) * inv;
-			tmin = tr::max_val(tmin, tr::min_val(t1, t2));
-			tmax = tr::min_val(tmax, tr::max_val(t1, t2));
-		} else if (origin.z < box.mins.z || origin.z > box.maxs.z) {
-			return false;
-		}
-
 		return tmax >= tmin && tmin < best_t;
-	}
-
-	template <typename Callback>
-	void query_ray_recursive(
-	    int idx, const vec3<T> & origin, const vec3<T> & direction, T & best_t, Callback && cb) const {
-		const auto & n = nodes_[idx];
-
-		if (!ray_hits_aabb(origin, direction, n.box, best_t))
-			return;
-
-		if (n.is_leaf()) {
-			cb(n.item, best_t);
-			return;
-		}
-		if (n.left >= 0)
-			query_ray_recursive(n.left, origin, direction, best_t, cb);
-		if (n.right >= 0)
-			query_ray_recursive(n.right, origin, direction, best_t, cb);
 	}
 };
 
