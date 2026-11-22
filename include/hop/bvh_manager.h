@@ -76,8 +76,8 @@ public:
 	// For callers that move dynamic solids outside the simulator tick (an engine
 	// integration moving trigger volumes, say) and still need the next query to
 	// see current bounds. Unlike mark_dirty() this costs an O(n) refit rather
-	// than a sort-and-rebuild; topology is still refreshed periodically so
-	// drift cannot degrade query precision indefinitely.
+	// than a sort-and-rebuild. Topology is refreshed by pre_update(), so a caller
+	// that never steps a simulator over this manager calls that once a tick.
 	void mark_dynamic_moved() { dynamic_moved_ = true; }
 
 	void rebuild() {
@@ -93,14 +93,9 @@ public:
 	}
 
 	// Refit the dynamic BVH in place from current world bounds, keeping topology.
-	// Periodically falls back to a full rebuild so accumulated drift (solids
-	// wandering out of their original clusters, inflating internal AABBs) cannot
-	// degrade query precision without bound.
+	// Never a rebuild: a caller that moves solids between queries refits once per
+	// query, many times a tick, and drift is a matter of ticks, not queries.
 	void refit_dynamic() {
-		if (++refits_since_dynamic_rebuild_ >= dynamic_rebuild_period) {
-			rebuild_dynamic();
-			return;
-		}
 		dynamic_bvh_.refit([](solid<T> * s) { return s->get_world_bound(); });
 		dynamic_moved_ = false;
 	}
@@ -121,7 +116,6 @@ public:
 		dynamic_dirty_ = false;
 		dynamic_moved_ = false;
 		ticks_since_dynamic_rebuild_ = 0;
-		refits_since_dynamic_rebuild_ = 0;
 
 		// The order is not taken from this tree (see rebuild_iteration_order), but an
 		// add or a remove is what usually brings us here, so keep it in step.
@@ -303,7 +297,6 @@ private:
 	bool order_dirty_ = false;
 	int ticks_since_dynamic_rebuild_ = 0;
 	bool dynamic_moved_ = false;
-	int refits_since_dynamic_rebuild_ = 0;
 };
 
 } // namespace hop
