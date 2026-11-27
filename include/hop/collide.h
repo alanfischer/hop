@@ -81,8 +81,12 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 	}
 }
 
+// `exact` is the exact swept query (sweep_slide, public trace_solid): a mover that
+// starts touching is blocked only if it heads INTO the sphere, as in trace_aa_box.
+// Margin-shell discovery (speculative) passes false and keeps reporting a contact the
+// mover is not leaving by more than epsilon — that is what discovering it means.
 template <typename T>
-void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sph, T epsilon) {
+void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sph, T epsilon, bool exact = false) {
 	using tr = scalar_traits<T>;
 	if (test_inside(sph, seg.origin)) {
 		vec3<T> n;
@@ -96,8 +100,13 @@ void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sp
 		}
 		c.started_inside = true;   // began here either way -- see trace_aa_box
 		// Separating movers are not reported -- see trace_aa_box. A zero-length segment
-		// has dot() == 0 and so still reports, which is what a point query needs.
-		if (dot(n, seg.direction) <= epsilon) {
+		// has dot() == 0 and so still reports, which is what a point query needs. For an
+		// exact sweep a tangent slide (dot == 0) passes too: `<= epsilon` blocked it, so
+		// a sphere/capsule touching a neighbour re-traced the same t=0 hit until
+		// max_collision_iterations and never moved.
+		const T d = dot(n, seg.direction);
+		const bool blocked = exact ? (length_squared(seg.direction) == T {} || d < T {}) : d <= epsilon;
+		if (blocked) {
 			c.time = T {};
 			c.depth = sph.radius - dist;
 			c.point.set(seg.origin);
@@ -111,7 +120,7 @@ void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sp
 }
 
 template <typename T>
-void trace_capsule(collision<T> & c, const segment<T> & seg, const capsule<T> & cap, T epsilon) {
+void trace_capsule(collision<T> & c, const segment<T> & seg, const capsule<T> & cap, T epsilon, bool exact = false) {
 	vec3<T> p1, p2;
 	segment<T> s;
 	s.origin.set(cap.origin);
@@ -119,7 +128,7 @@ void trace_capsule(collision<T> & c, const segment<T> & seg, const capsule<T> & 
 	project(p1, p2, s, seg, epsilon);
 	sphere<T> sph;
 	sph.set(p1, cap.radius);
-	trace_sphere(c, seg, sph, epsilon);
+	trace_sphere(c, seg, sph, epsilon, exact);
 }
 
 template <typename T>
@@ -129,7 +138,8 @@ void trace_capsule_capsule(collision<T> & c,
                            const vec3<T> & D1,
                            const vec3<T> & D2,
                            T radius,
-                           T epsilon) {
+                           T epsilon,
+                           bool exact = false) {
 	using tr = scalar_traits<T>;
 	const T one = tr::one();
 	T zero_val {};
@@ -148,11 +158,17 @@ void trace_capsule_capsule(collision<T> & c,
 	auto trace_edge = [&](const vec3<T> & origin, const vec3<T> & dir) {
 		edge_cap.set(origin, dir, radius);
 		edge_col.reset();
-		trace_capsule(edge_col, seg, edge_cap, epsilon);
+		trace_capsule(edge_col, seg, edge_cap, epsilon, exact);
 		if (edge_col.time < c.time) {
 			c.time = edge_col.time;
 			c.point.set(edge_col.point);
 			c.normal.set(edge_col.normal);
+			if (exact) {
+				// Carry the overlap depth too, or an overlapping capsule pair reports
+				// depth 0 and update_solid never pushes it apart.
+				c.depth = edge_col.depth;
+				c.started_inside = c.started_inside || edge_col.started_inside;
+			}
 		}
 	};
 
@@ -2264,9 +2280,13 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 // intra_merge. The default (average) is what the solver has always got; an
 // overlap/rest QUERY should pass `deepest` so its one reported contact is a real
 // surface rather than a blend of two.
+// `discovery` is speculative margin-shell discovery, which keeps reporting tangent and
+// near contacts (see trace_sphere's `exact`). Everything else (sweep_slide, public
+// queries) is an exact swept query. An explicit flag rather than `margin > 0`, so a
+// speculative_margin of 0 doesn't silently switch speculative bodies to the exact path.
 template <typename T>
 void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T epsilon, T margin = T {}, bool use_gjk = true,
-                intra_merge mode = intra_merge::average) {
+                intra_merge mode = intra_merge::average, bool discovery = false) {
 	using tr = scalar_traits<T>;
 	collision<T> col;
 	col.collider = s2;
@@ -2287,6 +2307,8 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			for (auto & p : c.planes)
 				p.distance = p.distance + margin;
 	};
+
+	const bool exact = !discovery;
 
 	// Squared segment length is invariant across all shape pairs in this call;
 	// hoist it for the sphere/sphere fast reject below.
@@ -2462,7 +2484,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				} else {
 					sphere<T> sph;
 					sph.set(origin, r_sum);
-					trace_sphere(col, seg, sph, epsilon);
+					trace_sphere(col, seg, sph, epsilon, exact);
 				}
 			} else if (sh1->get_type() == shape_type::sphere && sh2->get_type() == shape_type::capsule) {
 				vec3<T> origin;
@@ -2472,7 +2494,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				add(origin, sh2->get_capsule().origin);
 				capsule<T> cap;
 				cap.set(origin, sh2->get_capsule().direction, sh2->get_capsule().radius + sh1->get_sphere().radius + margin);
-				trace_capsule(col, seg, cap, epsilon);
+				trace_capsule(col, seg, cap, epsilon, exact);
 			} else if (sh1->get_type() == shape_type::sphere && sh2->get_type() == shape_type::convex_solid) {
 				trace_rounded_convex_forward(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
 			}
@@ -2499,7 +2521,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				neg(dir);
 				capsule<T> cap;
 				cap.set(origin, dir, sh1->get_capsule().radius + sh2->get_sphere().radius + margin);
-				trace_capsule(col, seg, cap, epsilon);
+				trace_capsule(col, seg, cap, epsilon, exact);
 			} else if (sh1->get_type() == shape_type::capsule && sh2->get_type() == shape_type::convex_solid) {
 				// Fallback (deep core penetration): capsule support relative to its
 				// A endpoint, r + max(0, n·D). Inflate each plane and sweep A through
@@ -2517,7 +2539,8 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				                      sh1->get_capsule().direction,
 				                      sh2->get_capsule().direction,
 				                      sh1->get_capsule().radius + sh2->get_capsule().radius + margin,
-				                      epsilon);
+				                      epsilon,
+				                      exact);
 			}
 			else if (sh1->get_type() == shape_type::convex_solid && sh2->get_type() == shape_type::box) {
 				vec3<T> half;

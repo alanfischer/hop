@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -2433,6 +2434,128 @@ template <typename T> static void test_pile_comes_to_rest(const char * label) {
 	assert(deepest < 0.008f);
 }
 
+// A sweep_slide sphere or capsule touching a neighbour must be free to slide along it
+// (blocked only by motion INTO the contact, as trace_aa_box already does), and an
+// overlapping capsule pair must report its depth so the push-out can separate it.
+// Before #117's fix the first re-traced the same t=0 hit until max_collision_iterations
+// and never moved, and the second reported depth 0.
+template <typename T> static void test_touching_rounded_slides(const char * label) {
+	using tr = scalar_traits<T>;
+	for (int kind = 0; kind < 2; ++kind) {
+		simulator<T> sim;
+		auto make = [&](const vec3<T> & p) {
+			auto b = std::make_shared<solid<T>>();
+			b->set_mass(tr::one());
+			if (kind == 0)
+				b->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(tr::from_milli(400))));
+			else
+				b->add_shape(std::make_shared<shape<T>>(
+				    hop::capsule<T>({ T {}, T {}, tr::from_milli(400) }, { T {}, T {}, tr::from_milli(600) }, tr::from_milli(400))));
+			b->set_position(p);
+			sim.add_solid(b);
+			return b;
+		};
+		auto a = make({ T {}, T {}, T {} });
+		auto b = make({ tr::from_milli(800), T {}, T {} }); // exactly touching
+
+		collision<T> c;
+		segment<T> seg;
+		seg.set_start_dir(a->get_position(), { T {}, tr::from_milli(100), T {} }); // tangent
+		sim.test_solid(c, a.get(), seg, b.get());
+		const bool slides = c.time == tr::one();
+		c.reset();
+		seg.set_start_dir(a->get_position(), { tr::from_milli(10), tr::from_milli(100), T {} }); // into
+		sim.test_solid(c, a.get(), seg, b.get());
+		const bool blocks = c.time == T {};
+
+		b->set_position({ tr::from_milli(790), T {}, T {} }); // 1 cm overlap
+		c.reset();
+		seg.set_start_dir(a->get_position(), {});
+		sim.test_solid(c, a.get(), seg, b.get());
+		const float depth = tr::to_float(c.depth);
+		printf("  touching_rounded_slides[%s %s]: tangent_slides=%d into_blocks=%d overlap_depth=%.4f\n", label,
+		       kind ? "capsule" : "sphere", slides, blocks, depth);
+		assert(slides && blocks);
+		assert(depth > 0.005f && depth < 0.015f);
+	}
+	printf("  touching_rounded_slides[%s]: OK\n", label);
+}
+
+// The #117 piling scene: a crowd of sweep_slide actors whose velocity the game
+// overwrites every tick to drive them into a room corner. Every actor must stay out of
+// the static walls. Before the fix, a body wedged between a wall and a neighbour
+// ping-ponged between the two planes until max_collision_iterations, then took an
+// untraced nudge into the wall; the frame-start push-out shoved partners into walls
+// without a trace; and a slide that turned back past the start swept into a wall the
+// broadphase (centred on the integrated end) never gathered.
+template <typename T> static void test_crowd_stays_out_of_walls(const char * label, int kind, float limit) {
+	using tr = scalar_traits<T>;
+	enum { WORLD = 1, ACTOR = 2 };
+	simulator<T> sim;
+	std::vector<std::shared_ptr<solid<T>>> keep;
+	const T H = tr::from_int(4), one = tr::one(), tall = tr::from_int(20);
+	auto wall = [&](const aa_box<T> & b) {
+		auto w = std::make_shared<solid<T>>();
+		w->set_infinite_mass();
+		w->set_coefficient_of_gravity(T {});
+		w->set_collision_scope(WORLD);
+		w->add_shape(std::make_shared<shape<T>>(b));
+		sim.add_solid(w);
+		keep.push_back(w);
+	};
+	wall(aa_box<T>({ -H - one, -H - one, -one }, { H + one, H + one, T {} }));
+	wall(aa_box<T>({ -H - one, -H, T {} }, { -H, H, tall }));
+	wall(aa_box<T>({ H, -H, T {} }, { H + one, H, tall }));
+	wall(aa_box<T>({ -H, -H - one, T {} }, { H, -H, tall }));
+	wall(aa_box<T>({ -H, H, T {} }, { H, H + one, tall }));
+
+	const T r = tr::from_milli(400);
+	std::vector<std::shared_ptr<solid<T>>> actors;
+	for (int i = 0; i < 30; ++i) {
+		auto a = std::make_shared<solid<T>>();
+		a->set_mass(one);
+		a->set_coefficient_of_restitution(T {});
+		a->set_collision_scope(ACTOR);
+		a->set_contact_mode(contact_mode::sweep_slide);
+		if (kind == 0)
+			a->add_shape(std::make_shared<shape<T>>(aa_box<T>({ -r, -r, T {} }, { r, r, tr::from_milli(1400) })));
+		else if (kind == 1)
+			a->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(r)));
+		else
+			a->add_shape(std::make_shared<shape<T>>(hop::capsule<T>({ T {}, T {}, r }, { T {}, T {}, tr::from_milli(600) }, r)));
+		a->set_position({ tr::from_milli(-3400 + (i % 6) * 1200), tr::from_milli(-3400 + (i / 6) * 1200),
+		                  kind == 1 ? tr::from_milli(410) : tr::from_milli(10) });
+		sim.add_solid(a);
+		actors.push_back(a);
+	}
+	const vec3<T> goal(H - tr::half(), H - tr::half(), T {});
+	const T speed = tr::from_int(6), dt = tr::from_milli(25);
+	float worst = 0;
+	for (int tick = 0; tick < 400; ++tick) {
+		for (auto & a : actors) {
+			const vec3<T> p = a->get_position();
+			vec3<T> d(goal.x - p.x, goal.y - p.y, T {});
+			T l = length(d);
+			if (l > tr::from_milli(10))
+				mul(d, speed / l);
+			a->set_velocity({ d.x, d.y, a->get_velocity().z });
+			a->activate();
+		}
+		sim.update(dt);
+		for (auto & a : actors) {
+			collision<T> c;
+			segment<T> seg;
+			seg.set_start_dir(a->get_position(), {});
+			sim.trace_solid(c, a.get(), seg, WORLD);
+			if (c.time == T {})
+				worst = std::max(worst, tr::to_float(c.depth));
+		}
+	}
+	const char * names[] = { "box", "sphere", "capsule" };
+	printf("  crowd_stays_out_of_walls[%s %s]: worst wall penetration %.5f (limit %.4f)\n", label, names[kind], worst, limit);
+	assert(worst < limit);
+}
+
 int main() {
 	printf("test_simulator (float):\n");
 	test_gravity_drop<float>();
@@ -2485,6 +2608,12 @@ int main() {
 	test_landed_body_rests_on_surface<float>("float");
 	test_awake_body_collides_with_sleeper_above<float>("float");
 	test_pile_comes_to_rest<float>("float");
+	test_touching_rounded_slides<float>("float");
+	for (int kind = 0; kind < 3; ++kind)
+		test_crowd_stays_out_of_walls<float>("float", kind, 0.0005f);
+	test_touching_rounded_slides<fixed32>("fixed32");
+	for (int kind = 0; kind < 3; ++kind)
+		test_crowd_stays_out_of_walls<fixed32>("fixed32", kind, 0.0005f);
 
 	printf("test_simulator (fixed16):\n");
 	test_dual_instantiation<fixed16>();
@@ -2546,6 +2675,11 @@ int main() {
 	test_landed_body_rests_on_surface<fixed16>("fixed16");
 	test_awake_body_collides_with_sleeper_above<fixed16>("fixed16");
 	test_pile_comes_to_rest<fixed16>("fixed16");
+	test_touching_rounded_slides<fixed16>("fixed16");
+	// fixed16's default epsilon is 1/4096 (~0.24 mm) and its sphere crowd still settles
+	// up to ~1.8 mm into the walls. The limit is ~12 epsilons, against 27.8 mm on main.
+	for (int kind = 0; kind < 3; ++kind)
+		test_crowd_stays_out_of_walls<fixed16>("fixed16", kind, 0.003f);
 
 	printf("ALL PASSED\n");
 	return 0;
