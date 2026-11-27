@@ -499,6 +499,8 @@ private:
 	vec3<T> inv_inertia_;         // per-component reciprocal of inertia_ (0 where a component is 0). PRIMARY marker: inv_inertia_==0 ⇒ never spins dynamically. Zero by default ⇒ rotation is opt-in
 	mat3<T> inv_inertia_world_;   // cached R·diag(inv_inertia_)·Rᵀ; see get_inv_inertia_world/update_inv_inertia_world. Zero for a non-rotating body
 	vec3<T> pos_correction_;      // speculative NGS position solver scratch (pseudo-position, not velocity)
+	vec3<T> discovery_delta_;     // speculative: the predicted motion discovery swept this tick (commit_solid checks the solved move against it)
+	vec3<T> joint_shift_;         // speculative: project_joints' share of pos_correction_ this tick (exempt from commit_solid's static clamp)
 	vec3<T> rot_correction_;      // the angular half of the same scratch: a small-angle world-frame rotation (axis * radians). Written only by the rigid-joint position pass, which cannot fix an anchor error by translation alone
 	int projected_tick_ = -1;     // tick simulator::project_joints last moved this body (once per tick, so the chain is moved to it rather than fought over); -1 = never
 	vec3<T> ext_dv_;              // velocity this tick's integration added from external acceleration (gravity, drag, force_); solve_contacts subtracts it out of the restitution reference. Zero for a body that didn't integrate
