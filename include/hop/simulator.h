@@ -155,6 +155,7 @@ public:
 			s->set_contact_mode(config_.default_contact_mode);
 		s->activate();
 		spacial_collection_.resize(solids_.size());
+		pushout_collection_.resize(solids_.size());
 	}
 
 	void remove_solid(std::shared_ptr<solid<T>> s) {
@@ -563,7 +564,7 @@ private:
 	                                       solid<T> * s,
 	                                       const segment<T> & seg,
 	                                       int collide_with_bits,
-	                                       bool average_normals);
+	                                       bool average_normals, solid<T> * ignore = nullptr);
 
 	void constraint_link(vec3<T> & result, solid<T> * s, const vec3<T> & solid_pos, const vec3<T> & solid_vel);
 	// Force one active constraint exerts on `s` at the given trial pos/vel, plus the
@@ -655,6 +656,53 @@ private:
 	std::vector<typename constraint<T>::ptr> constraints_;
 	std::vector<solid<T> *> spacial_collection_;
 	int num_spacial_collection_ = 0;
+	// Scratch gather for traced_push when it moves a partner, so the mover's own
+	// spacial_collection_ survives for the rest of its sweep. Sized with it in add_solid.
+	std::vector<solid<T> *> pushout_collection_;
+
+	// Move `mover` from `pos` by `delta`, but only as far as a trace allows — the
+	// frame-start push-out used to teleport both bodies, which shoves a partner into
+	// whatever is behind it (a wall, in a crowd). `ignore` is the body being separated
+	// from: the trace starts inside it, and a convex reports an inside start whatever the
+	// heading. `own_gather` gathers around the mover first, since a partner's far side
+	// isn't covered by the current mover's spacials.
+	void traced_push(solid<T> * mover, vec3<T> & pos, const vec3<T> & delta, bool own_gather, solid<T> * ignore) {
+		segment<T> seg;
+		vec3<T> end;
+		add(end, pos, delta);
+		seg.set_start_end(pos, end);
+		collision<T> pc;
+		const vec3<T> saved_normal(solid_trace_pair_normal_);
+		if (own_gather) {
+			std::swap(spacial_collection_, pushout_collection_);
+			const int saved = num_spacial_collection_;
+			aa_box<T> box(mover->world_bound_);
+			sub(box, mover->position_);
+			add(box, pos);
+			T m = length(delta) + config_.epsilon;
+			box.mins.x -= m;
+			box.mins.y -= m;
+			box.mins.z -= m;
+			box.maxs.x += m;
+			box.maxs.y += m;
+			box.maxs.z += m;
+			num_spacial_collection_ =
+			    find_solids_in_aa_box(box, spacial_collection_.data(), static_cast<int>(spacial_collection_.size()));
+			trace_solid_with_current_spacials(pc, mover, seg, mover->collide_with_scope_, false, ignore);
+			std::swap(spacial_collection_, pushout_collection_);
+			num_spacial_collection_ = saved;
+		} else {
+			trace_solid_with_current_spacials(pc, mover, seg, mover->collide_with_scope_, false, ignore);
+		}
+		solid_trace_pair_normal_ = saved_normal; // the caller holds a reference to it
+		if (pc.time >= tr::one()) {
+			pos.set(end);
+		} else if (pc.time > T {}) {
+			vec3<T> off;
+			calculate_epsilon_offset(off, delta, pc.normal);
+			add(pos, pc.point, off);
+		} // t == 0: blocked from the start, stay put
+	}
 	bool reporting_collisions_ = false;
 	manager<T> * manager_ = nullptr;
 	int current_tick_ = 0;  // increments per update(); also stamps touch slot refresh
@@ -1101,15 +1149,17 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 		m += spin_broadphase_reach(solid_ptr, dt); // cover a spinner's swept surface (0 if not spinning)
 
 		// Use the cached world AABB (world_bound_ = rotate_aabb(local_bound_,
-		// orientation_) + position_, refreshed on every move/reorient), shifted by the
-		// frame's motion to centre on new_pos. The un-rotated local_bound_ does NOT
+		// orientation_) + position_, refreshed on every move/reorient), centred on
+		// old_pos — NOT shifted to new_pos. The reachable envelope is a ball of radius
+		// length(temp) about the START: a slide can turn the motion back past old_pos
+		// (a body heading away from a wall, deflected toward it by a neighbour), and a
+		// box about new_pos stops exactly at old_pos on that side, so the wall was never
+		// gathered and the body swept into it. The un-rotated local_bound_ does NOT
 		// include the solid's orientation, so an oriented solid (e.g. a box balanced on
 		// a rotated edge, reaching √2·half past its AABB) would query a box too small to
 		// reach the geometry its oriented narrowphase collides against, and tunnel until
-		// it sank far enough for the un-rotated box to reach. (`temp` already holds
-		// new_pos − old_pos from the motion calc above.)
+		// it sank far enough for the un-rotated box to reach.
 		aa_box<T> box(solid_ptr->world_bound_);
-		add(box, temp);
 		box.mins.x -= m;
 		box.mins.y -= m;
 		box.mins.z -= m;
@@ -1141,6 +1191,10 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 	// composing it here keeps the recorded share a fraction of the whole tick.
 	T consumed {};
 	bool first_contact = true;
+	// Contact normals hit so far this call, for clipping left_over against all of them.
+	constexpr int max_slide_planes = 5;
+	vec3<T> slide_planes[max_slide_planes];
+	int num_slide_planes = 0;
 	while (true) {
 		if (!first) {
 			sub(temp, new_pos, old_pos);
@@ -1188,10 +1242,12 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				vec3<T> correction;
 				mul(correction, pair_normal, push);
 				if (self_movable)
-					add(old_pos, correction);
+					traced_push(solid_ptr, old_pos, correction, false, c.collider);
 				if (partner_movable) {
 					vec3<T> partner_pos(c.collider->position_);
-					sub(partner_pos, correction);
+					vec3<T> back;
+					neg(back, correction);
+					traced_push(c.collider, partner_pos, back, true, solid_ptr);
 					c.collider->set_position_direct(partner_pos);
 				}
 			} else {
@@ -1298,6 +1354,44 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				sub(left_over, temp);
 			}
 
+			// Clipping only against the newest normal lets left_over turn back into a
+			// plane hit one sub-step earlier, so a body wedged between two surfaces (a
+			// wall and a neighbour) ping-pongs until max_collision_iterations. Keep every
+			// plane hit this call: if the clipped motion re-enters an earlier one, slide
+			// along the crease of the two; if a third still blocks, stop (Quake's
+			// SV_FlyMove). One contact takes exactly the old path.
+			if (num_slide_planes < max_slide_planes)
+				slide_planes[num_slide_planes++] = c.normal;
+			bool clear = true;
+			for (int j = 0; j < num_slide_planes - 1; ++j)
+				if (dot(left_over, slide_planes[j]) < -config_.epsilon) {
+					clear = false;
+					break;
+				}
+			if (!clear) {
+				bool found = false;
+				for (int j = 0; j < num_slide_planes - 1 && !found; ++j) {
+					vec3<T> dir;
+					cross(dir, slide_planes[num_slide_planes - 1], slide_planes[j]);
+					if (!normalize_carefully(dir, config_.epsilon))
+						continue;
+					vec3<T> cand;
+					mul(cand, dir, dot(left_over, dir));
+					bool good = true;
+					for (int k = 0; k < num_slide_planes; ++k)
+						if (dot(cand, slide_planes[k]) < -config_.epsilon) {
+							good = false;
+							break;
+						}
+					if (good) {
+						left_over = cand;
+						found = true;
+					}
+				}
+				if (!found)
+					left_over.reset();
+			}
+
 			if (too_small(left_over, config_.epsilon)) {
 				new_pos.set(old_pos);
 				break;
@@ -1313,6 +1407,14 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 				// dynamic bodies collide at the limit) and give up for this tick.
 				mul(temp, c.normal, config_.epsilon * tr::four());
 				add(new_pos, old_pos, temp);
+				// Trace the nudge: untraced, it can put the body into whatever is
+				// behind it (a wall, with a neighbour in front), which the next tick
+				// then reports as a start-overlap.
+				path.set_start_end(old_pos, new_pos);
+				collision<T> nudge;
+				trace_solid_with_current_spacials(nudge, solid_ptr, path, solid_ptr->collide_with_scope_, false);
+				if (nudge.time < one)
+					new_pos.set(old_pos);
 				break;
 			} else {
 				add(new_pos, old_pos, left_over);
@@ -2222,7 +2324,8 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
                                                      solid<T> * s,
                                                      const segment<T> & seg,
                                                      int collide_with_bits,
-                                                     bool average_normals) {
+                                                     bool average_normals,
+                                                     solid<T> * ignore) {
 	result.reset();
 	if (collide_with_bits == 0)
 		return;
@@ -2230,7 +2333,7 @@ void simulator<T>::trace_solid_with_current_spacials(collision<T> & result,
 	collision<T> col;
 	for (int i = 0; i < num_spacial_collection_; ++i) {
 		auto * s2 = spacial_collection_[i];
-		if (s != s2 && (collide_with_bits & s2->collision_scope_) != 0 && s->should_collide(s2) &&
+		if (s != s2 && s2 != ignore && (collide_with_bits & s2->collision_scope_) != 0 && s->should_collide(s2) &&
 		    s2->should_collide(s)) {
 			col.time = tr::one();
 			test_solid(col, s, seg, s2);
