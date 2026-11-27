@@ -5,9 +5,13 @@
 //   - bounding (an unbounded/open convex must not phantom-block from afar).
 // Run in float, fixed16 and fixed32 so the fixed-point build is covered too.
 
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <type_traits>
+#include <vector>
 #include <hop/collide.h> // gjk_core_support / trace_pair_convex_gjk live here
 #include <hop/hop.h>
 
@@ -495,6 +499,297 @@ template <typename T> static void test_triangle_primitives(const char * label) {
 	printf("OK\n");
 }
 
+// --- issue #118 regressions -------------------------------------------------
+
+// Reference distance between two segments: the distance from seg1(u) to seg2 is
+// convex in u, so a ternary search (in double, with an exact point-to-segment
+// projection onto seg2) converges to the true minimum.
+static float ref_segment_distance(const float o1[3], const float d1[3], const float o2[3], const float d2[3]) {
+	const double dd2 = double(d2[0]) * d2[0] + double(d2[1]) * d2[1] + double(d2[2]) * d2[2];
+	auto f = [&](double u) {
+		const double p[3] = {o1[0] + u * d1[0], o1[1] + u * d1[1], o1[2] + u * d1[2]};
+		double t = dd2 > 0 ? ((p[0] - o2[0]) * d2[0] + (p[1] - o2[1]) * d2[1] + (p[2] - o2[2]) * d2[2]) / dd2 : 0;
+		t = t < 0 ? 0 : (t > 1 ? 1 : t);
+		const double q[3] = {o2[0] + t * d2[0] - p[0], o2[1] + t * d2[1] - p[1], o2[2] + t * d2[2] - p[2]};
+		return std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+	};
+	double lo = 0, hi = 1;
+	for (int i = 0; i < 200; ++i) {
+		const double m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3;
+		if (f(m1) < f(m2)) hi = m2; else lo = m1;
+	}
+	return static_cast<float>(std::min(f(0.5 * (lo + hi)), std::min(f(0.0), f(1.0))));
+}
+
+template <typename T> static float seg_seg_distance(const float o1[3], const float d1[3], const float o2[3],
+                                                    const float d2[3]) {
+	using tr = scalar_traits<T>;
+	segment<T> s1, s2;
+	s1.origin = v3<T>(o1[0], o1[1], o1[2]);
+	s1.direction = v3<T>(d1[0], d1[1], d1[2]);
+	s2.origin = v3<T>(o2[0], o2[1], o2[2]);
+	s2.direction = v3<T>(d2[0], d2[1], d2[2]);
+	vec3<T> p1, p2, diff;
+	project(p1, p2, s1, s2, tr::from_milli(1));
+	sub(diff, p1, p2);
+	const float dist = tr::to_float(length(diff));
+	assert(std::isfinite(dist));
+	return dist;
+}
+
+// Segment-segment closest pair (math/project.h). The parallel test used to be an
+// absolute denom < 1e-3, and denom scales with length⁴, so short segments up to
+// ~16° apart took the "parallel" path and reported a pair that isn't the closest.
+template <typename T> static void test_segment_segment_closest(const char * label) {
+	printf("  segment_segment_closest[%s]: ", label);
+	// fixed16's 16.16 format limits the solve to ~mm; float and fixed32 are exact.
+	const float tol = std::is_same<T, fixed16>::value ? 1e-2f : 1e-3f;
+
+	// The issue's case: a 0.37 crouched-capsule spine crossed at 15° by a 0.3 edge.
+	// They intersect (distance 0); the old code reported ~0.039.
+	{
+		const float th = 15.0f * 3.14159265f / 180.0f, cx = cosf(th), sy = sinf(th);
+		const float o1[3] = {0, 0, 0}, d1[3] = {0.37f, 0, 0};
+		const float o2[3] = {0.3f - 0.15f * cx, -0.15f * sy, 0}, d2[3] = {0.3f * cx, 0.3f * sy, 0};
+		const float dist = seg_seg_distance<T>(o1, d1, o2, d2);
+		printf("cross15=%.4f ", dist);
+		assert(dist < tol);
+	}
+
+	// Long spine vs a short per-tick motion segment (trace_capsule's shape of call).
+	{
+		const float o1[3] = {0, 0, 0}, d1[3] = {1, 0, 0};
+		const float o2[3] = {0.4f, 0.1f, 0.0f}, d2[3] = {0.05f * 0.96f, -0.05f * 0.28f, 0};
+		const float dist = seg_seg_distance<T>(o1, d1, o2, d2);
+		const float ref = ref_segment_distance(o1, d1, o2, d2);
+		printf("spine_vs_motion=%.4f(ref %.4f) ", dist, ref);
+		assert(std::fabs(dist - ref) < tol);
+	}
+
+	// A segment shorter than √epsilon must not collapse to its origin (a and c are
+	// squared lengths; they used to be compared against epsilon, not epsilon²).
+	{
+		const float o1[3] = {-0.015f, 0, 0}, d1[3] = {0.03f, 0, 0};
+		const float o2[3] = {0, 0, -0.5f}, d2[3] = {0, 0, 1};
+		const float dist = seg_seg_distance<T>(o1, d1, o2, d2);
+		printf("short=%.4f ", dist);
+		assert(dist < tol); // they cross; the old code reported 0.015
+	}
+
+	// Exactly parallel: overlapping (distance = offset) and end-to-end (gap).
+	{
+		const float o1[3] = {0, 0, 0}, d1[3] = {1, 0, 0};
+		const float o2[3] = {0.25f, 0.1f, 0}, d2[3] = {1, 0, 0};
+		assert(std::fabs(seg_seg_distance<T>(o1, d1, o2, d2) - 0.1f) < tol);
+		const float o3[3] = {1.5f, 0, 0};
+		assert(std::fabs(seg_seg_distance<T>(o1, d1, o3, d1) - 0.5f) < tol);
+	}
+
+	// Seeded sweep of near-parallel pairs at short-to-medium lengths.
+	unsigned seed = 12345u;
+	auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return ((seed >> 8) & 0xFFFF) / 32767.5f - 1.0f; };
+	float worst = 0;
+	for (float L : {0.1f, 0.2f, 0.4f, 1.0f}) {
+		for (int k = 0; k < 300; ++k) {
+			float d1[3] = {rnd(), rnd(), rnd()};
+			float n1 = sqrtf(d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2]) + 1e-6f;
+			float d2[3];
+			for (int i = 0; i < 3; ++i) {
+				d1[i] = d1[i] / n1 * L;
+				d2[i] = d1[i] * 0.8f + rnd() * 0.15f * L;
+			}
+			const float o1[3] = {lroundf(rnd() * 500) / 1000.0f, lroundf(rnd() * 500) / 1000.0f, lroundf(rnd() * 500) / 1000.0f};
+			float o2[3] = {o1[0] + rnd() * 0.3f * L, o1[1] + rnd() * 0.3f * L, o1[2] + rnd() * 0.3f * L};
+			// v3<T> builds from milli units, so quantize first: both sides then see the same segments.
+			for (int i = 0; i < 3; ++i) {
+				d1[i] = lroundf(d1[i] * 1000) / 1000.0f;
+				d2[i] = lroundf(d2[i] * 1000) / 1000.0f;
+				o2[i] = lroundf(o2[i] * 1000) / 1000.0f;
+			}
+			const float err = seg_seg_distance<T>(o1, d1, o2, d2) - ref_segment_distance(o1, d1, o2, d2);
+			worst = std::max(worst, std::fabs(err));
+		}
+	}
+	printf("sweep_worst=%.5f ", worst);
+	assert(worst < tol);
+
+	// Unbalanced inputs: one input far larger than the others. Scaling every input by
+	// the largest (offset included) shrank the short ones into fixed16's rounding: a
+	// 0.3 pair 10 apart was off by ~29 cm and a 0.6 pair 50 apart by ~59 cm, both fine
+	// on main. The first case is trace_capsule's call for a short spine and a fast move.
+	{
+		struct regime { const char * name; float l1, l2, sep; };
+		const regime regimes[] = { {"spine_vs_long_sweep", 0.1f, 10.0f, 0.5f}, {"short_far", 0.3f, 0.3f, 10.0f},
+			                       {"short_very_far", 0.6f, 0.6f, 50.0f} };
+		for (const regime & g : regimes) {
+			float w = 0;
+			for (int k = 0; k < 2000; ++k) {
+				float d1[3] = {rnd(), rnd(), rnd()}, d2[3] = {rnd(), rnd(), rnd()}, o1[3], o2[3];
+				const float n1 = sqrtf(d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2]) + 1e-6f;
+				const float n2 = sqrtf(d2[0] * d2[0] + d2[1] * d2[1] + d2[2] * d2[2]) + 1e-6f;
+				for (int i = 0; i < 3; ++i) {
+					o1[i] = lroundf(rnd() * 1000) / 1000.0f;
+					o2[i] = lroundf((o1[i] + rnd() * g.sep) * 1000) / 1000.0f;
+					d1[i] = lroundf(d1[i] / n1 * g.l1 * 1000) / 1000.0f;
+					d2[i] = lroundf(d2[i] / n2 * g.l2 * 1000) / 1000.0f;
+				}
+				// Measure the projected pair in float: at 10-50 apart fixed16's own length()
+				// error would swamp the projection's.
+				using tr = scalar_traits<T>;
+				segment<T> s1, s2;
+				s1.origin = v3<T>(o1[0], o1[1], o1[2]);
+				s1.direction = v3<T>(d1[0], d1[1], d1[2]);
+				s2.origin = v3<T>(o2[0], o2[1], o2[2]);
+				s2.direction = v3<T>(d2[0], d2[1], d2[2]);
+				vec3<T> p1, p2;
+				project(p1, p2, s1, s2, tr::from_milli(1));
+				const float dx = tr::to_float(p1.x) - tr::to_float(p2.x), dy = tr::to_float(p1.y) - tr::to_float(p2.y),
+				            dz = tr::to_float(p1.z) - tr::to_float(p2.z);
+				const float err = sqrtf(dx * dx + dy * dy + dz * dz) - ref_segment_distance(o1, d1, o2, d2);
+				w = std::max(w, std::fabs(err));
+			}
+			printf("%s=%.5f ", g.name, w);
+			assert(w < tol);
+		}
+	}
+
+	// Long segments: the degree-4 products overflowed fixed16 (40² · 40² ≫ 32767)
+	// before the power-of-two rescale; two perpendicular 40-long spines 1 apart.
+	{
+		const float o1[3] = {-20, 0, 0}, d1[3] = {40, 0, 0};
+		const float o2[3] = {5, 1, -20}, d2[3] = {0, 0, 40};
+		const float dist = seg_seg_distance<T>(o1, d1, o2, d2);
+		printf("long=%.4f ", dist);
+		assert(std::fabs(dist - 1.0f) < tol);
+	}
+	printf("OK\n");
+}
+
+// Float reference: distance from p to the union of a triangle's three edges.
+static float ref_edges_distance(const float p[3], const float v[3][3]) {
+	float best = 1e30f;
+	for (int i = 0; i < 3; ++i) {
+		const float d[3] = {v[(i + 1) % 3][0] - v[i][0], v[(i + 1) % 3][1] - v[i][1], v[(i + 1) % 3][2] - v[i][2]};
+		static const float zero[3] = {0, 0, 0};
+		best = std::min(best, ref_segment_distance(p, zero, v[i], d));
+	}
+	return best;
+}
+
+// Degenerate triangles (math/triangle.h). Coincident vertices used to divide 0/0
+// on an edge branch — NaN weights in float, a saturated garbage weight in fixed —
+// and closest_segment_triangle then latched that NaN as its "best".
+template <typename T> static void test_degenerate_triangles(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  degenerate_triangles[%s]: ", label);
+	const float tol = std::is_same<T, fixed16>::value ? 1e-2f : 1e-3f;
+	// A==B, A==C, B==C, all three coincident, collinear (C between and C beyond).
+	const float tris[][3][3] = {
+	    {{0, 0, 0}, {0, 0, 0}, {1, 0, 0}},
+	    {{0, 0, 0}, {1, 0, 0}, {0, 0, 0}},
+	    {{0, 0, 0}, {1, 0, 0}, {1, 0, 0}},
+	    {{0.3f, 0.2f, 0.1f}, {0.3f, 0.2f, 0.1f}, {0.3f, 0.2f, 0.1f}},
+	    {{0, 0, 0}, {1, 0, 0}, {0.5f, 0, 0}},
+	    {{0, 0, 0}, {0.5f, 0, 0}, {1, 0, 0}},
+	};
+	const float pts[][3] = {{0.5f, 1, 0}, {-0.5f, 0.3f, 0.2f}, {1.7f, -0.4f, 0}, {0.25f, 0, 0.5f}, {0.5f, 0, 0}};
+	int checked = 0;
+	for (const auto & t : tris) {
+		const vec3<T> a = v3<T>(t[0][0], t[0][1], t[0][2]), b = v3<T>(t[1][0], t[1][1], t[1][2]),
+		              c = v3<T>(t[2][0], t[2][1], t[2][2]);
+		for (const auto & pf : pts) {
+			const vec3<T> p = v3<T>(pf[0], pf[1], pf[2]);
+			T w[3];
+			closest_point_triangle(p, a, b, c, w);
+			const float w0 = tr::to_float(w[0]), w1 = tr::to_float(w[1]), w2 = tr::to_float(w[2]);
+			assert(std::isfinite(w0) && std::isfinite(w1) && std::isfinite(w2));
+			assert(std::fabs(w0 + w1 + w2 - 1.0f) < tol);
+			vec3<T> cp;
+			closest_point_triangle(cp, p, a, b, c);
+			vec3<T> diff;
+			sub(diff, p, cp);
+			const float dist = tr::to_float(length(diff));
+			assert(std::fabs(dist - ref_edges_distance(pf, t)) < tol);
+
+			// Segment version: a short vertical segment starting at p, rising away.
+			vec3<T> q = p, cs, ct;
+			q.y = q.y + tr::from_milli(100);
+			const float d2 = tr::to_float(closest_segment_triangle(p, q, a, b, c, cs, ct, tr::from_milli(1)));
+			assert(std::isfinite(d2));
+			assert(d2 <= dist * dist + tol);
+			++checked;
+		}
+	}
+	// The GJK triangle step with a duplicated support point.
+	{
+		T w[3];
+		gjk_closest_triangle(v3<T>(1, 1, 0), v3<T>(1, 1, 0), v3<T>(-1, 1, 0), w);
+		const float w0 = tr::to_float(w[0]), w1 = tr::to_float(w[1]), w2 = tr::to_float(w[2]);
+		assert(std::isfinite(w0) && std::isfinite(w1) && std::isfinite(w2));
+		assert(std::fabs(w0 + w1 - 0.5f) < tol && std::fabs(w2 - 0.5f) < tol); // closest is (0,1,0)
+	}
+	printf("cases=%d OK\n", checked);
+}
+
+// GJK stalls (#118). Clouds from a seeded random search, with exact distances
+// from a QP solve. On the old code the float cases spun to max_iter (a vertex
+// with weight below `epsilon` was dropped, so the same support came back each
+// iteration) and the fixed16 ones were off by 6-33 cm (a repeated support
+// point re-entered the simplex and corrupted v).
+struct gjk_cloud_case {
+	const char * what;
+	float dist; // exact distance from the origin to the hull
+	std::vector<std::array<float, 3>> pts;
+};
+static const std::vector<gjk_cloud_case> & gjk_cloud_cases() {
+	static const std::vector<gjk_cloud_case> cases = {
+	    {"float stall", 0.06771f, {{0.861f, -0.299f, -0.082f}, {0.088f, 0.239f, -0.16f}, {0.548f, -0.628f, 0.111f}, {0.559f, -0.496f, -0.212f}, {0.807f, 0.259f, 0.495f}, {0.966f, 0.014f, 0.272f}, {0.631f, -0.32f, -0.438f}, {0.021f, 0.151f, -0.308f}, {0.389f, -0.684f, -0.416f}, {0.785f, -0.351f, 0.07f}, {0.094f, -0.07f, 0.249f}, {0.211f, -0.043f, -0.114f}, {0.564f, -0.28f, 0.477f}}},
+	    {"float stall", 0.02360f, {{0.092f, 0.319f, -0.122f}, {-0.694f, -0.293f, 0.372f}, {-0.021f, 0.009f, 0.006f}, {-0.675f, 0.326f, 0.364f}, {-0.18f, -0.188f, 0.049f}, {0.135f, 0.273f, 0.205f}, {-0.613f, -0.494f, -0.101f}, {-0.236f, 0.207f, -0.237f}, {0.115f, 0.228f, 0.499f}, {-0.67f, 0.112f, 0.368f}, {-0.781f, 0.22f, -0.269f}, {-0.105f, -0.438f, 0.474f}, {-0.326f, -0.208f, 0.202f}, {-0.061f, 0.156f, 0.622f}}},
+	    {"fixed16 error 0.33", 0.44873f, {{0.495f, 0.685f, -0.369f}, {-0.656f, 1.295f, 0.951f}, {-1.586f, 3.654f, -0.219f}, {1.392f, 3.617f, 2.086f}, {0.968f, 0.056f, -1.028f}, {1.33f, 2.151f, 2.387f}, {-1.077f, 2.992f, 2.348f}, {-1.194f, 2.286f, 1.297f}, {-0.865f, 0.622f, -0.805f}, {0.163f, 3.802f, 1.23f}, {1.435f, 0.617f, 1.803f}, {0.686f, 3.098f, 1.488f}, {0.582f, 0.624f, 2.534f}, {-0.512f, 3.739f, 0.449f}}},
+	    {"fixed16 error 0.06", 0.84470f, {{-3.894f, -0.229f, 0.559f}, {-0.603f, -0.154f, 1.153f}, {-1.262f, 1.592f, 1.095f}, {-2.031f, 0.958f, -1.101f}, {-3.917f, -0.106f, 0.395f}, {-3.846f, 1.871f, 1.594f}, {-3.253f, 1.103f, -0.478f}, {-0.543f, -1.741f, -1.178f}, {-2.909f, -1.124f, 0.397f}, {-2.044f, -0.85f, 2.167f}, {-3.658f, -0.504f, 0.961f}, {-3.692f, 2.006f, 2.201f}, {-1.534f, -0.78f, 1.711f}, {-4.16f, 0.811f, -1.318f}, {-2.319f, 0.96f, -0.479f}}},
+	    {"fixed16 error 0.07", 1.51050f, {{0.424f, -0.137f, -1.887f}, {1.053f, -3.291f, 1.132f}, {3.787f, -2.622f, -1.876f}, {0.816f, -3.46f, -0.798f}, {0.97f, -0.379f, -1.701f}, {2.628f, -1.124f, 0.97f}, {4.128f, -2.711f, -1.173f}, {3.753f, -3.113f, -0.37f}, {2.166f, -3.768f, -1.236f}, {3.153f, -1.246f, -1.172f}, {3.772f, -2.166f, -2.007f}, {3.862f, -0.593f, -1.608f}, {0.832f, -3.53f, 1.183f}, {1.548f, -3.076f, 0.38f}, {4.124f, -3.574f, -1.348f}}},
+	    {"float stall", 1.85863f, {{1.233f, 3.022f, -2.83f}, {-1.502f, 1.491f, -3.729f}, {1.1f, 0.262f, -3.673f}, {-0.3f, 2.715f, -3.311f}, {-0.483f, -0.709f, -3.976f}, {-2.126f, 2.718f, -1.649f}, {-2.502f, 1.811f, -2.881f}, {-0.713f, -0.17f, -1.708f}, {0.459f, 1.623f, -4.911f}}},
+	};
+	return cases;
+}
+
+template <typename T> static void test_gjk_no_stall(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  gjk_no_stall[%s]: ", label);
+	const bool f16 = std::is_same<T, fixed16>::value;
+	for (const auto & c : gjk_cloud_cases()) {
+		std::vector<vec3<T>> pts;
+		for (const auto & p : c.pts)
+			pts.push_back(v3<T>(p[0], p[1], p[2]));
+		// Shape A is a point at the origin, so the Minkowski difference is the cloud.
+		auto sup_a = [](const vec3<T> &, vec3<T> & out) { out.reset(); };
+		auto sup_b = [&](const vec3<T> & d, vec3<T> & out) {
+			T best {};
+			bool have = false;
+			for (const auto & p : pts) {
+				T s = dot(p, d);
+				if (!have || s > best) { best = s; out = p; have = true; }
+			}
+		};
+		T dist;
+		vec3<T> n, zero;
+		zero.reset();
+		bool deep = false;
+		gjk_core_distance<T>(sup_a, sup_b, zero, zero, tr::from_milli(1), dist, n, deep);
+		assert(!deep);
+		const float d = tr::to_float(dist);
+		// Converged: |v| (an upper bound) meets the support lower bound along v̂ = -n.
+		float lower = 1e30f;
+		for (const auto & p : c.pts)
+			lower = std::min(lower, -(p[0] * tr::to_float(n.x) + p[1] * tr::to_float(n.y) + p[2] * tr::to_float(n.z)));
+		const float gap = d - lower;
+		if (!f16)
+			assert(gap <= 0.0025f + 0.001f * d);
+		assert(std::fabs(d - c.dist) < (f16 ? 0.02f : 0.002f));
+	}
+	printf("cases=%zu OK\n", gjk_cloud_cases().size());
+}
+
 // Static rotation: a box solid rotated 90° about Y has its long (x) axis turned
 // into z, so a sphere swept in -x stops nearer than the unrotated box. Verifies
 // the orientation is honored AND that solid.orientation and shape.local_rotation
@@ -729,6 +1024,9 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_gjk_penetration_reports<T>(label);
 	test_ca_custom_closest<T>(label);
 	test_triangle_primitives<T>(label);
+	test_segment_segment_closest<T>(label);
+	test_degenerate_triangles<T>(label);
+	test_gjk_no_stall<T>(label);
 	test_gjk_solid_orientation<T>(label);
 	test_oriented_polytope<T>(label);
 	test_gjk_tetra_origin_outside<T>(label);
