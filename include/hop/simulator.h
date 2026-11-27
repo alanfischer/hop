@@ -657,6 +657,127 @@ private:
 	std::vector<typename constraint<T>::ptr> constraints_;
 	std::vector<solid<T> *> spacial_collection_;
 	int num_spacial_collection_ = 0;
+	// Speculative commit: move `solid_ptr` from `from` toward `to` against immovable
+	// solids and the manager's static geometry only, sliding along what it meets the
+	// way sweep_slide does, and remove the velocity into each surface it is stopped by.
+	// A surface the body starts inside is the position pass's to push it out of, so it
+	// does not stop the move — the move just may not go deeper into it. Dynamic
+	// partners are the solve's business, not this clamp's. `to` comes back as the
+	// committed position.
+	void clamp_to_static(solid<T> * solid_ptr, const vec3<T> & from, vec3<T> & to) {
+		const T zero = T {};
+		const T one = tr::one();
+		vec3<T> rem;
+		sub(rem, to, from);
+		// One gather covers every sub-sweep: sliding only shortens the remaining move.
+		aa_box<T> box(solid_ptr->world_bound_);
+		sub(box, solid_ptr->position_);
+		add(box, from);
+		const T m = tr::max_val(tr::abs(rem.x), tr::max_val(tr::abs(rem.y), tr::abs(rem.z))) + config_.epsilon;
+		box.mins.x -= m;
+		box.mins.y -= m;
+		box.mins.z -= m;
+		box.maxs.x += m;
+		box.maxs.y += m;
+		box.maxs.z += m;
+		num_spacial_collection_ =
+		    find_solids_in_aa_box(box, spacial_collection_.data(), static_cast<int>(spacial_collection_.size()));
+		const int bits = solid_ptr->collide_with_scope_;
+
+		auto stop_into = [&](const vec3<T> & n) { // remove the velocity into n
+			const T vn = dot(solid_ptr->velocity_, n);
+			if (vn < zero) {
+				vec3<T> cut;
+				mul(cut, n, vn);
+				sub(solid_ptr->velocity_, cut);
+			}
+		};
+		// Every plane met so far; the remaining move is clipped against all of them, and
+		// stops if it can't satisfy them all (as update_solid's slide does).
+		constexpr int max_planes = 5;
+		vec3<T> planes[max_planes];
+		int num_planes = 0;
+		auto add_plane = [&](const vec3<T> & n) -> bool {
+			if (num_planes == max_planes)
+				return false;
+			planes[num_planes++] = n;
+			const T dn = dot(rem, n);
+			if (dn < zero) {
+				vec3<T> cut;
+				mul(cut, n, dn);
+				sub(rem, cut);
+			}
+			stop_into(n);
+			for (int j = 0; j < num_planes - 1; ++j)
+				if (dot(rem, planes[j]) < -config_.epsilon)
+					return false;
+			return true;
+		};
+
+		vec3<T> pos(from);
+		for (int iter = 0; iter < max_planes && !too_small(rem, config_.epsilon); ++iter) {
+			segment<T> path;
+			vec3<T> end;
+			add(end, pos, rem);
+			path.set_start_end(pos, end);
+			collision<T> best, col;
+			best.time = one;
+			bool clipped = false, blocked = false;
+			auto consider = [&](const collision<T> & c) {
+				if (c.time >= one && c.depth <= zero)
+					return;
+				if (c.started_inside || c.depth > zero) {
+					if (dot(rem, c.normal) < zero) { // heading deeper in
+						clipped = true;
+						if (!add_plane(c.normal))
+							blocked = true;
+					}
+				} else if (c.time < best.time) {
+					best = c;
+				}
+			};
+			for (int i = 0; i < num_spacial_collection_ && !blocked; ++i) {
+				solid<T> * s2 = spacial_collection_[i];
+				if (s2 == solid_ptr || s2->inv_mass_ > zero || (bits & s2->collision_scope_) == 0)
+					continue;
+				if (!solid_ptr->should_collide(s2) || !s2->should_collide(solid_ptr))
+					continue;
+				col.reset();
+				col.time = one;
+				test_solid(col, solid_ptr, path, s2);
+				consider(col);
+			}
+			if (manager_ && !blocked) {
+				col.reset();
+				col.time = one;
+				manager_->trace_solid(col, solid_ptr, path, bits, zero);
+				consider(col);
+			}
+			if (blocked) {
+				rem.reset();
+				break;
+			}
+			if (clipped)
+				continue; // re-sweep the move with its inward part removed
+			if (best.time >= one) {
+				add(pos, rem);
+				rem.reset();
+				break;
+			}
+			// Stop epsilon short of the hit and slide the rest along it.
+			vec3<T> back, left;
+			calculate_epsilon_offset(back, rem, best.normal);
+			mul(left, rem, one - best.time);
+			add(pos, best.point, back);
+			rem = left;
+			if (!add_plane(best.normal)) {
+				rem.reset();
+				break;
+			}
+		}
+		to = pos;
+	}
+
 	// Scratch gather for traced_push when it moves a partner, so the mover's own
 	// spacial_collection_ survives for the rest of its sweep. Sized with it in add_solid.
 	std::vector<solid<T> *> pushout_collection_;
@@ -1549,6 +1670,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	// body, so it must start at zero whether or not the body gets contacts).
 	solid_ptr->pos_correction_.reset();
 	solid_ptr->rot_correction_.reset();
+	solid_ptr->joint_shift_.reset();
 
 	// Semi-implicit (symplectic) Euler: v += a(x, v)·dt, committed now; position
 	// is integrated in Pass B from the *solved* velocity. The high-order
@@ -1586,6 +1708,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 	cap_vec3(old_pos, config_.max_position_component);
 	vec3<T> delta;
 	mul(delta, v, dt);
+	solid_ptr->discovery_delta_ = delta;
 
 	// Broad phase over the swept motion plus the speculative margin. Use the cached
 	// world AABB (already rotate_aabb(local_bound_, orientation_) + position_, and
@@ -1787,13 +1910,15 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		col.reset();
 		col.time = one;
 		test_solid(col, solid_ptr, path, s2, config_.speculative_margin, intra_merge::average, true);
-		if (col.time >= one && col.depth <= zero && !s2->active_ && s2->inv_mass_ > zero) {
+		if (col.time >= one && col.depth <= zero && (s2->inv_mass_ <= zero || !s2->active_)) {
 			// The narrowphase does not report an overlap the mover is heading out of,
 			// and between two awake bodies that loses nothing: the one heading in
-			// reports it. A sleeper reports nothing, so a body resting under one — its
-			// own predicted motion is gravity's, away — would have no contact with it
-			// at all and could be pressed into it without limit. Ask again where it
-			// stands; a zero-length path is reported whichever way it faces.
+			// reports it. A partner that runs no discovery of its own reports nothing:
+			// a sleeper, or an immovable solid (a wall). A body resting under a sleeper
+			// — its own predicted motion is gravity's, away — or one whose own velocity
+			// points off a wall while the crowd behind it pushes it in, would have no
+			// contact at all and could be pressed through without limit. Ask again where
+			// it stands; a zero-length path is reported whichever way it faces.
 			segment<T> here;
 			here.set_start_end(old_pos, old_pos);
 			col.reset();
@@ -1820,12 +1945,58 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 		col.reset();
 		col.time = one;
 		manager_->trace_solid(col, solid_ptr, path, bits, config_.speculative_margin);
-		if (col.time < one || col.depth > zero) {
+		const bool path_hit = col.time < one || col.depth > zero;
+		// Static world geometry runs no discovery either, so also ask where the body
+		// stands, as for an immovable solid above. The manager returns one merged
+		// contact per query, so the sweep's answer can be a different surface from the
+		// one the body is being pressed into: a sphere on the floor, its own motion
+		// heading down and away from a wall, gets the floor back from the sweep and
+		// nothing for the wall the crowd is pushing it through.
+		collision<T> here_col;
+		bool here_hit = false;
+		if (delta.x != zero || delta.y != zero || delta.z != zero) {
+			segment<T> here;
+			here.set_start_end(old_pos, old_pos);
+			here_col.time = one;
+			manager_->trace_solid(here_col, solid_ptr, here, bits, config_.speculative_margin);
+			here_hit = here_col.time < one || here_col.depth > zero;
+		}
+		if (!path_hit && here_hit) {
+			col = here_col;
+			here_hit = false;
+		}
+		if (path_hit || col.time < one || col.depth > zero) {
 			// No owning solid: resolve against the immovable world anchor. If the
 			// manager attached a real collider, prefer it as the partner. The manager
-			// interface returns a single merged contact by design (see manager.h), so
-			// this partner is always a one-point manifold.
+			// interface returns a single merged contact by design (see manager.h).
 			build_manifold(nullptr);
+			if (here_hit && here_col.collider == col.collider &&
+			    dot(here_col.normal, col.normal) < tr::from_milli(950)) {
+				// A second surface: its points join the same partner's manifold (one
+				// slot per partner), each point keeping its own normal and gap.
+				// Callbacks and collision_response still see the sweep's contact.
+				contact_point<T> first[max_manifold_points];
+				const int first_count = manifold_count;
+				for (int i = 0; i < first_count; ++i)
+					first[i] = manifold[i];
+				const collision<T> swept = col;
+				col = here_col;
+				build_manifold(nullptr);
+				const int extra = manifold_count;
+				contact_point<T> second[max_manifold_points];
+				for (int i = 0; i < extra; ++i)
+					second[i] = manifold[i];
+				manifold_count = 0;
+				for (int i = 0; i < first_count && manifold_count < max_manifold_points; ++i)
+					manifold[manifold_count++] = first[i];
+				for (int i = 0; i < extra && manifold_count < max_manifold_points; ++i) {
+					manifold[manifold_count] = second[i];
+					manifold[manifold_count].id ^= 0x80000000u; // distinct from the sweep's ids
+					++manifold_count;
+				}
+				manifold_is_shared = false;
+				col = swept;
+			}
 			record_contact(col.collider ? col.collider : &static_world_);
 		}
 	}
@@ -1854,6 +2025,33 @@ template <typename T> void simulator<T>::commit_solid(solid<T> * solid_ptr, T dt
 	add(new_pos, old_pos, delta);
 	add(new_pos, solid_ptr->pos_correction_);  // NGS pseudo-position correction
 	cap_vec3(new_pos, config_.max_position_component);
+
+	// Discovery only knows the contacts within speculative_margin of the body's OWN
+	// predicted path. The solve can carry it well off that path — the crowd behind
+	// pushes a body whose own velocity pointed away from a wall — and nothing then
+	// stops it at geometry it never discovered. When the committed move leaves the
+	// region discovery covered, sweep it against immovable geometry and stop at the
+	// first hit. A move inside that region (the usual case) is committed as before.
+	//
+	// A joint's projection is exempt: it moves an end into geometry on purpose when
+	// both ends are held (see project_joints), so its share is set aside, the rest is
+	// checked, and the share is added back.
+	if (solid_ptr->collide_with_scope_ != 0) {
+		sub(new_pos, solid_ptr->joint_shift_);
+		vec3<T> rel, closest, off;
+		sub(rel, new_pos, old_pos);
+		const vec3<T> & pred = solid_ptr->discovery_delta_;
+		const T den = length_squared(pred);
+		closest.reset();
+		if (den > tr::epsilon_squared(config_.epsilon))
+			mul(closest, pred, project_unit_ratio(dot(pred, rel), den)); // clamped before dividing
+		sub(off, rel, closest);
+		const T reach = config_.speculative_margin;
+		if (length_squared(off) > reach * reach)
+			clamp_to_static(solid_ptr, old_pos, new_pos);
+		add(new_pos, solid_ptr->joint_shift_);
+		cap_vec3(new_pos, config_.max_position_component);
+	}
 
 	try_deactivate(solid_ptr, new_pos, dt);
 	solid_ptr->set_position_direct(new_pos);
@@ -2227,8 +2425,10 @@ template <typename T> void simulator<T>::project_joints() {
 			mul(fix, err, (error - tolerance) / error);
 			if (mover_is_start) {
 				sub(mover->pos_correction_, fix);
+				sub(mover->joint_shift_, fix);
 			} else {
 				add(mover->pos_correction_, fix);
+				add(mover->joint_shift_, fix);
 			}
 			mover->projected_tick_ = current_tick_;
 		}
@@ -2515,18 +2715,33 @@ typename solid<T>::touch * simulator<T>::add_or_refresh_manifold(
 		if (s->touch_count_ < solid<T>::max_touches) {
 			found = &s->touches_[s->touch_count_++];
 		} else {
-			// Cache full: evict the slot contributing least to gravity-aligned support
-			// (smallest dot(normal, -gravity)), tie-broken by oldest last_tick. For
-			// zero-gravity scenes every score is zero so eviction falls back to age.
+			// Cache full. Evict, in order of preference:
+			//  1. a stale slot — not refreshed this tick or last, so no longer a contact;
+			//  2. a dynamic partner's slot before an immovable one's: a dynamic partner
+			//     holds the same contact in its own table and the solve builds the pair
+			//     from either side, but a wall, floor or the manager's world runs no
+			//     discovery, so this slot is the only record of that contact. Losing it
+			//     let a crowd press a body through a wall it was touching;
+			//  3. the slot contributing least to gravity-aligned support (smallest
+			//     dot(normal, -gravity)), tie-broken by oldest last_tick. For zero-gravity
+			//     scenes every score is zero so this falls back to age.
+			auto rank = [&](const typename solid<T>::touch & t) {
+				if (t.last_tick < tick - 1)
+					return 0;
+				return (t.partner && t.partner->inv_mass_ <= zero_val) ? 2 : 1;
+			};
 			int evict = 0;
 			T best_score {};
+			int best_rank = 0;
 			bool have_score = false;
 			for (int i = 0; i < solid<T>::max_touches; ++i) {
+				const int r = rank(s->touches_[i]);
 				T score = -dot(s->touches_[i].normal, gravity_);
-				if (!have_score || score < best_score ||
-				    (score == best_score && s->touches_[i].last_tick < s->touches_[evict].last_tick)) {
+				if (!have_score || r < best_rank || (r == best_rank && score < best_score) ||
+				    (r == best_rank && score == best_score && s->touches_[i].last_tick < s->touches_[evict].last_tick)) {
 					evict = i;
 					best_score = score;
+					best_rank = r;
 					have_score = true;
 				}
 			}

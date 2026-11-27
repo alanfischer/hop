@@ -2481,6 +2481,186 @@ template <typename T> static void test_touching_rounded_slides(const char * labe
 	printf("  touching_rounded_slides[%s]: OK\n", label);
 }
 
+// A body touching a wall and more neighbours than its contact table holds must keep
+// the wall. A dynamic neighbour holds the same contact in its own table and the solve
+// builds the pair from either side, but the wall runs no discovery: evict its slot
+// and the contact is gone, and a crowd presses the body through. The old eviction
+// ranked only by gravity support, and in a crowd every side contact scores ~0.
+template <typename T> static void test_full_contact_table_keeps_the_wall(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  full_contact_table_keeps_the_wall[%s]: ", label);
+	simulator<T> sim;
+	sim.set_gravity(vec3<T>());
+	auto wall = std::make_shared<solid<T>>();
+	wall->set_infinite_mass();
+	wall->set_coefficient_of_gravity(T {});
+	wall->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(tr::from_milli(400) + tr::from_milli(1) / tr::from_int(4), -tr::from_int(5), -tr::from_int(5)),
+	                                                      vec3<T>(tr::from_int(2), tr::from_int(5), tr::from_int(5)))));
+	sim.add_solid(wall);
+	auto ball = [&](const vec3<T> & p, T r) {
+		auto b = std::make_shared<solid<T>>();
+		b->set_mass(tr::one());
+		b->set_contact_mode(contact_mode::speculative);
+		b->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(r)));
+		b->set_position(p);
+		sim.add_solid(b);
+		return b;
+	};
+	auto centre = ball(vec3<T>(), tr::from_milli(400)); // 0.25 mm off the wall
+	// Small neighbours on a shell 1 mm off the centre ball, away from the wall side:
+	// more of them than max_touches, all within the speculative margin.
+	std::vector<std::shared_ptr<solid<T>>> keep;
+	const float golden = 2.39996323f;
+	for (int i = 0, placed = 0; placed < solid<T>::max_touches + 4 && i < 64; ++i) {
+		const float z = 1.0f - 2.0f * (i + 0.5f) / 64.0f, rr = sqrtf(1.0f - z * z), a = golden * i;
+		const float x = rr * cosf(a), y = rr * sinf(a);
+		if (x > 0.2f)
+			continue; // leave the wall side clear
+		const float d = 0.501f;
+		keep.push_back(ball(vec3<T>(tr::from_milli((int)lroundf(x * d * 1000)), tr::from_milli((int)lroundf(y * d * 1000)),
+		                            tr::from_milli((int)lroundf(z * d * 1000))),
+		                    tr::from_milli(100)));
+		++placed;
+	}
+	bool kept = true;
+	for (int tick = 0; tick < 5; ++tick) {
+		centre->set_velocity(vec3<T>()); // held still, so every contact stays in range
+		for (auto & k : keep)
+			k->set_velocity(vec3<T>());
+		sim.update(tr::from_milli(16));
+		bool has_wall = false;
+		for (int i = 0; i < centre->get_touch_count(); ++i)
+			if (centre->get_touch(i).partner == wall.get())
+				has_wall = true;
+		kept = kept && has_wall;
+	}
+	printf("touches=%d wall_kept=%d ", centre->get_touch_count(), kept);
+	assert(centre->get_touch_count() == solid<T>::max_touches); // the table really is full
+	assert(kept);
+	printf("OK\n");
+}
+
+// A room of manager-owned planes (floor z = 0, walls x = ±H, y = ±H): external world
+// geometry like a BSP level, not solids. It follows the traceable contract — a body
+// already inside a plane is reported only if it is heading further in, or for a
+// zero-length query — so a body whose own motion points off a wall gets no contact
+// from its sweep, which is exactly the case speculative discovery has to ask about.
+template <typename T> class manager_room : public hop::manager<T> {
+	using tr = scalar_traits<T>;
+
+public:
+	T half;
+	explicit manager_room(T h) : half(h) {}
+	int find_solids_in_aa_box(const aa_box<T> &, solid<T> *[], int, int) override { return -1; }
+	void trace_segment(collision<T> &, const segment<T> &, int) override {}
+	void trace_solid(collision<T> & result, solid<T> * s, const segment<T> & seg, int, T margin) override {
+		const T zero {};
+		aa_box<T> b;
+		b.mins = b.maxs = vec3<T>();
+		bool first = true;
+		for (auto & shape : s->get_shapes()) {
+			aa_box<T> sb;
+			shape->get_bound(sb);
+			if (first) {
+				b = sb;
+				first = false;
+			} else {
+				b.mins.x = tr::min_val(b.mins.x, sb.mins.x); b.mins.y = tr::min_val(b.mins.y, sb.mins.y);
+				b.mins.z = tr::min_val(b.mins.z, sb.mins.z); b.maxs.x = tr::max_val(b.maxs.x, sb.maxs.x);
+				b.maxs.y = tr::max_val(b.maxs.y, sb.maxs.y); b.maxs.z = tr::max_val(b.maxs.z, sb.maxs.z);
+			}
+		}
+		const bool still = seg.direction.x == zero && seg.direction.y == zero && seg.direction.z == zero;
+		// Each plane as (outward normal n, how far the body's leading face is past it at
+		// the segment start, and the closing speed along -n).
+		struct pl { vec3<T> n; T past; T closing; };
+		const T one = tr::one();
+		const pl planes[5] = {
+			{ { zero, zero, one }, (margin - (seg.origin.z + b.mins.z)), -seg.direction.z },
+			{ { -one, zero, zero }, (seg.origin.x + b.maxs.x) - (half - margin), seg.direction.x },
+			{ { one, zero, zero }, (-half + margin) - (seg.origin.x + b.mins.x), -seg.direction.x },
+			{ { zero, -one, zero }, (seg.origin.y + b.maxs.y) - (half - margin), seg.direction.y },
+			{ { zero, one, zero }, (-half + margin) - (seg.origin.y + b.mins.y), -seg.direction.y },
+		};
+		for (const pl & p : planes) {
+			if (p.past >= zero) { // starts inside the inflated plane
+				if ((still || p.closing > zero) && (result.time > zero || p.past > result.depth)) {
+					result.time = zero;
+					result.point.set(seg.origin);
+					result.normal = p.n;
+					result.depth = p.past;
+					result.started_inside = true;
+				}
+			} else if (p.closing > zero && -p.past <= p.closing) { // reached within the segment
+				const T t = (-p.past) / p.closing; // in [0, 1]: no fixed-point overflow
+				if (t < result.time) {
+					result.time = t;
+					mul(result.point, seg.direction, t);
+					add(result.point, seg.origin);
+					result.normal = p.n;
+				}
+			}
+		}
+	}
+	void pre_update(T) override {}
+	void post_update(T) override {}
+	void pre_update(solid<T> *, T) override {}
+	void intra_update(solid<T> *, T) override {}
+	bool collision_response(solid<T> *, vec3<T> &, vec3<T> &, collision<T> &) override { return false; }
+	void post_update(solid<T> *, T) override {}
+};
+
+// #121 against manager geometry: the speculative crowd of test_crowd_stays_out_of_walls,
+// in a room whose walls belong to the manager. Penetration is read off each body's
+// world bound, which is exact for these axis-aligned planes and shapes.
+template <typename T> static void test_crowd_stays_out_of_manager_walls(const char * label, int kind, float limit) {
+	using tr = scalar_traits<T>;
+	const T H = tr::from_int(4), one = tr::one(), r = tr::from_milli(400);
+	simulator<T> sim;
+	manager_room<T> room(H);
+	sim.set_manager(&room);
+	std::vector<std::shared_ptr<solid<T>>> actors;
+	for (int i = 0; i < 30; ++i) {
+		auto a = std::make_shared<solid<T>>();
+		a->set_mass(one);
+		a->set_coefficient_of_restitution(T {});
+		a->set_contact_mode(contact_mode::speculative);
+		if (kind == 0)
+			a->add_shape(std::make_shared<shape<T>>(aa_box<T>({ -r, -r, T {} }, { r, r, tr::from_milli(1400) })));
+		else
+			a->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(r)));
+		a->set_position({ tr::from_milli(-3400 + (i % 6) * 1200), tr::from_milli(-3400 + (i / 6) * 1200),
+		                  kind == 1 ? tr::from_milli(410) : tr::from_milli(10) });
+		sim.add_solid(a);
+		actors.push_back(a);
+	}
+	const vec3<T> goal(H - tr::half(), H - tr::half(), T {});
+	float worst = 0;
+	for (int tick = 0; tick < 400; ++tick) {
+		for (auto & a : actors) {
+			const vec3<T> p = a->get_position();
+			vec3<T> d(goal.x - p.x, goal.y - p.y, T {});
+			T l = length(d);
+			if (l > tr::from_milli(10))
+				mul(d, tr::from_int(6) / l);
+			a->set_velocity({ d.x, d.y, a->get_velocity().z });
+			a->activate();
+		}
+		sim.update(tr::from_milli(25));
+		const float h = tr::to_float(H);
+		for (auto & a : actors) {
+			const auto & b = a->get_world_bound();
+			const float pen[5] = { -tr::to_float(b.mins.z), tr::to_float(b.maxs.x) - h, -h - tr::to_float(b.mins.x),
+			                       tr::to_float(b.maxs.y) - h, -h - tr::to_float(b.mins.y) };
+			for (float d : pen)
+				worst = std::max(worst, d);
+		}
+	}
+	printf("  crowd_stays_out_of_manager_walls[%s %s]: worst wall penetration %.5f (limit %.4f)\n", label,
+	       kind ? "sphere" : "box", worst, limit);
+	assert(worst < limit);
+}
+
 // The #117 piling scene: a crowd of sweep_slide actors whose velocity the game
 // overwrites every tick to drive them into a room corner. Every actor must stay out of
 // the static walls. Before the fix, a body wedged between a wall and a neighbour
@@ -2488,7 +2668,9 @@ template <typename T> static void test_touching_rounded_slides(const char * labe
 // untraced nudge into the wall; the frame-start push-out shoved partners into walls
 // without a trace; and a slide that turned back past the start swept into a wall the
 // broadphase (centred on the integrated end) never gathered.
-template <typename T> static void test_crowd_stays_out_of_walls(const char * label, int kind, float limit) {
+template <typename T>
+static void test_crowd_stays_out_of_walls(const char * label, int kind, float limit,
+                                          contact_mode mode = contact_mode::sweep_slide) {
 	using tr = scalar_traits<T>;
 	enum { WORLD = 1, ACTOR = 2 };
 	simulator<T> sim;
@@ -2516,7 +2698,7 @@ template <typename T> static void test_crowd_stays_out_of_walls(const char * lab
 		a->set_mass(one);
 		a->set_coefficient_of_restitution(T {});
 		a->set_collision_scope(ACTOR);
-		a->set_contact_mode(contact_mode::sweep_slide);
+		a->set_contact_mode(mode);
 		if (kind == 0)
 			a->add_shape(std::make_shared<shape<T>>(aa_box<T>({ -r, -r, T {} }, { r, r, tr::from_milli(1400) })));
 		else if (kind == 1)
@@ -2552,7 +2734,8 @@ template <typename T> static void test_crowd_stays_out_of_walls(const char * lab
 		}
 	}
 	const char * names[] = { "box", "sphere", "capsule" };
-	printf("  crowd_stays_out_of_walls[%s %s]: worst wall penetration %.5f (limit %.4f)\n", label, names[kind], worst, limit);
+	printf("  crowd_stays_out_of_walls[%s %s %s]: worst wall penetration %.5f (limit %.4f)\n", label,
+	       mode == contact_mode::speculative ? "speculative" : "sweep_slide", names[kind], worst, limit);
 	assert(worst < limit);
 }
 
@@ -2614,6 +2797,21 @@ int main() {
 	test_touching_rounded_slides<fixed32>("fixed32");
 	for (int kind = 0; kind < 3; ++kind)
 		test_crowd_stays_out_of_walls<fixed32>("fixed32", kind, 0.0005f);
+	// #121: the same crowd in speculative mode went up to 0.9 m into the walls (a box
+	// ended up through one). Speculative contacts rest within a slop and the solve is
+	// iterative, so the limit is looser than sweep_slide's exact sweep.
+	for (int kind = 0; kind < 3; ++kind) {
+		test_crowd_stays_out_of_walls<float>("float", kind, 0.015f, contact_mode::speculative);
+		test_crowd_stays_out_of_walls<fixed32>("fixed32", kind, 0.015f, contact_mode::speculative);
+	}
+	test_full_contact_table_keeps_the_wall<float>("float");
+	test_full_contact_table_keeps_the_wall<fixed32>("fixed32");
+	// ...and against manager-owned walls (a BSP level's case), which on main the crowd
+	// went 2 m through.
+	for (int kind = 0; kind < 2; ++kind) {
+		test_crowd_stays_out_of_manager_walls<float>("float", kind, 0.015f);
+		test_crowd_stays_out_of_manager_walls<fixed32>("fixed32", kind, 0.015f);
+	}
 
 	printf("test_simulator (fixed16):\n");
 	test_dual_instantiation<fixed16>();
@@ -2680,6 +2878,11 @@ int main() {
 	// up to ~1.8 mm into the walls. The limit is ~12 epsilons, against 27.8 mm on main.
 	for (int kind = 0; kind < 3; ++kind)
 		test_crowd_stays_out_of_walls<fixed16>("fixed16", kind, 0.003f);
+	for (int kind = 0; kind < 3; ++kind)
+		test_crowd_stays_out_of_walls<fixed16>("fixed16", kind, 0.015f, contact_mode::speculative);
+	test_full_contact_table_keeps_the_wall<fixed16>("fixed16");
+	for (int kind = 0; kind < 2; ++kind)
+		test_crowd_stays_out_of_manager_walls<fixed16>("fixed16", kind, 0.015f);
 
 	printf("ALL PASSED\n");
 	return 0;
