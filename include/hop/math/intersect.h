@@ -67,9 +67,22 @@ inline T find_intersection(const segment<T> & seg, const sphere<T> & sph, vec3<T
 		return tr::one();
 	} else if (discr > zero_val) {
 		T root = tr::sqrt(discr);
-		T inv_a = tr::one() / a;
-		time1 = ((-b) - root) * inv_a;
-		T time2 = ((-b) + root) * inv_a;
+		T time2;
+		if constexpr (is_fixed_scalar<T>::value) {
+			// A near-zero-length segment makes 1/a overflow: fixed32's divide faults on
+			// MSVC (_div128) and truncates on GCC. Only times in [0, 1] can hit, so test
+			// the numerators against a first; every divide that remains has a quotient
+			// of at most 1.
+			const T n1 = (-b) - root, n2 = (-b) + root;
+			if (n1 > a || n2 < zero_val || (n1 < zero_val && n2 > a))
+				return tr::one();
+			time1 = n1 >= zero_val ? n1 / a : -tr::one(); // negative: exit-point branch below
+			time2 = n2 / a;
+		} else {
+			T inv_a = tr::one() / a;
+			time1 = ((-b) - root) * inv_a;
+			time2 = ((-b) + root) * inv_a;
+		}
 
 		if (time1 > tr::one() || time2 < zero_val) {
 			return tr::one();
@@ -83,6 +96,10 @@ inline T find_intersection(const segment<T> & seg, const sphere<T> & sph, vec3<T
 			add(point, so);
 		}
 	} else {
+		if constexpr (is_fixed_scalar<T>::value) {
+			if (-b < zero_val || -b > a) // outside [0, 1]; dividing could overflow
+				return tr::one();
+		}
 		time1 = (-b) / a;
 		if (zero_val <= time1 && time1 <= tr::one()) {
 			mul(point, sd, time1);
