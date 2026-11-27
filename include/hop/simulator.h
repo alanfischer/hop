@@ -483,9 +483,10 @@ public:
 	// `mode` selects how equal-time hits on several of s2's shapes fold into the one
 	// reported contact (see hop::intra_merge). The solver's default is `average`;
 	// overlap/rest queries want `deepest` so their single contact is a real surface.
+	// `discovery` marks speculative margin-shell discovery; see hop::test_solid.
 	void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T margin = T {},
-	                intra_merge mode = intra_merge::average) {
-		hop::test_solid(result, s1, seg, s2, config_.epsilon, margin, config_.accurate_narrowphase, mode);
+	                intra_merge mode = intra_merge::average, bool discovery = false) {
+		hop::test_solid(result, s1, seg, s2, config_.epsilon, margin, config_.accurate_narrowphase, mode, discovery);
 	}
 
 	int count_active_solids() const {
@@ -1359,9 +1360,14 @@ template <typename T> void simulator<T>::update_solid(solid<T> * solid_ptr, T dt
 			// wall and a neighbour) ping-pongs until max_collision_iterations. Keep every
 			// plane hit this call: if the clipped motion re-enters an earlier one, slide
 			// along the crease of the two; if a third still blocks, stop (Quake's
-			// SV_FlyMove). One contact takes exactly the old path.
-			if (num_slide_planes < max_slide_planes)
-				slide_planes[num_slide_planes++] = c.normal;
+			// SV_FlyMove). One contact takes exactly the old path. A full list stops the
+			// body too: the newest plane couldn't be recorded, so the clip below would
+			// build creases from a stale "newest" and never check this contact.
+			if (num_slide_planes == max_slide_planes) {
+				new_pos.set(old_pos);
+				break;
+			}
+			slide_planes[num_slide_planes++] = c.normal;
 			bool clear = true;
 			for (int j = 0; j < num_slide_planes - 1; ++j)
 				if (dot(left_over, slide_planes[j]) < -config_.epsilon) {
@@ -1780,7 +1786,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 
 		col.reset();
 		col.time = one;
-		test_solid(col, solid_ptr, path, s2, config_.speculative_margin);
+		test_solid(col, solid_ptr, path, s2, config_.speculative_margin, intra_merge::average, true);
 		if (col.time >= one && col.depth <= zero && !s2->active_ && s2->inv_mass_ > zero) {
 			// The narrowphase does not report an overlap the mover is heading out of,
 			// and between two awake bodies that loses nothing: the one heading in
@@ -1792,7 +1798,7 @@ template <typename T> void simulator<T>::integrate_and_discover(solid<T> * solid
 			here.set_start_end(old_pos, old_pos);
 			col.reset();
 			col.time = one;
-			test_solid(col, solid_ptr, here, s2, config_.speculative_margin);
+			test_solid(col, solid_ptr, here, s2, config_.speculative_margin, intra_merge::average, true);
 		}
 		if (col.time >= one && col.depth <= zero)
 			continue; // not within the inflated shell and not swept into this tick

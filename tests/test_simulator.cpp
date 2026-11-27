@@ -2488,7 +2488,7 @@ template <typename T> static void test_touching_rounded_slides(const char * labe
 // untraced nudge into the wall; the frame-start push-out shoved partners into walls
 // without a trace; and a slide that turned back past the start swept into a wall the
 // broadphase (centred on the integrated end) never gathered.
-template <typename T> static void test_crowd_stays_out_of_walls(const char * label, int kind) {
+template <typename T> static void test_crowd_stays_out_of_walls(const char * label, int kind, float limit) {
 	using tr = scalar_traits<T>;
 	enum { WORLD = 1, ACTOR = 2 };
 	simulator<T> sim;
@@ -2552,8 +2552,8 @@ template <typename T> static void test_crowd_stays_out_of_walls(const char * lab
 		}
 	}
 	const char * names[] = { "box", "sphere", "capsule" };
-	printf("  crowd_stays_out_of_walls[%s %s]: worst wall penetration %.5f\n", label, names[kind], worst);
-	assert(worst < 0.0005f);
+	printf("  crowd_stays_out_of_walls[%s %s]: worst wall penetration %.5f (limit %.4f)\n", label, names[kind], worst, limit);
+	assert(worst < limit);
 }
 
 int main() {
@@ -2610,7 +2610,10 @@ int main() {
 	test_pile_comes_to_rest<float>("float");
 	test_touching_rounded_slides<float>("float");
 	for (int kind = 0; kind < 3; ++kind)
-		test_crowd_stays_out_of_walls<float>("float", kind);
+		test_crowd_stays_out_of_walls<float>("float", kind, 0.0005f);
+	test_touching_rounded_slides<fixed32>("fixed32");
+	for (int kind = 0; kind < 3; ++kind)
+		test_crowd_stays_out_of_walls<fixed32>("fixed32", kind, 0.0005f);
 
 	printf("test_simulator (fixed16):\n");
 	test_dual_instantiation<fixed16>();
@@ -2672,6 +2675,11 @@ int main() {
 	test_landed_body_rests_on_surface<fixed16>("fixed16");
 	test_awake_body_collides_with_sleeper_above<fixed16>("fixed16");
 	test_pile_comes_to_rest<fixed16>("fixed16");
+	test_touching_rounded_slides<fixed16>("fixed16");
+	// fixed16's default epsilon is 1/4096 (~0.24 mm) and its sphere crowd still settles
+	// up to ~1.8 mm into the walls. The limit is ~12 epsilons, against 27.8 mm on main.
+	for (int kind = 0; kind < 3; ++kind)
+		test_crowd_stays_out_of_walls<fixed16>("fixed16", kind, 0.003f);
 
 	printf("ALL PASSED\n");
 	return 0;

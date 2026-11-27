@@ -81,11 +81,11 @@ void trace_aa_box(collision<T> & c, const segment<T> & seg, const aa_box<T> & bo
 	}
 }
 
-template <typename T>
-// `exact` is the margin-0 swept query (sweep_slide, public trace_solid): a mover that
+// `exact` is the exact swept query (sweep_slide, public trace_solid): a mover that
 // starts touching is blocked only if it heads INTO the sphere, as in trace_aa_box.
 // Margin-shell discovery (speculative) passes false and keeps reporting a contact the
 // mover is not leaving by more than epsilon — that is what discovering it means.
+template <typename T>
 void trace_sphere(collision<T> & c, const segment<T> & seg, const sphere<T> & sph, T epsilon, bool exact = false) {
 	using tr = scalar_traits<T>;
 	if (test_inside(sph, seg.origin)) {
@@ -2280,9 +2280,13 @@ void test_segment(collision<T> & result, const segment<T> & seg, solid<T> * s, T
 // intra_merge. The default (average) is what the solver has always got; an
 // overlap/rest QUERY should pass `deepest` so its one reported contact is a real
 // surface rather than a blend of two.
+// `discovery` is speculative margin-shell discovery, which keeps reporting tangent and
+// near contacts (see trace_sphere's `exact`). Everything else (sweep_slide, public
+// queries) is an exact swept query. An explicit flag rather than `margin > 0`, so a
+// speculative_margin of 0 doesn't silently switch speculative bodies to the exact path.
 template <typename T>
 void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, solid<T> * s2, T epsilon, T margin = T {}, bool use_gjk = true,
-                intra_merge mode = intra_merge::average) {
+                intra_merge mode = intra_merge::average, bool discovery = false) {
 	using tr = scalar_traits<T>;
 	collision<T> col;
 	col.collider = s2;
@@ -2304,9 +2308,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 				p.distance = p.distance + margin;
 	};
 
-	// margin == 0 is the exact swept query (sweep_slide, public trace_solid); a positive
-	// margin is speculative margin-shell discovery. See trace_sphere's `exact`.
-	const bool exact = !(margin > zero_val);
+	const bool exact = !discovery;
 
 	// Squared segment length is invariant across all shape pairs in this call;
 	// hoist it for the sphere/sphere fast reject below.
