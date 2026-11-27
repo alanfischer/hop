@@ -5,9 +5,11 @@
 //   - bounding (an unbounded/open convex must not phantom-block from afar).
 // Run in float, fixed16 and fixed32 so the fixed-point build is covered too.
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <type_traits>
 #include <hop/collide.h> // gjk_core_support / trace_pair_convex_gjk live here
 #include <hop/hop.h>
 
@@ -495,6 +497,198 @@ template <typename T> static void test_triangle_primitives(const char * label) {
 	printf("OK\n");
 }
 
+// --- issue #118 regressions -------------------------------------------------
+
+// Reference distance between two segments: the distance from seg1(u) to seg2 is
+// convex in u, so a ternary search (in double, with an exact point-to-segment
+// projection onto seg2) converges to the true minimum.
+static float ref_segment_distance(const float o1[3], const float d1[3], const float o2[3], const float d2[3]) {
+	const double dd2 = double(d2[0]) * d2[0] + double(d2[1]) * d2[1] + double(d2[2]) * d2[2];
+	auto f = [&](double u) {
+		const double p[3] = {o1[0] + u * d1[0], o1[1] + u * d1[1], o1[2] + u * d1[2]};
+		double t = dd2 > 0 ? ((p[0] - o2[0]) * d2[0] + (p[1] - o2[1]) * d2[1] + (p[2] - o2[2]) * d2[2]) / dd2 : 0;
+		t = t < 0 ? 0 : (t > 1 ? 1 : t);
+		const double q[3] = {o2[0] + t * d2[0] - p[0], o2[1] + t * d2[1] - p[1], o2[2] + t * d2[2] - p[2]};
+		return std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+	};
+	double lo = 0, hi = 1;
+	for (int i = 0; i < 200; ++i) {
+		const double m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3;
+		if (f(m1) < f(m2)) hi = m2; else lo = m1;
+	}
+	return static_cast<float>(std::min(f(0.5 * (lo + hi)), std::min(f(0.0), f(1.0))));
+}
+
+template <typename T> static float seg_seg_distance(const float o1[3], const float d1[3], const float o2[3],
+                                                    const float d2[3]) {
+	using tr = scalar_traits<T>;
+	segment<T> s1, s2;
+	s1.origin = v3<T>(o1[0], o1[1], o1[2]);
+	s1.direction = v3<T>(d1[0], d1[1], d1[2]);
+	s2.origin = v3<T>(o2[0], o2[1], o2[2]);
+	s2.direction = v3<T>(d2[0], d2[1], d2[2]);
+	vec3<T> p1, p2, diff;
+	project(p1, p2, s1, s2, tr::from_milli(1));
+	sub(diff, p1, p2);
+	const float dist = tr::to_float(length(diff));
+	assert(std::isfinite(dist));
+	return dist;
+}
+
+// Segment-segment closest pair (math/project.h). The parallel test used to be an
+// absolute denom < 1e-3, and denom scales with length⁴, so short segments up to
+// ~16° apart took the "parallel" path and reported a pair that isn't the closest.
+template <typename T> static void test_segment_segment_closest(const char * label) {
+	printf("  segment_segment_closest[%s]: ", label);
+	// fixed16's 16.16 format limits the solve to ~mm; float and fixed32 are exact.
+	const float tol = std::is_same<T, fixed16>::value ? 1e-2f : 1e-3f;
+
+	// The issue's case: a 0.37 crouched-capsule spine crossed at 15° by a 0.3 edge.
+	// They intersect (distance 0); the old code reported ~0.039.
+	{
+		const float th = 15.0f * 3.14159265f / 180.0f, cx = cosf(th), sy = sinf(th);
+		const float o1[3] = {0, 0, 0}, d1[3] = {0.37f, 0, 0};
+		const float o2[3] = {0.3f - 0.15f * cx, -0.15f * sy, 0}, d2[3] = {0.3f * cx, 0.3f * sy, 0};
+		const float dist = seg_seg_distance<T>(o1, d1, o2, d2);
+		printf("cross15=%.4f ", dist);
+		assert(dist < tol);
+	}
+
+	// Long spine vs a short per-tick motion segment (trace_capsule's shape of call).
+	{
+		const float o1[3] = {0, 0, 0}, d1[3] = {1, 0, 0};
+		const float o2[3] = {0.4f, 0.1f, 0.0f}, d2[3] = {0.05f * 0.96f, -0.05f * 0.28f, 0};
+		const float dist = seg_seg_distance<T>(o1, d1, o2, d2);
+		const float ref = ref_segment_distance(o1, d1, o2, d2);
+		printf("spine_vs_motion=%.4f(ref %.4f) ", dist, ref);
+		assert(std::fabs(dist - ref) < tol);
+	}
+
+	// A segment shorter than √epsilon must not collapse to its origin (a and c are
+	// squared lengths; they used to be compared against epsilon, not epsilon²).
+	{
+		const float o1[3] = {-0.015f, 0, 0}, d1[3] = {0.03f, 0, 0};
+		const float o2[3] = {0, 0, -0.5f}, d2[3] = {0, 0, 1};
+		const float dist = seg_seg_distance<T>(o1, d1, o2, d2);
+		printf("short=%.4f ", dist);
+		assert(dist < tol); // they cross; the old code reported 0.015
+	}
+
+	// Exactly parallel: overlapping (distance = offset) and end-to-end (gap).
+	{
+		const float o1[3] = {0, 0, 0}, d1[3] = {1, 0, 0};
+		const float o2[3] = {0.25f, 0.1f, 0}, d2[3] = {1, 0, 0};
+		assert(std::fabs(seg_seg_distance<T>(o1, d1, o2, d2) - 0.1f) < tol);
+		const float o3[3] = {1.5f, 0, 0};
+		assert(std::fabs(seg_seg_distance<T>(o1, d1, o3, d1) - 0.5f) < tol);
+	}
+
+	// Seeded sweep of near-parallel pairs at short-to-medium lengths.
+	unsigned seed = 12345u;
+	auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return ((seed >> 8) & 0xFFFF) / 32767.5f - 1.0f; };
+	float worst = 0;
+	for (float L : {0.1f, 0.2f, 0.4f, 1.0f}) {
+		for (int k = 0; k < 300; ++k) {
+			float d1[3] = {rnd(), rnd(), rnd()};
+			float n1 = sqrtf(d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2]) + 1e-6f;
+			float d2[3];
+			for (int i = 0; i < 3; ++i) {
+				d1[i] = d1[i] / n1 * L;
+				d2[i] = d1[i] * 0.8f + rnd() * 0.15f * L;
+			}
+			const float o1[3] = {lroundf(rnd() * 500) / 1000.0f, lroundf(rnd() * 500) / 1000.0f, lroundf(rnd() * 500) / 1000.0f};
+			float o2[3] = {o1[0] + rnd() * 0.3f * L, o1[1] + rnd() * 0.3f * L, o1[2] + rnd() * 0.3f * L};
+			// v3<T> builds from milli units, so quantize first: both sides then see the same segments.
+			for (int i = 0; i < 3; ++i) {
+				d1[i] = lroundf(d1[i] * 1000) / 1000.0f;
+				d2[i] = lroundf(d2[i] * 1000) / 1000.0f;
+				o2[i] = lroundf(o2[i] * 1000) / 1000.0f;
+			}
+			const float err = seg_seg_distance<T>(o1, d1, o2, d2) - ref_segment_distance(o1, d1, o2, d2);
+			worst = std::max(worst, std::fabs(err));
+		}
+	}
+	printf("sweep_worst=%.5f ", worst);
+	assert(worst < tol);
+
+	// Long segments: the degree-4 products overflowed fixed16 (40² · 40² ≫ 32767)
+	// before the power-of-two rescale; two perpendicular 40-long spines 1 apart.
+	{
+		const float o1[3] = {-20, 0, 0}, d1[3] = {40, 0, 0};
+		const float o2[3] = {5, 1, -20}, d2[3] = {0, 0, 40};
+		const float dist = seg_seg_distance<T>(o1, d1, o2, d2);
+		printf("long=%.4f ", dist);
+		assert(std::fabs(dist - 1.0f) < tol);
+	}
+	printf("OK\n");
+}
+
+// Float reference: distance from p to the union of a triangle's three edges.
+static float ref_edges_distance(const float p[3], const float v[3][3]) {
+	float best = 1e30f;
+	for (int i = 0; i < 3; ++i) {
+		const float d[3] = {v[(i + 1) % 3][0] - v[i][0], v[(i + 1) % 3][1] - v[i][1], v[(i + 1) % 3][2] - v[i][2]};
+		static const float zero[3] = {0, 0, 0};
+		best = std::min(best, ref_segment_distance(p, zero, v[i], d));
+	}
+	return best;
+}
+
+// Degenerate triangles (math/triangle.h). Coincident vertices used to divide 0/0
+// on an edge branch — NaN weights in float, a saturated garbage weight in fixed —
+// and closest_segment_triangle then latched that NaN as its "best".
+template <typename T> static void test_degenerate_triangles(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  degenerate_triangles[%s]: ", label);
+	const float tol = std::is_same<T, fixed16>::value ? 1e-2f : 1e-3f;
+	// A==B, A==C, B==C, all three coincident, collinear (C between and C beyond).
+	const float tris[][3][3] = {
+	    {{0, 0, 0}, {0, 0, 0}, {1, 0, 0}},
+	    {{0, 0, 0}, {1, 0, 0}, {0, 0, 0}},
+	    {{0, 0, 0}, {1, 0, 0}, {1, 0, 0}},
+	    {{0.3f, 0.2f, 0.1f}, {0.3f, 0.2f, 0.1f}, {0.3f, 0.2f, 0.1f}},
+	    {{0, 0, 0}, {1, 0, 0}, {0.5f, 0, 0}},
+	    {{0, 0, 0}, {0.5f, 0, 0}, {1, 0, 0}},
+	};
+	const float pts[][3] = {{0.5f, 1, 0}, {-0.5f, 0.3f, 0.2f}, {1.7f, -0.4f, 0}, {0.25f, 0, 0.5f}, {0.5f, 0, 0}};
+	int checked = 0;
+	for (const auto & t : tris) {
+		const vec3<T> a = v3<T>(t[0][0], t[0][1], t[0][2]), b = v3<T>(t[1][0], t[1][1], t[1][2]),
+		              c = v3<T>(t[2][0], t[2][1], t[2][2]);
+		for (const auto & pf : pts) {
+			const vec3<T> p = v3<T>(pf[0], pf[1], pf[2]);
+			T w[3];
+			closest_point_triangle(p, a, b, c, w);
+			const float w0 = tr::to_float(w[0]), w1 = tr::to_float(w[1]), w2 = tr::to_float(w[2]);
+			assert(std::isfinite(w0) && std::isfinite(w1) && std::isfinite(w2));
+			assert(std::fabs(w0 + w1 + w2 - 1.0f) < tol);
+			vec3<T> cp;
+			closest_point_triangle(cp, p, a, b, c);
+			vec3<T> diff;
+			sub(diff, p, cp);
+			const float dist = tr::to_float(length(diff));
+			assert(std::fabs(dist - ref_edges_distance(pf, t)) < tol);
+
+			// Segment version: a short vertical segment starting at p, rising away.
+			vec3<T> q = p, cs, ct;
+			q.y = q.y + tr::from_milli(100);
+			const float d2 = tr::to_float(closest_segment_triangle(p, q, a, b, c, cs, ct, tr::from_milli(1)));
+			assert(std::isfinite(d2));
+			assert(d2 <= dist * dist + tol);
+			++checked;
+		}
+	}
+	// The GJK triangle step with a duplicated support point.
+	{
+		T w[3];
+		gjk_closest_triangle(v3<T>(1, 1, 0), v3<T>(1, 1, 0), v3<T>(-1, 1, 0), w);
+		const float w0 = tr::to_float(w[0]), w1 = tr::to_float(w[1]), w2 = tr::to_float(w[2]);
+		assert(std::isfinite(w0) && std::isfinite(w1) && std::isfinite(w2));
+		assert(std::fabs(w0 + w1 - 0.5f) < tol && std::fabs(w2 - 0.5f) < tol); // closest is (0,1,0)
+	}
+	printf("cases=%d OK\n", checked);
+}
+
 // Static rotation: a box solid rotated 90° about Y has its long (x) axis turned
 // into z, so a sphere swept in -x stops nearer than the unrotated box. Verifies
 // the orientation is honored AND that solid.orientation and shape.local_rotation
@@ -729,6 +923,8 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_gjk_penetration_reports<T>(label);
 	test_ca_custom_closest<T>(label);
 	test_triangle_primitives<T>(label);
+	test_segment_segment_closest<T>(label);
+	test_degenerate_triangles<T>(label);
 	test_gjk_solid_orientation<T>(label);
 	test_oriented_polytope<T>(label);
 	test_gjk_tetra_origin_outside<T>(label);
