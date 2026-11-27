@@ -83,14 +83,23 @@ inline void project(vec3<T> & point1, vec3<T> & point2, const segment<T> & seg1,
 			auto m1 = [](int32_t x) { return x < 0 ? 0u - static_cast<uint32_t>(x) : static_cast<uint32_t>(x); };
 			return m1(v.x.raw) | m1(v.y.raw) | m1(v.z.raw);
 		};
-		uint32_t m = mag(d1) | mag(d2) | mag(r);
-		int top = 0; // index of m's highest set bit
-		if (m >> 16) { m >>= 16; top += 16; }
-		if (m >> 8) { m >>= 8; top += 8; }
-		if (m >> 4) { m >>= 4; top += 4; }
-		if (m >> 2) { m >>= 2; top += 2; }
-		if (m >> 1) { top += 1; }
-		const int shift = fixed16::bits - top; // puts the top bit at 1.0
+		auto topbit = [](uint32_t m) { // index of m's highest set bit (0 for m == 0)
+			int top = 0;
+			if (m >> 16) { m >>= 16; top += 16; }
+			if (m >> 8) { m >>= 8; top += 8; }
+			if (m >> 4) { m >>= 4; top += 4; }
+			if (m >> 2) { m >>= 2; top += 2; }
+			if (m >> 1) { top += 1; }
+			return top;
+		};
+		// The offset r only enters the products to the first power (d = d1·r, e = d2·r),
+		// so scale on the directions alone: lift short ones into [1, 2), shrink long ones
+		// only past |d| >= 8, then cap the shift so r can't overflow.
+		const int kd = topbit(mag(d1) | mag(d2)) - fixed16::bits;
+		int shift = -kd;
+		if (shift < 0) shift = kd > 2 ? 2 - kd : 0;
+		const int topr = topbit(mag(r));
+		if (topr + shift > fixed16::bits + 8) shift = fixed16::bits + 8 - topr;
 		if (shift > 0) {
 			auto up = [shift](vec3<T> & v) { // shift as unsigned: `<<` on a negative is UB
 				v.x.raw = static_cast<int32_t>(static_cast<uint32_t>(v.x.raw) << shift);

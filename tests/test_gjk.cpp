@@ -613,6 +613,46 @@ template <typename T> static void test_segment_segment_closest(const char * labe
 	printf("sweep_worst=%.5f ", worst);
 	assert(worst < tol);
 
+	// Unbalanced inputs: one input far larger than the others. Scaling every input by
+	// the largest (offset included) shrank the short ones into fixed16's rounding: a
+	// 0.3 pair 10 apart was off by ~29 cm and a 0.6 pair 50 apart by ~59 cm, both fine
+	// on main. The first case is trace_capsule's call for a short spine and a fast move.
+	{
+		struct regime { const char * name; float l1, l2, sep; };
+		const regime regimes[] = { {"spine_vs_long_sweep", 0.1f, 10.0f, 0.5f}, {"short_far", 0.3f, 0.3f, 10.0f},
+			                       {"short_very_far", 0.6f, 0.6f, 50.0f} };
+		for (const regime & g : regimes) {
+			float w = 0;
+			for (int k = 0; k < 2000; ++k) {
+				float d1[3] = {rnd(), rnd(), rnd()}, d2[3] = {rnd(), rnd(), rnd()}, o1[3], o2[3];
+				const float n1 = sqrtf(d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2]) + 1e-6f;
+				const float n2 = sqrtf(d2[0] * d2[0] + d2[1] * d2[1] + d2[2] * d2[2]) + 1e-6f;
+				for (int i = 0; i < 3; ++i) {
+					o1[i] = lroundf(rnd() * 1000) / 1000.0f;
+					o2[i] = lroundf((o1[i] + rnd() * g.sep) * 1000) / 1000.0f;
+					d1[i] = lroundf(d1[i] / n1 * g.l1 * 1000) / 1000.0f;
+					d2[i] = lroundf(d2[i] / n2 * g.l2 * 1000) / 1000.0f;
+				}
+				// Measure the projected pair in float: at 10-50 apart fixed16's own length()
+				// error would swamp the projection's.
+				using tr = scalar_traits<T>;
+				segment<T> s1, s2;
+				s1.origin = v3<T>(o1[0], o1[1], o1[2]);
+				s1.direction = v3<T>(d1[0], d1[1], d1[2]);
+				s2.origin = v3<T>(o2[0], o2[1], o2[2]);
+				s2.direction = v3<T>(d2[0], d2[1], d2[2]);
+				vec3<T> p1, p2;
+				project(p1, p2, s1, s2, tr::from_milli(1));
+				const float dx = tr::to_float(p1.x) - tr::to_float(p2.x), dy = tr::to_float(p1.y) - tr::to_float(p2.y),
+				            dz = tr::to_float(p1.z) - tr::to_float(p2.z);
+				const float err = sqrtf(dx * dx + dy * dy + dz * dz) - ref_segment_distance(o1, d1, o2, d2);
+				w = std::max(w, std::fabs(err));
+			}
+			printf("%s=%.5f ", g.name, w);
+			assert(w < tol);
+		}
+	}
+
 	// Long segments: the degree-4 products overflowed fixed16 (40² · 40² ≫ 32767)
 	// before the power-of-two rescale; two perpendicular 40-long spines 1 apart.
 	{
