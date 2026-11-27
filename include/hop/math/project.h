@@ -71,8 +71,8 @@ inline void project(vec3<T> & point1, vec3<T> & point2, const segment<T> & seg1,
 	// The solve below forms degree-4 products of the inputs (a·c, b·e, ...). In
 	// fixed16 a 0.1-long segment leaves those only a few bits of precision, and a
 	// ~13-long one overflows them. The parameters u1/u2 are invariant under a
-	// uniform scale, so fixed16 rescales by a power of two to bring the largest
-	// input component into [1, 2) first — the same idea as gjk_fit_scale. float,
+	// uniform scale, so fixed16 rescales by a power of two first, sized on the
+	// segment directions (see below) — the same idea as gjk_fit_scale. float,
 	// double and fixed32 have the range and precision already and skip it.
 	vec3<T> r, d1 = seg1.direction, d2 = seg2.direction;
 	sub(r, seg1.origin, seg2.origin);
