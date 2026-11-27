@@ -6,10 +6,12 @@
 // Run in float, fixed16 and fixed32 so the fixed-point build is covered too.
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <type_traits>
+#include <vector>
 #include <hop/collide.h> // gjk_core_support / trace_pair_convex_gjk live here
 #include <hop/hop.h>
 
@@ -689,6 +691,65 @@ template <typename T> static void test_degenerate_triangles(const char * label) 
 	printf("cases=%d OK\n", checked);
 }
 
+// GJK stalls (#118). Clouds from a seeded random search, with exact distances
+// from a QP solve. On the old code the float cases spun to max_iter (a vertex
+// with weight below `epsilon` was dropped, so the same support came back each
+// iteration) and the fixed16 ones were off by 6-33 cm (a repeated support
+// point re-entered the simplex and corrupted v).
+struct gjk_cloud_case {
+	const char * what;
+	float dist; // exact distance from the origin to the hull
+	std::vector<std::array<float, 3>> pts;
+};
+static const std::vector<gjk_cloud_case> & gjk_cloud_cases() {
+	static const std::vector<gjk_cloud_case> cases = {
+	    {"float stall", 0.06771f, {{0.861f, -0.299f, -0.082f}, {0.088f, 0.239f, -0.16f}, {0.548f, -0.628f, 0.111f}, {0.559f, -0.496f, -0.212f}, {0.807f, 0.259f, 0.495f}, {0.966f, 0.014f, 0.272f}, {0.631f, -0.32f, -0.438f}, {0.021f, 0.151f, -0.308f}, {0.389f, -0.684f, -0.416f}, {0.785f, -0.351f, 0.07f}, {0.094f, -0.07f, 0.249f}, {0.211f, -0.043f, -0.114f}, {0.564f, -0.28f, 0.477f}}},
+	    {"float stall", 0.02360f, {{0.092f, 0.319f, -0.122f}, {-0.694f, -0.293f, 0.372f}, {-0.021f, 0.009f, 0.006f}, {-0.675f, 0.326f, 0.364f}, {-0.18f, -0.188f, 0.049f}, {0.135f, 0.273f, 0.205f}, {-0.613f, -0.494f, -0.101f}, {-0.236f, 0.207f, -0.237f}, {0.115f, 0.228f, 0.499f}, {-0.67f, 0.112f, 0.368f}, {-0.781f, 0.22f, -0.269f}, {-0.105f, -0.438f, 0.474f}, {-0.326f, -0.208f, 0.202f}, {-0.061f, 0.156f, 0.622f}}},
+	    {"fixed16 error 0.33", 0.44873f, {{0.495f, 0.685f, -0.369f}, {-0.656f, 1.295f, 0.951f}, {-1.586f, 3.654f, -0.219f}, {1.392f, 3.617f, 2.086f}, {0.968f, 0.056f, -1.028f}, {1.33f, 2.151f, 2.387f}, {-1.077f, 2.992f, 2.348f}, {-1.194f, 2.286f, 1.297f}, {-0.865f, 0.622f, -0.805f}, {0.163f, 3.802f, 1.23f}, {1.435f, 0.617f, 1.803f}, {0.686f, 3.098f, 1.488f}, {0.582f, 0.624f, 2.534f}, {-0.512f, 3.739f, 0.449f}}},
+	    {"fixed16 error 0.06", 0.84470f, {{-3.894f, -0.229f, 0.559f}, {-0.603f, -0.154f, 1.153f}, {-1.262f, 1.592f, 1.095f}, {-2.031f, 0.958f, -1.101f}, {-3.917f, -0.106f, 0.395f}, {-3.846f, 1.871f, 1.594f}, {-3.253f, 1.103f, -0.478f}, {-0.543f, -1.741f, -1.178f}, {-2.909f, -1.124f, 0.397f}, {-2.044f, -0.85f, 2.167f}, {-3.658f, -0.504f, 0.961f}, {-3.692f, 2.006f, 2.201f}, {-1.534f, -0.78f, 1.711f}, {-4.16f, 0.811f, -1.318f}, {-2.319f, 0.96f, -0.479f}}},
+	    {"fixed16 error 0.07", 1.51050f, {{0.424f, -0.137f, -1.887f}, {1.053f, -3.291f, 1.132f}, {3.787f, -2.622f, -1.876f}, {0.816f, -3.46f, -0.798f}, {0.97f, -0.379f, -1.701f}, {2.628f, -1.124f, 0.97f}, {4.128f, -2.711f, -1.173f}, {3.753f, -3.113f, -0.37f}, {2.166f, -3.768f, -1.236f}, {3.153f, -1.246f, -1.172f}, {3.772f, -2.166f, -2.007f}, {3.862f, -0.593f, -1.608f}, {0.832f, -3.53f, 1.183f}, {1.548f, -3.076f, 0.38f}, {4.124f, -3.574f, -1.348f}}},
+	    {"float stall", 1.85863f, {{1.233f, 3.022f, -2.83f}, {-1.502f, 1.491f, -3.729f}, {1.1f, 0.262f, -3.673f}, {-0.3f, 2.715f, -3.311f}, {-0.483f, -0.709f, -3.976f}, {-2.126f, 2.718f, -1.649f}, {-2.502f, 1.811f, -2.881f}, {-0.713f, -0.17f, -1.708f}, {0.459f, 1.623f, -4.911f}}},
+	};
+	return cases;
+}
+
+template <typename T> static void test_gjk_no_stall(const char * label) {
+	using tr = scalar_traits<T>;
+	printf("  gjk_no_stall[%s]: ", label);
+	const bool f16 = std::is_same<T, fixed16>::value;
+	for (const auto & c : gjk_cloud_cases()) {
+		std::vector<vec3<T>> pts;
+		for (const auto & p : c.pts)
+			pts.push_back(v3<T>(p[0], p[1], p[2]));
+		// Shape A is a point at the origin, so the Minkowski difference is the cloud.
+		auto sup_a = [](const vec3<T> &, vec3<T> & out) { out.reset(); };
+		auto sup_b = [&](const vec3<T> & d, vec3<T> & out) {
+			T best {};
+			bool have = false;
+			for (const auto & p : pts) {
+				T s = dot(p, d);
+				if (!have || s > best) { best = s; out = p; have = true; }
+			}
+		};
+		T dist;
+		vec3<T> n, zero;
+		zero.reset();
+		bool deep = false;
+		gjk_core_distance<T>(sup_a, sup_b, zero, zero, tr::from_milli(1), dist, n, deep);
+		assert(!deep);
+		const float d = tr::to_float(dist);
+		// Converged: |v| (an upper bound) meets the support lower bound along v̂ = -n.
+		float lower = 1e30f;
+		for (const auto & p : c.pts)
+			lower = std::min(lower, -(p[0] * tr::to_float(n.x) + p[1] * tr::to_float(n.y) + p[2] * tr::to_float(n.z)));
+		const float gap = d - lower;
+		if (!f16)
+			assert(gap <= 0.0025f + 0.001f * d);
+		assert(std::fabs(d - c.dist) < (f16 ? 0.02f : 0.002f));
+	}
+	printf("cases=%zu OK\n", gjk_cloud_cases().size());
+}
+
 // Static rotation: a box solid rotated 90° about Y has its long (x) axis turned
 // into z, so a sphere swept in -x stops nearer than the unrotated box. Verifies
 // the orientation is honored AND that solid.orientation and shape.local_rotation
@@ -925,6 +986,7 @@ template <typename T> static void run_gjk_tests(const char * label) {
 	test_triangle_primitives<T>(label);
 	test_segment_segment_closest<T>(label);
 	test_degenerate_triangles<T>(label);
+	test_gjk_no_stall<T>(label);
 	test_gjk_solid_orientation<T>(label);
 	test_oriented_polytope<T>(label);
 	test_gjk_tetra_origin_outside<T>(label);

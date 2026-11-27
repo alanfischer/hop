@@ -243,6 +243,18 @@ inline void gjk_core_distance(SupA && supportA, SupB && supportB, const vec3<T> 
 			return;
 		}
 
+		// A support point the simplex already holds means GJK is cycling: with
+		// fixed-point rounding the gap test above can miss by a few ulps, and
+		// re-adding the point only builds a degenerate simplex that corrupts v.
+		// The current v is the answer.
+		for (int i = 0; i < n; ++i) {
+			if (y[i].x == ny.x && y[i].y == ny.y && y[i].z == ny.z) {
+				dist = vlen;
+				finalize();
+				return;
+			}
+		}
+
 		// Add support point, then reduce to the closest feature.
 		y[n] = ny;
 		++n;
@@ -268,10 +280,15 @@ inline void gjk_core_distance(SupA && supportA, SupB && supportB, const vec3<T> 
 		}
 
 		// Compact in place to the supporting feature (write index m <= read i),
-		// then recompute v.
+		// then recompute v. Only a zero weight means a vertex isn't part of the
+		// closest feature. Don't cut at epsilon: that's a length, and bary is a
+		// unitless weight. A vertex far from the closest point can matter with a
+		// small weight (0.0006 × an edge of 0.6 moves v by ~0.4 mm), so dropping
+		// it left the simplex unchanged, the same support came back, and GJK spun
+		// to max_iter returning an over-estimated distance.
 		int m = 0;
 		for (int i = 0; i < n; ++i) {
-			if (bary[i] > epsilon) {
+			if (bary[i] > zero) {
 				y[m] = y[i];
 				bary[m] = bary[i];
 				++m;
