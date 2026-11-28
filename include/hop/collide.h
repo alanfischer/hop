@@ -823,7 +823,7 @@ template <typename T>
 inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
                                   solid<T> * s1, solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
                                   const vec3<T> & lp1, const vec3<T> & lp2,
-                                  T margin, T epsilon) {
+                                  T margin, T epsilon, bool discovery = false) {
 	using tr = scalar_traits<T>;
 	// Each shape's world rotation = solid_orientation · shape_local_rotation; its
 	// world origin = solid_position + solid_orientation · local_position. (For
@@ -903,7 +903,7 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 				    box_point_core_closest(p0, bbase, Rbox, RboxT, box, box_id, dist, n, deep, epsilon);
 			    if (!box_is_target)
 				    neg(n);
-		    });
+		    }, discovery);
 	} else if (Ra != identity || Rb != identity) {
 		// Oriented: bake each shape's rotation into its support (world-space).
 		mat3<T> Rat, Rbt;
@@ -911,12 +911,12 @@ inline bool trace_pair_gjk(collision<T> & col, const segment<T> & seg,
 		transpose(Rbt, Rb);
 		auto support_a = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh1, Ra, Rat, base_a, dir); };
 		auto support_b = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh2, Rb, Rbt, base_b, dir); };
-		gjk_sweep<T>(res, support_a, support_b, seg.direction, combined_radius, epsilon);
+		gjk_sweep<T>(res, support_a, support_b, seg.direction, combined_radius, epsilon, discovery);
 	} else {
 		// Identity fast path — no rotation math.
 		auto support_a = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh1, base_a, dir); };
 		auto support_b = [&](const vec3<T> & dir, vec3<T> & o) { gjk_core_support(o, sh2, base_b, dir); };
-		gjk_sweep<T>(res, support_a, support_b, seg.direction, combined_radius, epsilon);
+		gjk_sweep<T>(res, support_a, support_b, seg.direction, combined_radius, epsilon, discovery);
 	}
 	if (!res.valid)
 		return false;
@@ -1160,7 +1160,8 @@ inline void build_polytope_cso(convex_solid<T> & out, const world_polytope<T> & 
 template <typename T>
 inline void trace_pair_oriented_polytope(collision<T> & col, const segment<T> & seg,
                                          solid<T> * s1, solid<T> * s2, shape<T> * sh1, shape<T> * sh2,
-                                         const vec3<T> & lp1, const vec3<T> & lp2, T margin, T epsilon) {
+                                         const vec3<T> & lp1, const vec3<T> & lp2, T margin, T epsilon,
+                                         bool discovery = false) {
 	using tr = scalar_traits<T>;
 	mat3<T> R1, R2;
 	mul(R1, s1->get_orientation(), sh1->get_local_rotation());
@@ -1213,7 +1214,7 @@ inline void trace_pair_oriented_polytope(collision<T> & col, const segment<T> & 
 			    n.set(cso.planes[bi].normal); // outward from N = outward from B(target) toward A(mover)
 		    else
 			    n.reset();
-	    });
+	    }, discovery);
 	if (res.valid && res.hit) {
 		col.time = res.time;
 		col.normal.set(res.normal);
@@ -2388,7 +2389,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// is skipped when narrowphase is set cheap; either way we fall through to
 			// the per-pair fallback chain below.
 			else if (use_gjk && gjk_eligible_pair(sh1->get_type(), sh2->get_type())
-			         && trace_pair_gjk(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon)) {
+			         && trace_pair_gjk(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon, discovery)) {
 				// handled by GJK
 			}
 			// Oriented pairs. Everything below this point is axis-aligned Minkowski math
@@ -2403,7 +2404,7 @@ void test_solid(collision<T> & result, solid<T> * s1, const segment<T> & seg, so
 			// tests come first so an unrotated pair never pays for pair_is_oriented.
 			else if (is_polytope_shape(sh1->get_type()) && is_polytope_shape(sh2->get_type())
 			         && pair_is_oriented(s1, s2, sh1, sh2)) {
-				trace_pair_oriented_polytope(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon);
+				trace_pair_oriented_polytope(col, seg, s1, s2, sh1, sh2, lp1, lp2, margin, epsilon, discovery);
 			} else if (gjk_eligible_pair(sh1->get_type(), sh2->get_type())
 			           && pair_is_oriented(s1, s2, sh1, sh2)) {
 				if (is_rounded_shape(sh1->get_type()))

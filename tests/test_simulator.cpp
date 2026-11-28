@@ -2481,6 +2481,61 @@ template <typename T> static void test_touching_rounded_slides(const char * labe
 	printf("  touching_rounded_slides[%s]: OK\n", label);
 }
 
+// Speculative discovery inflates both shapes by speculative_margin, so a body anywhere
+// inside the margin of a wall must get a contact from a zero-length discovery query, at
+// depth = margin - gap. conservative_advance used to need the inflated shapes to overlap
+// by its 1 mm tolerance, so the outer 1 mm of the margin went undiscovered: half of
+// fixed-point's 1.95 mm margin (#124). Each mover kind here takes a different pair path:
+// sphere/capsule x box (analytic closest point), sphere x rotated box (oriented GJK),
+// box x rotated box (oriented polytope CSO). The wall is rotated about x, which keeps
+// its near face at x = 0.4 + gap.
+template <typename T> static void test_discovery_reaches_margin_edge(const char * label) {
+	using tr = scalar_traits<T>;
+	const char * names[] = { "sphere", "capsule", "sphere_rot", "box_rot" };
+	for (int kind = 0; kind < 4; ++kind) {
+		const T m = simulator<T>().get_config().speculative_margin;
+		const T half = tr::from_milli(400);
+		const bool rotated = kind >= 2;
+		bool ok = true;
+		float worst = 0;
+		for (int pct : { 50, 75, 90 }) {
+			simulator<T> sim;
+			const T gap = m * tr::from_int(pct) / tr::from_int(100);
+			auto wall = std::make_shared<solid<T>>();
+			wall->set_infinite_mass();
+			wall->add_shape(std::make_shared<shape<T>>(
+			    aa_box<T>(vec3<T>(-half, -tr::from_int(5), -tr::from_int(5)), vec3<T>(half, tr::from_int(5), tr::from_int(5)))));
+			wall->set_position(vec3<T>(half + gap + half, T {}, T {}));
+			if (rotated) {
+				mat3<T> r;
+				set_mat3_from_axis_angle(r, vec3<T>(tr::one(), T {}, T {}), tr::from_milli(500));
+				wall->set_orientation(r);
+			}
+			sim.add_solid(wall);
+			auto b = std::make_shared<solid<T>>();
+			b->set_mass(tr::one());
+			if (kind == 1)
+				b->add_shape(std::make_shared<shape<T>>(hop::capsule<T>({ T {}, T {}, -tr::from_milli(300) }, { T {}, T {}, tr::from_milli(600) }, half)));
+			else if (kind == 3)
+				b->add_shape(std::make_shared<shape<T>>(aa_box<T>(vec3<T>(-half, -half, -half), vec3<T>(half, half, half))));
+			else
+				b->add_shape(std::make_shared<shape<T>>(hop::sphere<T>(half)));
+			sim.add_solid(b);
+			collision<T> c;
+			segment<T> seg;
+			seg.set_start_end(vec3<T>(), vec3<T>());
+			sim.test_solid(c, b.get(), seg, wall.get(), m, intra_merge::average, /*discovery=*/true);
+			const float want = tr::to_float(m - gap), got = tr::to_float(c.depth);
+			// The depth is the margin left over (fixed16 rounds it by ~20 um).
+			const bool hit = c.time == T {} && got > 0;
+			worst = std::max(worst, std::fabs(got - want));
+			ok = ok && hit && std::fabs(got - want) < tr::to_float(m) / 16;
+		}
+		printf("  discovery_reaches_margin_edge[%s %s]: worst_depth_err=%.5f %s\n", label, names[kind], worst, ok ? "OK" : "FAIL");
+		assert(ok);
+	}
+}
+
 // A body touching a wall and more neighbours than its contact table holds must keep
 // the wall. A dynamic neighbour holds the same contact in its own table and the solve
 // builds the pair from either side, but the wall runs no discovery: evict its slot
@@ -2806,6 +2861,8 @@ int main() {
 	}
 	test_full_contact_table_keeps_the_wall<float>("float");
 	test_full_contact_table_keeps_the_wall<fixed32>("fixed32");
+	test_discovery_reaches_margin_edge<float>("float");
+	test_discovery_reaches_margin_edge<fixed32>("fixed32");
 	// ...and against manager-owned walls (a BSP level's case), which on main the crowd
 	// went 2 m through.
 	for (int kind = 0; kind < 2; ++kind) {
@@ -2815,6 +2872,7 @@ int main() {
 
 	printf("test_simulator (fixed16):\n");
 	test_dual_instantiation<fixed16>();
+	test_discovery_reaches_margin_edge<fixed16>("fixed16");
 	// Note: fixed16 gravity drop is more sensitive to overflow
 	// with large position values, so we test it carefully
 	{

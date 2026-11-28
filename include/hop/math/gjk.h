@@ -343,9 +343,17 @@ struct gjk_sweep_result {
 // the caller's choice — GJK simplex for general convex (gjk_sweep), or an
 // analytic segment-vs-triangle test for a trimesh. combined_radius is the sum of
 // the rounded margins (sphere/capsule radii) plus any query margin.
+//
+// `discovery` is speculative margin-shell discovery (see hop::test_solid): the
+// shapes arrive inflated by the speculative margin, so ANY overlap of the inflated
+// surfaces is a contact to report, whatever the motion. An exact swept query keeps
+// the -tol band instead, so a resting contact at ~zero overlap isn't reported as a
+// penetration to depenetrate. Using -tol for discovery too made the outer `tol`
+// (1 mm absolute) of the margin unreachable, which is half of fixed-point's
+// 1.95 mm margin (#124).
 template <typename T, typename ClosestFn>
 inline void conservative_advance(gjk_sweep_result<T> & res, const vec3<T> & motion,
-                                 T combined_radius, T epsilon, ClosestFn && closest) {
+                                 T combined_radius, T epsilon, ClosestFn && closest, bool discovery = false) {
 	using tr = scalar_traits<T>;
 	const T zero {};
 	const T one = tr::one();
@@ -393,8 +401,9 @@ inline void conservative_advance(gjk_sweep_result<T> & res, const vec3<T> & moti
 		// Genuine penetration (the rounded surfaces already overlap): report at the
 		// current TOI with the overlap depth so callers can depenetrate, regardless
 		// of motion direction. Advancement never steps into overlap, so this only
-		// fires at t == 0 (a body that starts the tick embedded).
-		if (sep < -tol) {
+		// fires at t == 0 (a body that starts the tick embedded). Discovery reports
+		// any overlap of the inflated surfaces (see `discovery` above).
+		if (discovery ? sep < zero : sep < -tol) {
 			res.hit = true;
 			res.time = t;
 			res.normal = n;
@@ -447,11 +456,11 @@ inline void conservative_advance(gjk_sweep_result<T> & res, const vec3<T> & moti
 // step. combined_radius is the sum of the rounded margins plus any query margin.
 template <typename T, typename SupA, typename SupB>
 inline void gjk_sweep(gjk_sweep_result<T> & res, SupA && supportA, SupB && supportB,
-                      const vec3<T> & motion, T combined_radius, T epsilon) {
+                      const vec3<T> & motion, T combined_radius, T epsilon, bool discovery = false) {
 	conservative_advance(res, motion, combined_radius, epsilon,
 	    [&](const vec3<T> & xA, const vec3<T> & seed, T & dist, vec3<T> & n, bool & deep) {
 		    gjk_core_distance<T>(supportA, supportB, xA, seed, epsilon, dist, n, deep);
-	    });
+	    }, discovery);
 }
 
 } // namespace hop
